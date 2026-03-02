@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Environments
+.env
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Checkpoints & data (large files — live on persistent storage)
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+
+# Claude
+.claude/

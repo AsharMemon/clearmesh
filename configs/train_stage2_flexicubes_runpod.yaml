@@ -1,0 +1,45 @@
+# ClearMesh Stage 2 Training Configuration — RunPod
+# Option C: Full Stage 2 DiT + FlexiCubes in training loop (best quality)
+#
+# Identical to train_stage2_flexicubes.yaml but with /workspace paths for RunPod.
+#
+# Usage:
+#   python -m clearmesh.stage2.train --config configs/train_stage2_flexicubes_runpod.yaml
+
+# === Data ===
+data_dir: /workspace/training_pairs
+resolution: 128                  # Voxel grid resolution (128^3)
+supervision_points: 1600000      # SDF supervision points per object
+
+# === Model ===
+voxel_dim: 32                    # Input voxel feature dimension
+model_dim: 512                   # Transformer hidden dimension
+num_heads: 8                     # Attention heads
+num_layers: 12                   # DiT blocks
+cond_dim: 768                    # DINO ViT-B conditioning feature dim
+
+# === Training ===
+batch_size: 4                    # A100 80GB can handle batch_size=4 at 128^3
+learning_rate: 0.0001            # AdamW base LR
+weight_decay: 0.01               # AdamW weight decay
+total_steps: 100000              # Total training steps
+max_grad_norm: 1.0               # Gradient clipping
+num_workers: 4                   # DataLoader workers
+
+# === FlexiCubes (Option C) ===
+flexicubes_interval: 10          # Run FlexiCubes extraction every N steps
+
+# === Loss Weights ===
+chamfer_weight: 1.0              # Chamfer distance
+normal_weight: 0.5               # Normal consistency
+edge_weight: 0.3                 # Edge sharpness (FlexiCubes-specific)
+watertight_weight: 0.2           # Watertight regularization
+sdf_weight: 1.0                  # Direct SDF supervision
+
+# === Checkpointing (Spot pod resilience) ===
+output_dir: /workspace/checkpoints/clearmesh_stage2
+save_interval: 1000              # Save checkpoint every N steps
+log_interval: 100                # Log losses every N steps
+
+# === Logging ===
+use_wandb: true                  # Enable WandB logging

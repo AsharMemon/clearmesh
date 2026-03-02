@@ -1,0 +1,41 @@
+# ClearMesh - 3D Generation Pipeline
+# Install in the 'clearmesh' conda environment on GCP VM
+
+# Core ML
+torch>=2.4.0
+torchvision>=0.19.0
+
+# 3D Mesh Processing
+trimesh>=4.0.0
+pymeshfix>=0.17.0
+open3d>=0.18.0
+
+# FlexiCubes via NVIDIA Kaolin
+# Install separately: pip install kaolin==0.17.0 -f https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.4.0_cu124.html
+
+# Image Processing
+Pillow>=10.0.0
+rembg>=2.0.50
+opencv-python>=4.8.0
+
+# Dataset
+objaverse>=0.1.7
+
+# HuggingFace (model downloads)
+huggingface_hub>=0.20.0
+transformers>=4.36.0
+
+# Training
+accelerate>=0.25.0
+wandb>=0.16.0
+pyyaml>=6.0
+
+# Visualization / Monitoring
+tqdm>=4.66.0
+matplotlib>=3.8.0
+
+# Mesh I/O
+pygltflib>=1.16.0
+
+# Scipy (mesh orientation, geometry ops)
+scipy>=1.11.0

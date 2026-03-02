@@ -1,0 +1,48 @@
+# ClearMesh Inference Configuration — RunPod
+#
+# Usage:
+#   python -m clearmesh.pipeline --input photo.png --config configs/inference_runpod.yaml
+
+# === Stage 1 (TRELLIS.2) ===
+resolution: 512                  # 512 (3s) | 1024 (17s) | 1536 (60s) on A100
+
+# === Stage 2 (Refinement) ===
+enable_refinement: true
+stage2_checkpoint: /workspace/checkpoints/clearmesh_stage2/checkpoint_final.pt
+refinement_steps: 50             # 50 = quality, 12 = fast
+
+# === Part Decomposition (optional, kitbashing) ===
+enable_decomposition: false
+partcrafter_path: /workspace/PartCrafter
+
+# === Geometry Super-Resolution (optional) ===
+enable_super_resolution: false
+supercarver_path: /workspace/SuperCarver
+craftsmanship_path: /workspace/CraftsMan3D
+
+# === Retopology (optional, clean topology for digital/game use) ===
+enable_retopology: false
+retopo_target_faces: 8000
+
+# === Mesh Processing ===
+export_format: glb               # stl | glb | obj | fbx
+
+# === PBR Textures (optional, digital variants) ===
+enable_textures: false
+
+# === Scaling (for 3D printing) ===
+target_scale: null               # 28mm | 32mm | 54mm | 75mm | null
+add_base: false
+hollow: false
+wall_thickness_mm: 1.5
+
+# === Print Readiness ===
+drain_holes: false
+orient_for_print: true
+
+# === Auto-Rigging (optional) ===
+enable_rigging: false
+rigging_method: puppeteer
+
+# === Background Removal ===
+skip_background_removal: false
