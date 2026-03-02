@@ -19,8 +19,9 @@ fi
 cd TRELLIS.2
 
 # Run TRELLIS.2 setup (installs custom CUDA kernels, dependencies)
+# Pipe 'yes' to auto-accept conda env creation prompts
 echo "Running TRELLIS.2 setup script..."
-. ./setup.sh --new-env --basic --flash-attn --nvdiffrast --nvdiffrec --cumesh --o-voxel --flexgemm
+yes | . ./setup.sh --new-env --basic --flash-attn --nvdiffrast --nvdiffrec --cumesh --o-voxel --flexgemm
 
 # Download pre-trained weights (~20GB from HuggingFace)
 echo "Downloading pre-trained TRELLIS.2-4B weights..."
