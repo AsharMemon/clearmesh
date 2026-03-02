@@ -61,14 +61,10 @@ echo ""
 
 # Step 1: Conda environments
 echo "=== Step 1/8: Setting up conda environments ==="
-bash "${SETUP_DIR}/setup_envs.sh"
+source "${SETUP_DIR}/setup_envs.sh"
 
-# Source conda so we can activate envs
-if [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
-    . "$HOME/miniconda3/etc/profile.d/conda.sh"
-elif command -v conda &>/dev/null; then
-    eval "$(conda shell.bash hook)"
-fi
+# Ensure conda is available in this shell after setup_envs.sh
+eval "$("$HOME/miniconda3/bin/conda" shell.bash hook)"
 
 conda activate clearmesh
 
@@ -152,4 +148,4 @@ echo "  conda activate clearmesh"
 echo "  python -m clearmesh.pipeline --input photo.png --output model.glb"
 echo ""
 echo "For training:"
-echo "  python -m clearmesh.stage2.train --config configs/train_stage2_flexicubes.yaml"
+echo "  python -m clearmesh.stage2.train --config configs/train_stage2_flexicubes_runpod.yaml"
