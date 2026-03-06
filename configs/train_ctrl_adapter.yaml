@@ -1,0 +1,35 @@
+# Ctrl-Adapter Training Configuration
+# Trains the normal-guided texture adapter for Easy3E editing pipeline
+#
+# The Ctrl-Adapter is the ONLY trainable component of Easy3E.
+# Everything else (VoxelFlowEdit, SLAT Repainting) is training-free.
+#
+# Usage:
+#   python -m clearmesh.editing.train_ctrl_adapter --config configs/train_ctrl_adapter.yaml
+
+# === Data ===
+data_dir: /workspace/data/ctrl_adapter        # 6-view RGB + normal pairs
+image_size: 512                                # Image resolution (square)
+num_views: 6                                   # Views per object
+
+# === Model ===
+in_channels: 3                                 # Normal map channels (RGB-encoded)
+base_channels: 64                              # Base feature channels
+num_levels: 4                                  # Multi-scale encoder levels
+blocks_per_level: 2                            # Adapter blocks per level
+
+# === Training ===
+batch_size: 4                                  # A100 80GB can handle 4 at 512x512
+learning_rate: 0.0001                          # AdamW base LR
+weight_decay: 0.01                             # AdamW weight decay
+total_steps: 20000                             # Total training steps (~20 GPU-hrs)
+max_grad_norm: 1.0                             # Gradient clipping
+num_workers: 4                                 # DataLoader workers
+
+# === Checkpointing ===
+output_dir: /workspace/checkpoints/ctrl_adapter
+save_interval: 1000                            # Save checkpoint every N steps
+log_interval: 50                               # Log losses every N steps
+
+# === Logging ===
+use_wandb: true                                # Enable WandB logging

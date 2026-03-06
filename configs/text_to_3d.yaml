@@ -1,0 +1,57 @@
+# Text-to-3D Configuration
+# Two-step: Text → FLUX.1-schnell → Image → ClearMesh pipeline → 3D model
+#
+# FLUX.1-schnell (Black Forest Labs):
+#   - 4-step generation (distilled model, no CFG needed)
+#   - Apache 2.0 license
+#   - State-of-the-art text-to-image quality
+#
+# Usage:
+#   from clearmesh.text_to_3d import TextTo3D
+#   gen = TextTo3D()
+#   result = gen.generate("a fierce dragon")
+#
+# CLI:
+#   python -m clearmesh.text_to_3d.generate --prompt "a red dragon" --output dragon.glb
+
+# === FLUX.1-schnell (Text → Image) ===
+flux:
+  model_id: black-forest-labs/FLUX.1-schnell
+  num_inference_steps: 4                       # 4 steps for schnell (distilled)
+  guidance_scale: 0.0                          # No CFG for schnell (already distilled)
+  width: 1024                                  # Image width
+  height: 1024                                 # Image height
+  dtype: bfloat16                              # Model precision
+
+# === Prompt Enhancement ===
+# These modifiers are auto-added to help generate 3D-friendly images
+prompt_enhancement:
+  enabled: true
+  modifiers:
+    - "3D render"
+    - "white background"
+    - "centered"
+    - "highly detailed"
+
+# === ClearMesh Pipeline (Image → 3D) ===
+# These are passed through to the ClearMesh generation pipeline
+pipeline:
+  resolution: 512                              # TRELLIS.2 resolution
+  enable_refinement: true                      # Stage 2 refinement
+  refinement_steps: 50                         # 50=quality, 12=fast
+  orient_for_print: true                       # Auto-orient for printing
+  export_format: glb                           # Default output format
+
+# === Optional Features ===
+enable_super_resolution: false                 # Geometry super-res
+enable_retopology: false                       # For digital/game-ready
+enable_textures: false                         # PBR textures
+
+# === Text-Guided Editing ===
+# For editing existing meshes with text instructions
+text_edit:
+  instruct_pix2pix_model: timbrooks/instruct-pix2pix
+  image_guidance_scale: 1.5
+  text_guidance_scale: 7.5
+  num_image_steps: 20
+  default_view: front                          # View to edit from

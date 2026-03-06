@@ -1,0 +1,50 @@
+# Easy3E Editing Configuration
+# Default parameters for 3D editing via Easy3E architecture
+#
+# Easy3E edits within TRELLIS.2's latent space (SLAT).
+# Geometry editing is TRAINING-FREE. Only Ctrl-Adapter needs training.
+#
+# Usage:
+#   from clearmesh.editing import Easy3EEditor
+#   editor = Easy3EEditor()
+#   result = editor.edit(source_mesh, edit_image)
+
+# === TRELLIS.2 Paths ===
+trellis2_dir: /workspace/TRELLIS.2
+model_dir: /workspace/models/trellis2-4b
+
+# === SLAT Encoder ===
+grid_size: 256                                 # O-Voxel grid resolution
+
+# === Voxel FlowEdit (training-free) ===
+flow_edit:
+  num_steps: 25                                # ODE integration steps
+  gamma: 1.0                                   # Trajectory correction strength
+  eta: 0.5                                     # Silhouette guidance strength
+  t_start: 0.5                                 # Start time (0=noise, 1=clean)
+  t_end: 1.0                                   # End time
+  guidance_scale: 7.5                          # CFG scale for flow model
+
+# === SLAT Repainting (training-free) ===
+repaint:
+  num_steps: 25                                # Flow ODE steps for features
+  guidance_scale: 7.5                          # CFG scale
+  blend_boundary: 2                            # Voxel dilation for boundary blending
+  boundary_noise_strength: 0.3                 # Noise at boundary for blending
+
+# === Ctrl-Adapter (trained) ===
+ctrl_adapter:
+  enabled: false                               # Set true once trained
+  checkpoint: /workspace/checkpoints/ctrl_adapter/checkpoint_final.pt
+  guidance_scale: 7.5
+
+# === InstructPix2Pix (for text-guided editing) ===
+instruct_pix2pix:
+  model_id: timbrooks/instruct-pix2pix
+  image_guidance_scale: 1.5                    # Source image fidelity (higher = less change)
+  guidance_scale: 7.5                          # Text guidance (higher = more change)
+  num_inference_steps: 20                      # Diffusion steps
+
+# === Post-processing ===
+enable_repair: true                            # PyMeshFix + Open3D repair
+export_format: glb                             # Default output format

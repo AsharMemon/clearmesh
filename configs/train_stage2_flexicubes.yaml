@@ -1,44 +1,61 @@
 # ClearMesh Stage 2 Training Configuration
-# Option C: Full Stage 2 DiT + FlexiCubes in training loop (best quality)
+# Architecture matched to TRELLIS.2 for pretrained weight loading
 #
 # Usage:
 #   python -m clearmesh.stage2.train --config configs/train_stage2_flexicubes.yaml
 
 # === Data ===
-data_dir: /mnt/data/training_pairs
+data_dir: /workspace/data/training_pairs
 resolution: 128                  # Voxel grid resolution (128^3)
-supervision_points: 1600000      # SDF supervision points per object
 
-# === Model ===
-voxel_dim: 32                    # Input voxel feature dimension
-model_dim: 512                   # Transformer hidden dimension
-num_heads: 8                     # Attention heads
-num_layers: 12                   # DiT blocks
-cond_dim: 768                    # DINO ViT-B conditioning feature dim
+# === Model (matched to TRELLIS.2 SLatFlowModel) ===
+voxel_dim: 32                    # TRELLIS.2 SLAT latent dim
+model_dim: 1536                  # TRELLIS.2 hidden dim
+num_heads: 12                    # TRELLIS.2 attention heads (head_dim=128)
+num_layers: 12                   # First 12 of TRELLIS.2's 30 blocks (~528M params)
+cond_dim: 1024                   # DINOv2-ViT-L / DINOv3 output dim
+mlp_ratio: 5.3334                # TRELLIS.2 FFN ratio (hidden=8192)
+
+# === Pretrained Backbone ===
+pretrained_checkpoint: /workspace/models/trellis2-4b/ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.safetensors
+use_checkpoint: true             # Gradient checkpointing (~60% VRAM savings)
 
 # === Training ===
-batch_size: 4                    # A100 80GB can handle batch_size=4 at 128^3
-learning_rate: 0.0001            # AdamW base LR
+batch_size: 4                    # A100 80GB with bf16 + grad checkpoint
+learning_rate: 0.00005           # 5e-5 for pretrained backbone; fresh heads get 5x
 weight_decay: 0.01               # AdamW weight decay
 total_steps: 100000              # Total training steps
 max_grad_norm: 1.0               # Gradient clipping
 num_workers: 4                   # DataLoader workers
 
-# === FlexiCubes (Option C) ===
-flexicubes_interval: 10          # Run FlexiCubes extraction every N steps
-                                 # (expensive; lower = better quality, slower training)
+# === SDF Imbalance Mitigation ===
+sdf_truncation: 0.1              # Clamp SDF to ±τ (ignore far-field empty space)
+sdf_surface_weight: 5.0          # Up-weight near-surface points in SDF loss
+near_surface_ratio: 0.6          # 60% supervision points sampled near surface
 
 # === Loss Weights ===
-chamfer_weight: 1.0              # Chamfer distance
-normal_weight: 0.5               # Normal consistency
-edge_weight: 0.3                 # Edge sharpness (FlexiCubes-specific)
-watertight_weight: 0.2           # Watertight regularization
-sdf_weight: 1.0                  # Direct SDF supervision
+sdf_weight: 1.0                  # Truncated, surface-weighted SDF L1
+eikonal_weight: 0.1              # |∇SDF| ≈ 1 regularisation
+chamfer_weight: 1.0              # Chamfer distance (FlexiCubes steps only)
+normal_weight: 0.5               # Normal consistency (FlexiCubes steps only)
+edge_weight: 0.3                 # Edge sharpness (FlexiCubes steps only)
+watertight_weight: 0.2           # Watertight regularisation (FlexiCubes steps only)
 
-# === Checkpointing (Spot VM resilience) ===
-output_dir: /mnt/data/checkpoints/clearmesh_stage2
+# === FlexiCubes ===
+flexicubes_interval: 10          # Run FlexiCubes extraction every N steps
+                                 # (expensive; lower = better quality, slower)
+
+# === Progressive Training Schedule ===
+# Gradually increase token count for stability (inspired by UltraShape)
+progressive_schedule:
+  - {step: 0,     num_tokens: 2048}    # Warm up with fewer tokens
+  - {step: 30000, num_tokens: 4096}    # Standard resolution
+  - {step: 70000, num_tokens: 8192}    # High detail (if VRAM permits)
+
+# === Checkpointing ===
+output_dir: /workspace/checkpoints/clearmesh_stage2
 save_interval: 1000              # Save checkpoint every N steps
 log_interval: 100                # Log losses every N steps
 
 # === Logging ===
-use_wandb: true                  # Enable WandB logging
+use_wandb: true
