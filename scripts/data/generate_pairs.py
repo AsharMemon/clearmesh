@@ -74,8 +74,9 @@ DEFAULT_BLENDER_SAMPLES = 16
 DEFAULT_MESH_PREP_MEMORY_LIMIT_GB = 96.0
 DEFAULT_MESH_PREP_TIMEOUT_SEC = 240
 
-MIN_COARSE_VERTS = 100
+MIN_COARSE_VERTS = 50
 MAX_COARSE_VERTS = 1_500_000
+DECIMATE_TARGET_FACES = 500_000  # Decimate over-vertex meshes instead of rejecting
 
 GENERATION_SEEDS = [42, 123, 456]
 MAX_VIEWS_TO_TRY = 4
@@ -83,10 +84,21 @@ INITIAL_RENDER_VIEWS = 4
 STRONG_SECONDARY_VIEW_SCORE = 0.20
 STRONG_SECONDARY_VIEW_MIN_FG = 0.12
 SECONDARY_VIEW_EXTRA_SEEDS = [123]
-MAX_RESCUE_CANDIDATES = 3
-MAX_RESCUE_ATTEMPTS = 4
+MAX_RESCUE_CANDIDATES = 1
+MAX_RESCUE_ATTEMPTS = 2
 MAX_CONSECUTIVE_EMPTY = 3  # Skip remaining attempts + rescue if first N all produce empty voxels
 RESCUE_TIGHT_ZOOM_SEEDS = [42, 123]
+
+# Primary TRELLIS sampler params — boost guidance for synthetic conditioning images
+DEFAULT_SPARSE_SAMPLER_PARAMS = {
+    "steps": 12,
+    "guidance_strength": 9.0,  # up from default 7.5
+}
+DEFAULT_SHAPE_SAMPLER_PARAMS = {
+    "steps": 12,
+    "guidance_strength": 4.5,  # up from default 3.0
+}
+
 RESCUE_SPARSE_SAMPLER_PARAMS = {
     "steps": 16,
     "guidance_strength": 9.0,
@@ -537,28 +549,32 @@ def compute_fit_distance(mesh, fov_deg: float = 40.0, fill_fraction: float = 0.7
 # ── Rendering ───────────────────────────────────────────────────────────────
 
 def prepare_render_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
-    """Return a render-safe copy with texture materials replaced by vertex/face colors.
+    """Return a render-safe copy with meaningful vertex colors for DINOv2.
 
-    Some Objaverse assets carry texture metadata that triggers repeated pyglet
-    GL errors during ``scene.save_image()``.  When the mesh already has usable
-    vertex or face colors (ColorVisuals), we keep them — they give DINOv2 more
-    signal than flat gray.  Only when the original visual is a TextureVisuals
-    (UV-mapped textures, material references) do we fall back to flat gray,
-    which avoids the pyglet GL failure path while keeping geometry intact.
+    Preserves existing vertex/face colors when they carry real variation.
+    Falls back to normal-based shading (not flat gray) so DINOv2 gets
+    geometric cues — concavities look dark, convexities look bright.
+    TextureVisuals (UV-mapped materials) are stripped to avoid pyglet GL errors.
     """
     render_mesh = mesh.copy()
     try:
         visual = render_mesh.visual
-        # If the mesh already carries simple vertex/face colors, keep them.
+        # If the mesh already carries varied vertex/face colors, keep them.
         if isinstance(visual, trimesh.visual.ColorVisuals):
-            return render_mesh
-        # TextureVisuals (or unknown) → replace with flat gray to avoid GL errors.
-        face_color = np.tile(
-            np.array([[200, 200, 200, 255]], dtype=np.uint8),
-            (len(render_mesh.faces), 1),
-        )
+            if hasattr(visual, "vertex_colors") and visual.vertex_colors is not None:
+                vc = visual.vertex_colors
+                if len(vc) > 0 and np.std(vc[:, :3].astype(float)) > 5.0:
+                    return render_mesh
+
+        # Fallback: normal-based shading gives DINOv2 geometric cues.
+        normals = render_mesh.vertex_normals
+        light_dir = np.array([0.5, 0.3, 0.8])
+        light_dir /= np.linalg.norm(light_dir)
+        diffuse = np.clip(normals @ light_dir, 0.15, 1.0)
+        colors = (diffuse[:, None] * np.array([[210, 210, 215]])).clip(0, 255).astype(np.uint8)
+        alpha = np.full((len(colors), 1), 255, dtype=np.uint8)
         render_mesh.visual = trimesh.visual.ColorVisuals(
-            mesh=render_mesh, face_colors=face_color,
+            mesh=render_mesh, vertex_colors=np.hstack([colors, alpha]),
         )
     except Exception:
         pass
@@ -570,7 +586,7 @@ def render_multiview(
     num_views: int = 12,
     image_size: int = 1024,
     views: list[tuple[float, float]] | None = None,
-    fill_fraction: float = 0.75,
+    fill_fraction: float = 0.85,
 ):
     """Render a pre-loaded mesh from multiple camera angles.
 
@@ -657,7 +673,7 @@ def render_multiview_blender_asset(
     num_views: int = 12,
     image_size: int = 1024,
     views: list[tuple[float, float]] | None = None,
-    fill_fraction: float = 0.75,
+    fill_fraction: float = 0.85,
 ):
     """Render a prepared asset through Blender Cycles in a short-lived subprocess."""
     views = views if views is not None else CAMERA_VIEWS[:num_views]
@@ -1635,16 +1651,29 @@ def generate_pairs(
                         pipeline, image, pipeline_type, seed=seed,
                         geometry_only=geometry_only,
                         verbose_trellis_progress=verbose_trellis_progress,
+                        sparse_structure_sampler_params=DEFAULT_SPARSE_SAMPLER_PARAMS,
+                        shape_slat_sampler_params=DEFAULT_SHAPE_SAMPLER_PARAMS,
                     )
 
                     n_verts = int(coarse.vertices.shape[0])
-                    if n_verts < MIN_COARSE_VERTS or n_verts > MAX_COARSE_VERTS:
+                    if n_verts < MIN_COARSE_VERTS:
                         del coarse
                         cleanup_memory(use_malloc_trim=use_malloc_trim)
                         consecutive_empty = 0  # Non-empty result resets counter
                         rss_post = get_rss_gb()
-                        print(f"    [trellis] v{view_idx}/s{seed} quality_reject verts={n_verts} RSS={rss_post:.1f}GiB (Δ={rss_post-rss_pre:+.1f})")
-                        continue  # Try next seed — quality too low/high
+                        print(f"    [trellis] v{view_idx}/s{seed} quality_reject verts={n_verts} (too sparse) RSS={rss_post:.1f}GiB (Δ={rss_post-rss_pre:+.1f})")
+                        continue
+
+                    if n_verts > MAX_COARSE_VERTS:
+                        # Decimate instead of rejecting — these are usable pairs
+                        verts = coarse.vertices.cpu().numpy() if torch.is_tensor(coarse.vertices) else coarse.vertices
+                        faces = coarse.faces.cpu().numpy() if torch.is_tensor(coarse.faces) else coarse.faces
+                        coarse_tri = trimesh.Trimesh(vertices=verts, faces=faces)
+                        coarse_tri = coarse_tri.simplify_quadric_decimation(DECIMATE_TARGET_FACES)
+                        coarse = coarse_tri
+                        n_verts = int(coarse.vertices.shape[0])
+                        consecutive_empty = 0
+                        print(f"    [trellis] v{view_idx}/s{seed} decimated to verts={n_verts}")
 
                     # ── Save pair ──
                     pair_dir = save_pair(coarse, mesh_path, shard_output_dir, uid)
