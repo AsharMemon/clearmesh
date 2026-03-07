@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ClearMesh - Pair Generation</title>
+<style>
+  :root {
+    --bg: #0d1117; --card: #161b22; --border: #30363d;
+    --text: #e6edf3; --dim: #8b949e; --accent: #58a6ff;
+    --green: #3fb950; --yellow: #d29922; --red: #f85149;
+    --bar-bg: #21262d; --bar-fill: #58a6ff;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--text); padding: 24px;
+    min-height: 100vh;
+  }
+  .container { max-width: 960px; margin: 0 auto; }
+  header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 32px; }
+  h1 { font-size: 24px; font-weight: 600; }
+  h1 span { color: var(--accent); }
+  .updated { color: var(--dim); font-size: 13px; }
+  .updated .live { display: inline-block; width: 8px; height: 8px; background: var(--green); border-radius: 50%; margin-right: 6px; animation: pulse 2s infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  /* Overall progress */
+  .overall { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 24px; margin-bottom: 24px; }
+  .overall-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 16px; }
+  .overall-header h2 { font-size: 18px; font-weight: 600; }
+  .overall-pct { font-size: 32px; font-weight: 700; color: var(--accent); }
+  .progress-bar { background: var(--bar-bg); border-radius: 8px; height: 24px; overflow: hidden; position: relative; }
+  .progress-fill { height: 100%; border-radius: 8px; transition: width 0.8s ease; background: linear-gradient(90deg, #1f6feb, var(--accent)); }
+  .progress-fill.low { background: linear-gradient(90deg, #b62324, var(--red)); }
+  .progress-fill.med { background: linear-gradient(90deg, #9e6a03, var(--yellow)); }
+  .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 16px; margin-top: 20px; }
+  .stat { text-align: center; }
+  .stat-value { font-size: 24px; font-weight: 700; }
+  .stat-value.green { color: var(--green); }
+  .stat-value.yellow { color: var(--yellow); }
+  .stat-value.red { color: var(--red); }
+  .stat-value.accent { color: var(--accent); }
+  .stat-label { font-size: 12px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
+
+  /* Shards grid */
+  .shards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .shard-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
+  .shard-title { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+  .shard-title h3 { font-size: 15px; font-weight: 600; }
+  .shard-badge { font-size: 11px; padding: 2px 8px; border-radius: 12px; font-weight: 500; }
+  .shard-badge.running { background: rgba(63,185,80,0.15); color: var(--green); }
+  .shard-badge.loading { background: rgba(210,153,34,0.15); color: var(--yellow); }
+  .shard-badge.offline { background: rgba(248,81,73,0.15); color: var(--red); }
+  .shard-bar { height: 6px; border-radius: 3px; margin-bottom: 14px; }
+  .shard-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .shard-stat { font-size: 13px; }
+  .shard-stat .label { color: var(--dim); }
+  .shard-stat .val { font-weight: 600; float: right; }
+
+  /* TRELLIS section */
+  .trellis { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 24px; }
+  .trellis h2 { font-size: 18px; font-weight: 600; margin-bottom: 16px; }
+  .trellis-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+  .trellis-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--border); }
+  .trellis-item:last-child { border-bottom: none; }
+  .trellis-label { font-size: 13px; color: var(--dim); }
+  .trellis-val { font-size: 14px; font-weight: 600; }
+  .hit-rate { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 13px; font-weight: 600; }
+  .hit-rate.good { background: rgba(63,185,80,0.15); color: var(--green); }
+  .hit-rate.ok { background: rgba(210,153,34,0.15); color: var(--yellow); }
+  .hit-rate.bad { background: rgba(248,81,73,0.15); color: var(--red); }
+
+  .no-data { text-align: center; color: var(--dim); padding: 60px 20px; font-size: 15px; }
+  .no-data p { margin-top: 8px; }
+
+  footer { text-align: center; color: var(--dim); font-size: 12px; margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--border); }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1><span>ClearMesh</span> Pair Generation</h1>
+    <div class="updated" id="updated"></div>
+  </header>
+
+  <div id="content"><div class="no-data"><p>Loading...</p></div></div>
+
+  <footer>Auto-refreshes every 60s &middot; Data pushed from pods every 5 min</footer>
+</div>
+
+<script>
+const STATUS_URL = 'status.json';
+
+function fmtDuration(secs) {
+  if (!secs || secs <= 0) return '--';
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  if (h > 0) return `${h}h ${String(m).padStart(2,'0')}m`;
+  const s = Math.floor(secs % 60);
+  return `${m}m ${String(s).padStart(2,'0')}s`;
+}
+
+function fmtNum(n) {
+  return n != null ? n.toLocaleString() : '--';
+}
+
+function hitRateClass(pct) {
+  if (pct >= 30) return 'good';
+  if (pct >= 15) return 'ok';
+  return 'bad';
+}
+
+function barClass(pct) {
+  if (pct >= 30) return '';
+  if (pct >= 10) return 'med';
+  return 'low';
+}
+
+function render(data) {
+  const { total_models, total_completed, total_failed, total_remaining, combined_rate, eta_seconds, eta_date, generated_at, shards } = data;
+  const pct = total_models > 0 ? (total_completed / total_models * 100) : 0;
+  const elapsed = data.elapsed_seconds;
+
+  let html = `
+    <div class="overall">
+      <div class="overall-header">
+        <h2>Overall Progress</h2>
+        <div class="overall-pct">${pct.toFixed(1)}%</div>
+      </div>
+      <div class="progress-bar"><div class="progress-fill ${barClass(pct)}" style="width:${Math.max(0.5, pct)}%"></div></div>
+      <div class="stats-row">
+        <div class="stat"><div class="stat-value green">${fmtNum(total_completed)}</div><div class="stat-label">Completed</div></div>
+        <div class="stat"><div class="stat-value red">${fmtNum(total_failed)}</div><div class="stat-label">Failed</div></div>
+        <div class="stat"><div class="stat-value">${fmtNum(total_remaining)}</div><div class="stat-label">Remaining</div></div>
+        <div class="stat"><div class="stat-value accent">${combined_rate ? combined_rate.toFixed(1) + '/hr' : '--'}</div><div class="stat-label">Rate</div></div>
+        <div class="stat"><div class="stat-value yellow">${fmtDuration(eta_seconds)}</div><div class="stat-label">ETA</div></div>
+      </div>
+    </div>
+
+    <div class="shards">
+  `;
+
+  for (const s of shards) {
+    const sPct = s.total > 0 ? (s.completed / s.total * 100) : 0;
+    const status = s.rate > 0 ? 'running' : (s.models_in_run > 0 ? 'loading' : 'offline');
+    const statusLabel = status.charAt(0).toUpperCase() + status.slice(1);
+
+    html += `
+      <div class="shard-card">
+        <div class="shard-title">
+          <h3>Shard ${s.id}</h3>
+          <span class="shard-badge ${status}">${statusLabel}</span>
+        </div>
+        <div class="progress-bar shard-bar"><div class="progress-fill ${barClass(sPct)}" style="width:${Math.max(0.5, sPct)}%"></div></div>
+        <div class="shard-stats">
+          <div class="shard-stat"><span class="label">Done</span><span class="val">${fmtNum(s.completed)}</span></div>
+          <div class="shard-stat"><span class="label">Left</span><span class="val">${fmtNum(s.remaining)}</span></div>
+          <div class="shard-stat"><span class="label">Rate</span><span class="val">${s.rate ? s.rate.toFixed(1) + '/hr' : '--'}</span></div>
+          <div class="shard-stat"><span class="label">RSS</span><span class="val">${s.rss_last ? s.rss_last.toFixed(1) + 'G' : '--'}</span></div>
+          <div class="shard-stat"><span class="label">Backend</span><span class="val">${s.backend || '--'}</span></div>
+          <div class="shard-stat"><span class="label">Attn</span><span class="val">${s.attn || '--'}</span></div>
+        </div>
+      </div>
+    `;
+  }
+
+  html += `</div><div class="trellis"><h2>TRELLIS.2 Stats (current run)</h2>`;
+
+  for (const s of shards) {
+    const hitPct = s.trellis_attempts > 0 ? (s.trellis_successes / s.trellis_attempts * 100) : 0;
+    html += `
+      <div class="trellis-item">
+        <span class="trellis-label">Shard ${s.id}</span>
+        <span class="trellis-val">${s.trellis_attempts || 0} attempts, ${s.trellis_successes || 0} hits, ${s.trellis_empties || 0} empties</span>
+        <span class="hit-rate ${hitRateClass(hitPct)}">${s.trellis_attempts > 0 ? hitPct.toFixed(0) + '%' : '--'}</span>
+      </div>
+    `;
+  }
+
+  html += `</div>`;
+
+  document.getElementById('content').innerHTML = html;
+
+  // Updated time
+  const ago = Math.floor((Date.now() - new Date(generated_at).getTime()) / 1000);
+  const agoStr = ago < 60 ? `${ago}s ago` : ago < 3600 ? `${Math.floor(ago/60)}m ago` : `${Math.floor(ago/3600)}h ago`;
+  document.getElementById('updated').innerHTML = `<span class="live"></span> Updated ${agoStr}`;
+}
+
+async function refresh() {
+  try {
+    const res = await fetch(STATUS_URL + '?t=' + Date.now());
+    if (!res.ok) throw new Error(res.status);
+    const data = await res.json();
+    render(data);
+  } catch (e) {
+    document.getElementById('updated').innerHTML = `<span style="color:var(--red)">Failed to load status.json</span>`;
+  }
+}
+
+refresh();
+setInterval(refresh, 60000);
+</script>
+</body>
+</html>
