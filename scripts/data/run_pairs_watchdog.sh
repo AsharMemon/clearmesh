@@ -16,12 +16,13 @@ TRELLIS2_DIR="${TRELLIS2_DIR:-/workspace/TRELLIS.2}"
 MODEL_DIR="${MODEL_DIR:-/workspace/models/trellis2-4b}"
 PIPELINE_TYPE="${PIPELINE_TYPE:-512}"
 RENDER_SIZE="${RENDER_SIZE:-1024}"
-NUM_VIEWS="${NUM_VIEWS:-8}"
+NUM_VIEWS="${NUM_VIEWS:-6}"
+RENDER_BACKEND="${RENDER_BACKEND:-trimesh}"
 LOG_RSS_EVERY="${LOG_RSS_EVERY:-10}"
-RSS_HARD_LIMIT_GB="${RSS_HARD_LIMIT_GB:-46}"
+RSS_HARD_LIMIT_GB="${RSS_HARD_LIMIT_GB:-200}"
 RSS_EMERGENCY_LIMIT_GB="${RSS_EMERGENCY_LIMIT_GB:-$RSS_HARD_LIMIT_GB}"
 RSS_WATCH_INTERVAL_SEC="${RSS_WATCH_INTERVAL_SEC:-0.25}"
-MAX_MODELS_PER_RUN="${MAX_MODELS_PER_RUN:-120}"
+MAX_MODELS_PER_RUN="${MAX_MODELS_PER_RUN:-250}"
 MAX_EMERGENCY_RECYCLES_PER_UID="${MAX_EMERGENCY_RECYCLES_PER_UID:-3}"
 RECYCLE_EXIT_CODE="${RECYCLE_EXIT_CODE:-75}"
 RESTART_SLEEP_SEC="${RESTART_SLEEP_SEC:-8}"
@@ -29,6 +30,17 @@ ATTN_BACKEND="${ATTN_BACKEND:-flash_attn}"
 SPARSE_ATTN_BACKEND="${SPARSE_ATTN_BACKEND:-$ATTN_BACKEND}"
 CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-12.4}"
 HF_HOME="${HF_HOME:-/workspace/.cache/hf}"
+TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-/workspace/.cache/triton}"
+TORCH_HOME="${TORCH_HOME:-/workspace/.cache/torch}"
+TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR:-/workspace/.cache/torchinductor}"
+CUDA_CACHE_PATH="${CUDA_CACHE_PATH:-/workspace/.cache/nv/ComputeCache}"
+PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-/workspace/.cache/pycache}"
+BLENDER_BIN="${BLENDER_BIN:-/workspace/tools/blender-3.0.1-linux-x64/blender}"
+BLENDER_SAMPLES="${BLENDER_SAMPLES:-16}"
+MESH_PREP_MEMORY_LIMIT_GB="${MESH_PREP_MEMORY_LIMIT_GB:-96}"
+MESH_PREP_TIMEOUT_SEC="${MESH_PREP_TIMEOUT_SEC:-240}"
+CLEARMESH_PREP_TMPDIR="${CLEARMESH_PREP_TMPDIR:-/workspace/.cache/prepared_meshes/shard_${SHARD_ID}}"
+CLEARMESH_BLENDER_TMPDIR="${CLEARMESH_BLENDER_TMPDIR:-/workspace/.cache/blender_renders/shard_${SHARD_ID}}"
 
 attempt=0
 while true; do
@@ -58,24 +70,39 @@ PY
 
   # Keep root disk stable across long restart loops.
   rm -rf "/tmp/shard_${SHARD_ID}_cache" "/tmp/xvfb-run."* 2>/dev/null || true
-  mkdir -p "${HF_HOME}"
+  rm -rf /tmp/pip-* /root/.cache/pip /root/.triton /root/.cache/torch_extensions /root/.nv/ComputeCache 2>/dev/null || true
+  rm -rf "${CLEARMESH_PREP_TMPDIR}" "${CLEARMESH_BLENDER_TMPDIR}" 2>/dev/null || true
+  mkdir -p "${HF_HOME}" "${TRITON_CACHE_DIR}" "${TORCH_HOME}" "${TORCHINDUCTOR_CACHE_DIR}" "${CUDA_CACHE_PATH}" "${PYTHONPYCACHEPREFIX}" "${CLEARMESH_PREP_TMPDIR}" "${CLEARMESH_BLENDER_TMPDIR}"
 
   echo "[$ts] shard=${SHARD_ID} attempt=${attempt} starting"
   echo "[$ts] shard=${SHARD_ID} attention backends: dense=${ATTN_BACKEND} sparse=${SPARSE_ATTN_BACKEND}"
+  echo "[$ts] shard=${SHARD_ID} render backend: ${RENDER_BACKEND}"
 
   MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}" \
   ATTN_BACKEND="${ATTN_BACKEND}" SPARSE_ATTN_BACKEND="${SPARSE_ATTN_BACKEND}" \
   CUDA_HOME="${CUDA_HOME}" PATH="${CUDA_HOME}/bin:${PATH}" \
   LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}" \
   HF_HOME="${HF_HOME}" \
+  TRITON_CACHE_DIR="${TRITON_CACHE_DIR}" \
+  TORCH_HOME="${TORCH_HOME}" \
+  TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR}" \
+  CUDA_CACHE_PATH="${CUDA_CACHE_PATH}" \
+  PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX}" \
+  CLEARMESH_PREP_TMPDIR="${CLEARMESH_PREP_TMPDIR}" \
+  CLEARMESH_BLENDER_TMPDIR="${CLEARMESH_BLENDER_TMPDIR}" \
   xvfb-run -a python -u scripts/data/generate_pairs.py \
     --input_json "${INPUT_JSON}" \
     --output_dir "${OUTPUT_DIR}" \
     --pipeline_type "${PIPELINE_TYPE}" \
     --render_size "${RENDER_SIZE}" \
     --num_views "${NUM_VIEWS}" \
+    --render_backend "${RENDER_BACKEND}" \
     --trellis2_dir "${TRELLIS2_DIR}" \
     --model_dir "${MODEL_DIR}" \
+    --blender_bin "${BLENDER_BIN}" \
+    --blender_samples "${BLENDER_SAMPLES}" \
+    --mesh_prep_memory_limit_gb "${MESH_PREP_MEMORY_LIMIT_GB}" \
+    --mesh_prep_timeout_sec "${MESH_PREP_TIMEOUT_SEC}" \
     --shard_id "${SHARD_ID}" \
     --num_shards "${NUM_SHARDS}" \
     --gpu 0 \

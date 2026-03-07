@@ -28,3 +28,6 @@ Thumbs.db
 
 # Claude
 .claude/
+
+# Local Codex automation/report config
+.codex/

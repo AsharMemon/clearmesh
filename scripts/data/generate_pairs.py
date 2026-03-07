@@ -42,11 +42,14 @@ Usage:
 """
 
 import argparse
+import contextlib
 import ctypes
 import gc
 import json
 import math
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -64,13 +67,34 @@ from tqdm import tqdm
 
 # ── Constants ───────────────────────────────────────────────────────────────
 
-GREEN_BG = [0, 255, 0, 255]
+TRANSPARENT_BG = [0, 0, 0, 0]
+DEFAULT_RENDER_BACKEND = "trimesh"
+DEFAULT_BLENDER_BIN = "/workspace/tools/blender-3.0.1-linux-x64/blender"
+DEFAULT_BLENDER_SAMPLES = 16
+DEFAULT_MESH_PREP_MEMORY_LIMIT_GB = 96.0
+DEFAULT_MESH_PREP_TIMEOUT_SEC = 240
 
 MIN_COARSE_VERTS = 100
 MAX_COARSE_VERTS = 1_500_000
 
 GENERATION_SEEDS = [42, 123, 456]
-MAX_VIEWS_TO_TRY = 2
+MAX_VIEWS_TO_TRY = 4
+INITIAL_RENDER_VIEWS = 4
+STRONG_SECONDARY_VIEW_SCORE = 0.20
+STRONG_SECONDARY_VIEW_MIN_FG = 0.12
+SECONDARY_VIEW_EXTRA_SEEDS = [123]
+MAX_RESCUE_CANDIDATES = 3
+MAX_RESCUE_ATTEMPTS = 4
+RESCUE_TIGHT_ZOOM_SEEDS = [42, 123]
+RESCUE_SPARSE_SAMPLER_PARAMS = {
+    "steps": 16,
+    "guidance_strength": 9.0,
+}
+RESCUE_SHAPE_SAMPLER_PARAMS = {
+    "steps": 14,
+    "guidance_strength": 8.0,
+}
+RESCUE_PITCH_SHIFTS = [20.0, -20.0]
 
 DEFAULT_MIN_FG_FRAC = 0.05   # Lowered from 0.08: thin/flat meshes need lower threshold
 DEFAULT_MAX_FG_FRAC = 0.85
@@ -82,6 +106,17 @@ CAMERA_VIEWS = [
 ]
 
 CURRENT_MODEL_NONE = {"uid": None, "path": None, "phase": "idle"}
+
+
+@contextlib.contextmanager
+def suppress_output(enabled: bool = True):
+    """Temporarily silence noisy inner progress bars/warnings."""
+    if not enabled:
+        yield
+        return
+    with open(os.devnull, "w") as devnull:
+        with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+            yield
 
 
 def get_rss_gb() -> float:
@@ -116,6 +151,15 @@ def malloc_trim() -> None:
         ctypes.CDLL("libc.so.6").malloc_trim(0)
     except Exception:
         pass
+
+
+def cleanup_memory(use_malloc_trim: bool = True) -> None:
+    """Force best-effort CPU/GPU allocator cleanup."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    if use_malloc_trim:
+        malloc_trim()
 
 
 class RssWatchdog:
@@ -226,6 +270,14 @@ FAIL_TRELLIS_OOM       = "TRELLIS_OOM"
 FAIL_TRELLIS_ERROR     = "TRELLIS_ERROR"
 FAIL_QUALITY_REJECT    = "QUALITY_REJECT"
 FAIL_RSS_RECYCLE       = "RSS_EMERGENCY_RECYCLE"
+FAIL_MESH_TOO_LARGE    = "MESH_FILE_TOO_LARGE"
+FAIL_MESH_TOO_COMPLEX  = "MESH_TOO_COMPLEX"
+FAIL_MESH_PREP_TIMEOUT = "MESH_PREP_TIMEOUT"
+
+# Skip model files larger than this (bytes). Very large files cause huge RSS
+# spikes during trimesh.load() and rarely produce useful TRELLIS results.
+MAX_MESH_FILE_BYTES = 500 * 1024 * 1024  # 500 MB
+MAX_MESH_FACES = 750_000
 
 
 # ── Cache Isolation ─────────────────────────────────────────────────────────
@@ -271,6 +323,14 @@ def load_mesh_robust(mesh_path: str):
     if not os.path.exists(mesh_path):
         return None, FAIL_FILE_NOT_FOUND
 
+    # Skip extremely large files that cause RSS spikes during loading
+    try:
+        file_size = os.path.getsize(mesh_path)
+        if file_size > MAX_MESH_FILE_BYTES:
+            return None, FAIL_MESH_TOO_LARGE
+    except OSError:
+        pass
+
     try:
         loaded = trimesh.load(mesh_path)
     except Exception as e:
@@ -285,8 +345,12 @@ def load_mesh_robust(mesh_path: str):
         if len(meshes) == 1:
             loaded = meshes[0]
         else:
+            total_faces = sum(len(m.faces) for m in meshes)
             try:
-                loaded = trimesh.util.concatenate(meshes)
+                if total_faces > MAX_MESH_FACES:
+                    loaded = max(meshes, key=lambda m: len(m.faces))
+                else:
+                    loaded = trimesh.util.concatenate(meshes)
             except Exception:
                 # If concat fails, use the largest mesh
                 loaded = max(meshes, key=lambda m: len(m.faces))
@@ -300,6 +364,9 @@ def load_mesh_robust(mesh_path: str):
 
     if len(loaded.vertices) == 0 or len(loaded.faces) == 0:
         return None, FAIL_MESH_EMPTY
+
+    if len(loaded.faces) > MAX_MESH_FACES:
+        return None, FAIL_MESH_TOO_COMPLEX
 
     # Check for degenerate geometry
     if np.any(~np.isfinite(loaded.vertices)):
@@ -330,6 +397,79 @@ def load_mesh_robust(mesh_path: str):
     loaded.vertices /= max_extent
 
     return loaded, None
+
+
+def prepare_mesh_asset_subprocess(
+    mesh_path: str,
+    shard_id: int,
+    memory_limit_gb: float,
+    timeout_sec: int,
+) -> tuple[str | None, str | None, Path | None, dict]:
+    """Normalize and strip the source mesh in an isolated subprocess.
+
+    This prevents pathological `trimesh.load()` calls from polluting the
+    long-lived TRELLIS worker RSS. The child process writes a single prepared
+    GLB, plus a small metadata JSON describing success or failure.
+    """
+    prep_root = Path(
+        os.environ.get(
+            "CLEARMESH_PREP_TMPDIR",
+            f"/workspace/.cache/prepared_meshes/shard_{shard_id}",
+        )
+    )
+    prep_root.mkdir(parents=True, exist_ok=True)
+    workdir = Path(tempfile.mkdtemp(prefix="meshprep_", dir=str(prep_root)))
+    asset_path = workdir / "prepared.glb"
+    meta_path = workdir / "meta.json"
+    helper = Path(__file__).with_name("prepare_mesh_asset.py")
+    cmd = [
+        sys.executable,
+        str(helper),
+        "--mesh",
+        mesh_path,
+        "--output",
+        str(asset_path),
+        "--meta",
+        str(meta_path),
+        "--max-file-bytes",
+        str(MAX_MESH_FILE_BYTES),
+        "--max-faces",
+        str(MAX_MESH_FACES),
+        "--memory-limit-gb",
+        str(memory_limit_gb),
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=max(timeout_sec, 1),
+        )
+    except subprocess.TimeoutExpired:
+        shutil.rmtree(workdir, ignore_errors=True)
+        return None, FAIL_MESH_PREP_TIMEOUT, None, {}
+
+    meta: dict = {}
+    if meta_path.exists():
+        try:
+            with open(meta_path) as f:
+                meta = json.load(f)
+        except Exception:
+            meta = {}
+
+    if result.returncode != 0 or not asset_path.exists():
+        fail_reason = meta.get("reason") or FAIL_MESH_LOAD
+        stderr_tail = "\n".join((result.stderr or "").splitlines()[-8:])
+        stdout_tail = "\n".join((result.stdout or "").splitlines()[-8:])
+        if stderr_tail or stdout_tail:
+            print(
+                "    [mesh_prep] failed: "
+                + " | ".join(part for part in [stderr_tail, stdout_tail] if part)
+            )
+        shutil.rmtree(workdir, ignore_errors=True)
+        return None, fail_reason, None, meta
+
+    return str(asset_path), None, workdir, meta
 
 
 # ── Fit-to-View Camera ─────────────────────────────────────────────────────
@@ -395,7 +535,29 @@ def compute_fit_distance(mesh, fov_deg: float = 40.0, fill_fraction: float = 0.7
 
 # ── Rendering ───────────────────────────────────────────────────────────────
 
-def render_multiview(mesh, num_views: int = 12, image_size: int = 1024):
+def prepare_render_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    """Return a render-safe copy with texture materials stripped.
+
+    Some Objaverse assets carry texture metadata that triggers repeated pyglet
+    GL errors during `scene.save_image()`. Rendering with flat face colors keeps
+    geometry intact while avoiding that slow failure path.
+    """
+    render_mesh = mesh.copy()
+    face_color = np.tile(np.array([[200, 200, 200, 255]], dtype=np.uint8), (len(render_mesh.faces), 1))
+    try:
+        render_mesh.visual = trimesh.visual.ColorVisuals(mesh=render_mesh, face_colors=face_color)
+    except Exception:
+        pass
+    return render_mesh
+
+
+def render_multiview(
+    mesh,
+    num_views: int = 12,
+    image_size: int = 1024,
+    views: list[tuple[float, float]] | None = None,
+    fill_fraction: float = 0.75,
+):
     """Render a pre-loaded mesh from multiple camera angles.
 
     Returns:
@@ -405,24 +567,26 @@ def render_multiview(mesh, num_views: int = 12, image_size: int = 1024):
     The mesh should already be centered, normalized, and cleaned (via load_mesh_robust).
     """
     images = []
-    views = CAMERA_VIEWS[:num_views]
+    views = views if views is not None else CAMERA_VIEWS[:num_views]
+    render_mesh = prepare_render_mesh(mesh)
 
     # Compute fit-to-view distance
-    distance = compute_fit_distance(mesh)
+    distance = compute_fit_distance(render_mesh, fill_fraction=fill_fraction)
 
     gl_errors = 0
 
     for yaw_deg, pitch_deg in views:
-        scene = trimesh.Scene(mesh)
+        scene = trimesh.Scene(render_mesh)
         scene.camera.fov = (40, 40)
         transform = _make_camera_transform(yaw_deg, pitch_deg, distance)
         scene.camera_transform = transform
 
         try:
-            png = scene.save_image(
-                resolution=(image_size, image_size),
-                background=GREEN_BG,
-            )
+            with suppress_output(True):
+                png = scene.save_image(
+                    resolution=(image_size, image_size),
+                    background=TRANSPARENT_BG,
+                )
         except Exception as e:
             err = str(e).lower()
             gl_errors += 1
@@ -439,11 +603,9 @@ def render_multiview(mesh, num_views: int = 12, image_size: int = 1024):
 
         img = Image.open(BytesIO(png)).convert("RGBA")
 
-        # Chroma-key: remove green background
         arr = np.array(img)
-        bg_mask = (arr[:, :, 0] < 15) & (arr[:, :, 1] > 240) & (arr[:, :, 2] < 15)
-        arr[bg_mask, 3] = 0
-        arr[bg_mask, :3] = 0
+        transparent_mask = arr[:, :, 3] == 0
+        arr[transparent_mask, :3] = 0
         images.append(Image.fromarray(arr))
 
     if not images:
@@ -454,6 +616,284 @@ def render_multiview(mesh, num_views: int = 12, image_size: int = 1024):
     return images, None
 
 
+def render_single_view(
+    mesh,
+    view: tuple[float, float],
+    image_size: int = 1024,
+    fill_fraction: float = 0.9,
+):
+    """Render one rescue view with a tighter camera fit."""
+    images, fail_reason = render_multiview(
+        mesh,
+        num_views=1,
+        image_size=image_size,
+        views=[view],
+        fill_fraction=fill_fraction,
+    )
+    if images:
+        return images[0], None
+    return None, fail_reason
+
+
+def render_multiview_blender_asset(
+    asset_path: str,
+    shard_id: int,
+    blender_bin: str,
+    blender_samples: int,
+    num_views: int = 12,
+    image_size: int = 1024,
+    views: list[tuple[float, float]] | None = None,
+    fill_fraction: float = 0.75,
+):
+    """Render a prepared asset through Blender Cycles in a short-lived subprocess."""
+    views = views if views is not None else CAMERA_VIEWS[:num_views]
+    render_root = Path(
+        os.environ.get(
+            "CLEARMESH_BLENDER_TMPDIR",
+            f"/workspace/.cache/blender_renders/shard_{shard_id}",
+        )
+    )
+    render_root.mkdir(parents=True, exist_ok=True)
+    render_dir = Path(tempfile.mkdtemp(prefix="blender_", dir=str(render_root)))
+    cmd = [
+        blender_bin,
+        "--background",
+        "--factory-startup",
+        "--python",
+        str(Path(__file__).with_name("blender_render_views.py")),
+        "--",
+        "--mesh",
+        asset_path,
+        "--output_dir",
+        str(render_dir),
+        "--views_json",
+        json.dumps(views),
+        "--resolution",
+        str(image_size),
+        "--fill_fraction",
+        str(fill_fraction),
+        "--samples",
+        str(blender_samples),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        shutil.rmtree(render_dir, ignore_errors=True)
+        return [], FAIL_RENDER_GL
+
+    if result.returncode != 0:
+        tail = "\n".join(((result.stderr or "") + "\n" + (result.stdout or "")).splitlines()[-12:])
+        if tail:
+            print(f"    [blender] render failed: {tail}")
+        shutil.rmtree(render_dir, ignore_errors=True)
+        return [], FAIL_RENDER_GL
+
+    images = []
+    for idx in range(len(views)):
+        path = render_dir / f"view_{idx:02d}.png"
+        if not path.exists():
+            continue
+        img = Image.open(path).convert("RGBA")
+        arr = np.array(img)
+        transparent_mask = arr[:, :, 3] == 0
+        arr[transparent_mask, :3] = 0
+        images.append(Image.fromarray(arr))
+
+    shutil.rmtree(render_dir, ignore_errors=True)
+    if not images:
+        return [], FAIL_RENDER_ZERO_FG
+    return images, None
+
+
+def render_single_view_blender_asset(
+    asset_path: str,
+    shard_id: int,
+    blender_bin: str,
+    blender_samples: int,
+    view: tuple[float, float],
+    image_size: int = 1024,
+    fill_fraction: float = 0.9,
+):
+    images, fail_reason = render_multiview_blender_asset(
+        asset_path=asset_path,
+        shard_id=shard_id,
+        blender_bin=blender_bin,
+        blender_samples=blender_samples,
+        num_views=1,
+        image_size=image_size,
+        views=[view],
+        fill_fraction=fill_fraction,
+    )
+    if images:
+        return images[0], None
+    return None, fail_reason
+
+
+def normalize_yaw_deg(yaw_deg: float) -> float:
+    """Normalize yaw to [-180, 180)."""
+    return ((yaw_deg + 180.0) % 360.0) - 180.0
+
+
+def compute_silhouette_metrics(
+    img: Image.Image,
+    min_fg_frac: float = DEFAULT_MIN_FG_FRAC,
+    max_fg_frac: float = DEFAULT_MAX_FG_FRAC,
+    edge_margin: float = DEFAULT_EDGE_MARGIN,
+) -> dict:
+    """Summarize a rendered silhouette for ranking, logging, and rescue filtering."""
+    arr = np.array(img)
+    h, w = arr.shape[:2]
+    total_pixels = max(h * w, 1)
+    fg_mask = arr[:, :, 3] > 0
+    fg_count = int(fg_mask.sum())
+    fg_frac = fg_count / total_pixels
+    metrics = {
+        "fg_frac": float(fg_frac),
+        "has_fg": bool(fg_frac > 0.001),
+        "passes_gate": False,
+        "bbox_fill": 0.0,
+        "aspect_ratio": 0.0,
+        "center_offset": 1.0,
+        "edge_penalty": 1.0,
+        "edge_density": 0.0,
+        "edges_clipped": 0,
+        "score": 999.0,
+    }
+
+    if fg_count <= 0:
+        return metrics
+
+    rows = np.any(fg_mask, axis=1)
+    cols = np.any(fg_mask, axis=0)
+    rmin, rmax = np.where(rows)[0][[0, -1]]
+    cmin, cmax = np.where(cols)[0][[0, -1]]
+    bbox_h = int(rmax - rmin + 1)
+    bbox_w = int(cmax - cmin + 1)
+    bbox_area = max(bbox_h * bbox_w, 1)
+
+    margin_h = int(h * edge_margin)
+    margin_w = int(w * edge_margin)
+    edges_clipped = 0
+    if rmin < margin_h:
+        edges_clipped += 1
+    if rmax > h - margin_h - 1:
+        edges_clipped += 1
+    if cmin < margin_w:
+        edges_clipped += 1
+    if cmax > w - margin_w - 1:
+        edges_clipped += 1
+
+    row_center = (rmin + rmax) / 2.0
+    col_center = (cmin + cmax) / 2.0
+    center_offset = abs((row_center / h) - 0.5) + abs((col_center / w) - 0.5)
+    edge_penalty = edges_clipped / 4.0
+    bbox_fill = fg_count / bbox_area
+    aspect_ratio = bbox_w / max(bbox_h, 1)
+
+    padded = np.pad(fg_mask.astype(np.uint8), 1)
+    edge_density = float(
+        (
+            np.abs(np.diff(padded, axis=0)).sum()
+            + np.abs(np.diff(padded, axis=1)).sum()
+        )
+        / max(fg_count, 1)
+    )
+    ideal_fg = (min_fg_frac + max_fg_frac) / 2.0
+    thinness_penalty = min(abs(math.log(max(aspect_ratio, 1e-6))), 2.0) / 2.0
+    bbox_penalty = abs(bbox_fill - 0.58)
+    score = (
+        abs(fg_frac - ideal_fg)
+        + 0.30 * center_offset
+        + 0.20 * edge_penalty
+        + 0.20 * bbox_penalty
+        + 0.08 * thinness_penalty
+        - 0.06 * min(edge_density, 2.0)
+    )
+
+    passes_gate = min_fg_frac <= fg_frac <= max_fg_frac
+    if edges_clipped >= 2 and fg_frac > 0.5:
+        passes_gate = False
+
+    metrics.update({
+        "passes_gate": bool(passes_gate),
+        "bbox_fill": float(bbox_fill),
+        "aspect_ratio": float(aspect_ratio),
+        "center_offset": float(center_offset),
+        "edge_penalty": float(edge_penalty),
+        "edge_density": float(edge_density),
+        "edges_clipped": int(edges_clipped),
+        "score": float(score),
+    })
+    return metrics
+
+
+def format_silhouette_metrics(metrics: dict) -> str:
+    """Compact human-readable silhouette summary for logs."""
+    return (
+        f"fg={metrics['fg_frac']:.3f} "
+        f"bbox_fill={metrics['bbox_fill']:.3f} "
+        f"aspect={metrics['aspect_ratio']:.2f} "
+        f"edge_density={metrics['edge_density']:.2f} "
+        f"edges={metrics['edges_clipped']} "
+        f"score={metrics['score']:.3f}"
+    )
+
+
+def select_diverse_gated_views(
+    gated: list[tuple[Image.Image, float, str, int, float, dict]],
+    max_views: int = MAX_VIEWS_TO_TRY,
+) -> list[tuple[Image.Image, float, str, int, float, dict]]:
+    """Pick a small set of high-quality but non-redundant gated views."""
+    if not gated or max_views <= 0:
+        return []
+
+    selected = [gated[0]]
+    remaining = gated[1:]
+    while remaining and len(selected) < max_views:
+        best_idx = 0
+        best_score = None
+        for idx, candidate in enumerate(remaining):
+            min_distance = min(abs(candidate[3] - chosen[3]) for chosen in selected)
+            adjusted = candidate[4] - 0.03 * min_distance
+            if best_score is None or adjusted < best_score:
+                best_score = adjusted
+                best_idx = idx
+        selected.append(remaining.pop(best_idx))
+    return selected
+
+
+def build_trellis_attempt_plan(
+    selected_views: list[tuple[Image.Image, float, str, int, float, dict]],
+) -> list[tuple[int, Image.Image, int]]:
+    """Prioritize easy wins before paying for more views/seeds.
+
+    Attempt order:
+      1. Best gated view with the primary seed
+      2. Best gated view with the remaining seeds
+      3. Additional gated views, primary seed first
+      4. Only strong secondary views get one extra seed
+    """
+    if not selected_views:
+        return []
+
+    attempt_plan = []
+    primary_seed = GENERATION_SEEDS[0]
+    attempt_plan.append((0, selected_views[0][0], primary_seed))
+
+    for seed in GENERATION_SEEDS[1:]:
+        attempt_plan.append((0, selected_views[0][0], seed))
+
+    for view_idx, view_info in enumerate(selected_views[1:], start=1):
+        image = view_info[0]
+        attempt_plan.append((view_idx, image, primary_seed))
+        if view_info[4] <= STRONG_SECONDARY_VIEW_SCORE and view_info[1] >= STRONG_SECONDARY_VIEW_MIN_FG:
+            for seed in SECONDARY_VIEW_EXTRA_SEEDS:
+                if seed != primary_seed:
+                    attempt_plan.append((view_idx, image, seed))
+
+    return attempt_plan
+
+
 # ── Silhouette Gate ─────────────────────────────────────────────────────────
 
 def silhouette_gate(
@@ -461,51 +901,26 @@ def silhouette_gate(
     min_fg_frac: float = DEFAULT_MIN_FG_FRAC,
     max_fg_frac: float = DEFAULT_MAX_FG_FRAC,
     edge_margin: float = DEFAULT_EDGE_MARGIN,
-) -> list[tuple[Image.Image, float, str]]:
+) -> tuple[list[tuple[Image.Image, float, str, int, float, dict]], bool]:
     """Filter rendered views by silhouette quality. Returns sorted passing views."""
-    total_pixels = images[0].size[0] * images[0].size[1] if images else 1
-    ideal_fg = (min_fg_frac + max_fg_frac) / 2.0
-
     passed = []
     has_any_fg = False
 
-    for img in images:
-        arr = np.array(img)
-        fg_mask = arr[:, :, 3] > 0
-        fg_count = fg_mask.sum()
-        fg_frac = fg_count / total_pixels
-
-        if fg_frac > 0.001:
+    for image_idx, img in enumerate(images):
+        metrics = compute_silhouette_metrics(
+            img,
+            min_fg_frac=min_fg_frac,
+            max_fg_frac=max_fg_frac,
+            edge_margin=edge_margin,
+        )
+        if metrics["has_fg"]:
             has_any_fg = True
-
-        if fg_frac < min_fg_frac:
+        if not metrics["passes_gate"]:
             continue
-        if fg_frac > max_fg_frac:
-            continue
+        passed.append((img, metrics["fg_frac"], "pass", image_idx, metrics["score"], metrics))
 
-        # Edge clipping check
-        if fg_count > 0:
-            rows = np.any(fg_mask, axis=1)
-            cols = np.any(fg_mask, axis=0)
-            rmin, rmax = np.where(rows)[0][[0, -1]]
-            cmin, cmax = np.where(cols)[0][[0, -1]]
-
-            h, w = arr.shape[:2]
-            margin_h = int(h * edge_margin)
-            margin_w = int(w * edge_margin)
-
-            edges_clipped = 0
-            if rmin < margin_h: edges_clipped += 1
-            if rmax > h - margin_h - 1: edges_clipped += 1
-            if cmin < margin_w: edges_clipped += 1
-            if cmax > w - margin_w - 1: edges_clipped += 1
-
-            if edges_clipped >= 2 and fg_frac > 0.5:
-                continue
-
-        passed.append((img, fg_frac, "pass"))
-
-    passed.sort(key=lambda x: abs(x[1] - ideal_fg))
+    ideal_fg = (min_fg_frac + max_fg_frac) / 2.0
+    passed.sort(key=lambda x: (x[4], abs(x[1] - ideal_fg), x[3]))
     return passed, has_any_fg
 
 
@@ -516,64 +931,79 @@ def generate_coarse_mesh_shape_only(
     image: Image.Image,
     pipeline_type: str = "512",
     seed: int = 42,
+    verbose_trellis_progress: bool = False,
+    sparse_structure_sampler_params: dict | None = None,
+    shape_slat_sampler_params: dict | None = None,
 ):
     """Run TRELLIS.2 shape-only path (skip texture generation)."""
     with torch.no_grad():
-        image = pipeline.preprocess_image(image)
+        processed_image = pipeline.preprocess_image(image)
         torch.manual_seed(seed)
-
-        cond_512 = pipeline.get_cond([image], 512)
-        cond_1024 = pipeline.get_cond([image], 1024) if pipeline_type != "512" else None
-        ss_res = {"512": 32, "1024": 64, "1024_cascade": 32, "1536_cascade": 32}[pipeline_type]
-        coords = pipeline.sample_sparse_structure(cond_512, ss_res, 1, {})
-
-        if pipeline_type == "512":
-            shape_slat = pipeline.sample_shape_slat(
-                cond_512, pipeline.models["shape_slat_flow_model_512"], coords, {}
-            )
-            res = 512
-        elif pipeline_type == "1024":
-            shape_slat = pipeline.sample_shape_slat(
-                cond_1024, pipeline.models["shape_slat_flow_model_1024"], coords, {}
-            )
-            res = 1024
-        elif pipeline_type == "1024_cascade":
-            shape_slat, res = pipeline.sample_shape_slat_cascade(
+        with suppress_output(not verbose_trellis_progress):
+            cond_512 = pipeline.get_cond([processed_image], 512)
+            cond_1024 = pipeline.get_cond([processed_image], 1024) if pipeline_type != "512" else None
+            ss_res = {"512": 32, "1024": 64, "1024_cascade": 32, "1536_cascade": 32}[pipeline_type]
+            coords = pipeline.sample_sparse_structure(
                 cond_512,
-                cond_1024,
-                pipeline.models["shape_slat_flow_model_512"],
-                pipeline.models["shape_slat_flow_model_1024"],
-                512,
-                1024,
-                coords,
-                {},
-                49152,
+                ss_res,
+                1,
+                sparse_structure_sampler_params or {},
             )
-        elif pipeline_type == "1536_cascade":
-            shape_slat, res = pipeline.sample_shape_slat_cascade(
-                cond_512,
-                cond_1024,
-                pipeline.models["shape_slat_flow_model_512"],
-                pipeline.models["shape_slat_flow_model_1024"],
-                512,
-                1536,
-                coords,
-                {},
-                49152,
-            )
-        else:
-            raise ValueError(f"Invalid pipeline type: {pipeline_type}")
 
-        meshes, _ = pipeline.decode_shape_slat(shape_slat, res)
+            if pipeline_type == "512":
+                shape_slat = pipeline.sample_shape_slat(
+                    cond_512,
+                    pipeline.models["shape_slat_flow_model_512"],
+                    coords,
+                    shape_slat_sampler_params or {},
+                )
+                res = 512
+            elif pipeline_type == "1024":
+                shape_slat = pipeline.sample_shape_slat(
+                    cond_1024,
+                    pipeline.models["shape_slat_flow_model_1024"],
+                    coords,
+                    shape_slat_sampler_params or {},
+                )
+                res = 1024
+            elif pipeline_type == "1024_cascade":
+                shape_slat, res = pipeline.sample_shape_slat_cascade(
+                    cond_512,
+                    cond_1024,
+                    pipeline.models["shape_slat_flow_model_512"],
+                    pipeline.models["shape_slat_flow_model_1024"],
+                    512,
+                    1024,
+                    coords,
+                    shape_slat_sampler_params or {},
+                    49152,
+                )
+            elif pipeline_type == "1536_cascade":
+                shape_slat, res = pipeline.sample_shape_slat_cascade(
+                    cond_512,
+                    cond_1024,
+                    pipeline.models["shape_slat_flow_model_512"],
+                    pipeline.models["shape_slat_flow_model_1024"],
+                    512,
+                    1536,
+                    coords,
+                    shape_slat_sampler_params or {},
+                    49152,
+                )
+            else:
+                raise ValueError(f"Invalid pipeline type: {pipeline_type}")
+
+            meshes, _ = pipeline.decode_shape_slat(shape_slat, res)
+
+        coarse_mesh = meshes[0]
 
         # Eagerly release intermediates before returning — their CPU shadows
         # from low_vram model shuffling are the main source of RSS growth.
-        del cond_512, coords, shape_slat
+        del processed_image, cond_512, coords, shape_slat, meshes
         if cond_1024 is not None:
             del cond_1024
-        gc.collect()
-        torch.cuda.empty_cache()
-        return meshes[0]
+        cleanup_memory(use_malloc_trim=False)
+        return coarse_mesh
 
 
 def generate_coarse_mesh(
@@ -582,6 +1012,9 @@ def generate_coarse_mesh(
     pipeline_type: str = "512",
     seed: int = 42,
     geometry_only: bool = True,
+    verbose_trellis_progress: bool = False,
+    sparse_structure_sampler_params: dict | None = None,
+    shape_slat_sampler_params: dict | None = None,
 ):
     """Run TRELLIS.2 to generate a coarse mesh from an image."""
     if geometry_only:
@@ -590,6 +1023,9 @@ def generate_coarse_mesh(
             image=image,
             pipeline_type=pipeline_type,
             seed=seed,
+            verbose_trellis_progress=verbose_trellis_progress,
+            sparse_structure_sampler_params=sparse_structure_sampler_params,
+            shape_slat_sampler_params=shape_slat_sampler_params,
         )
 
     with torch.no_grad():
@@ -598,8 +1034,13 @@ def generate_coarse_mesh(
             pipeline_type=pipeline_type,
             preprocess_image=True,
             seed=seed,
+            sparse_structure_sampler_params=sparse_structure_sampler_params or {},
+            shape_slat_sampler_params=shape_slat_sampler_params or {},
         )
-        return results[0]
+        coarse_mesh = results[0]
+        del results
+        cleanup_memory(use_malloc_trim=False)
+        return coarse_mesh
 
 
 def save_pair(coarse_mesh, fine_mesh_path: str, output_dir: str, uid: str):
@@ -656,8 +1097,14 @@ def generate_pairs(
     max_models_per_run: int = 0,
     max_emergency_recycles_per_uid: int = 3,
     low_vram: bool = False,
+    verbose_trellis_progress: bool = False,
     use_malloc_trim: bool = True,
     recycle_exit_code: int = 75,
+    render_backend: str = DEFAULT_RENDER_BACKEND,
+    blender_bin: str = DEFAULT_BLENDER_BIN,
+    blender_samples: int = DEFAULT_BLENDER_SAMPLES,
+    mesh_prep_memory_limit_gb: float = DEFAULT_MESH_PREP_MEMORY_LIMIT_GB,
+    mesh_prep_timeout_sec: int = DEFAULT_MESH_PREP_TIMEOUT_SEC,
 ):
     """Main pair generation loop with all v5 improvements."""
 
@@ -689,10 +1136,27 @@ def generate_pairs(
     print(f"Generating coarse/fine pairs for {len(models)} models (shard {shard_id}/{num_shards})")
     print(f"  Pipeline type: {pipeline_type}, GPU: {gpu}")
     print(f"  Render: {render_size}x{render_size}, {num_views} views/model")
+    print(f"  Render backend: {render_backend}")
+    if render_backend == "blender":
+        print(f"  Blender bin: {blender_bin} (samples={blender_samples})")
+    print(
+        f"  Mesh prep subprocess: {mesh_prep_memory_limit_gb:.0f} GiB limit, "
+        f"{mesh_prep_timeout_sec}s timeout"
+    )
+    print(
+        f"  Adaptive render: first {min(INITIAL_RENDER_VIEWS, num_views)} views, "
+        f"expand to {num_views} only if gate finds 0 valid"
+    )
     print(f"  Silhouette gate: FG ∈ [{min_fg_frac:.0%}, {max_fg_frac:.0%}]")
-    print(f"  Multi-seed: {len(GENERATION_SEEDS)} seeds × {MAX_VIEWS_TO_TRY} views = {len(GENERATION_SEEDS)*MAX_VIEWS_TO_TRY} max attempts")
+    print(
+        "  TRELLIS attempt budget: "
+        f"best view all seeds, secondary strong views get one extra seed, "
+        f"rescue capped at {MAX_RESCUE_ATTEMPTS} attempts across {MAX_RESCUE_CANDIDATES} candidates"
+    )
+    print("  TRELLIS retry ladder: best view first, then expand only promising views")
     print(f"  Retry-failed mode: {retry_failed}")
     print(f"  Geometry-only mode: {geometry_only}")
+    print(f"  TRELLIS inner progress: {'verbose' if verbose_trellis_progress else 'suppressed'}")
     print(f"  Initial RSS: {get_rss_gb():.1f} GiB")
     if torch.cuda.is_available():
         a_mb, r_mb, m_mb = get_cuda_memory_stats_mb()
@@ -713,56 +1177,6 @@ def generate_pairs(
             f"{max_emergency_recycles_per_uid}"
         )
         print("  Load-mesh emergency recycles quarantine after 1 hit")
-
-    # Load TRELLIS.2
-    print("Loading TRELLIS.2...")
-    os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
-    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-
-    sys.path.insert(0, trellis2_dir)
-    from trellis2.pipelines import Trellis2ImageTo3DPipeline
-
-    t0 = time.time()
-    if os.path.exists(model_dir):
-        pipeline = Trellis2ImageTo3DPipeline.from_pretrained(model_dir)
-    else:
-        pipeline = Trellis2ImageTo3DPipeline.from_pretrained("microsoft/TRELLIS.2-4B")
-
-    print(f"  RSS after from_pretrained: {get_rss_gb():.1f} GiB")
-    removed_models = prune_pipeline_models(pipeline, pipeline_type, geometry_only)
-    if removed_models:
-        print(f"  Pruned {len(removed_models)} unused model branches")
-    if disable_rembg_model and getattr(pipeline, "rembg_model", None) is not None:
-        pipeline.rembg_model = None
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        if use_malloc_trim:
-            malloc_trim()
-        print("  Unloaded rembg model (input renders already include alpha)")
-    print(f"  RSS after pruning/unload: {get_rss_gb():.1f} GiB")
-
-    # Disable low_vram to keep all models on GPU (A100 80GB has plenty of VRAM).
-    # With low_vram=True, each TRELLIS call shuffles models CPU↔GPU (3-5s overhead).
-    # With low_vram=False, models stay on GPU and inference is ~3x faster.
-    if not low_vram:
-        pipeline.low_vram = False
-        for m in pipeline.models.values():
-            if hasattr(m, 'low_vram'):
-                m.low_vram = False
-        if hasattr(pipeline, 'image_cond_model') and pipeline.image_cond_model is not None:
-            if hasattr(pipeline.image_cond_model, 'low_vram'):
-                pipeline.image_cond_model.low_vram = False
-        print("  low_vram disabled: all models will stay on GPU")
-
-    pipeline.cuda()
-    print(f"  RSS after pipeline.cuda(): {get_rss_gb():.1f} GiB")
-    if torch.cuda.is_available():
-        a_mb, r_mb, m_mb = get_cuda_memory_stats_mb()
-        print(f"  CUDA mem after pipeline.cuda(): alloc={a_mb:.0f}MiB reserved={r_mb:.0f}MiB max={m_mb:.0f}MiB")
-    gc.collect()
-    torch.cuda.empty_cache()
-    print(f"  Pipeline loaded in {time.time()-t0:.1f}s")
 
     # ── Progress tracking ──
     progress_path = output_path / "progress.json"
@@ -926,19 +1340,10 @@ def generate_pairs(
                 f"{recycle_uid} (phase={recycle_phase})"
             )
 
+    all_failed = _collect_all_failed_uids(base_output)
+
     # ── Build work list ──
     if retry_failed:
-        # Gather ALL failed UIDs from all shards + old
-        all_failed = set()
-        if (base_output / "failed.json").exists():
-            with open(base_output / "failed.json") as f:
-                all_failed.update(json.load(f))
-        for shard_dir in sorted(base_output.glob("shard_*")):
-            fp = shard_dir / "failed.json"
-            if fp.exists():
-                with open(fp) as f:
-                    all_failed.update(json.load(f))
-
         # Only retry failures that haven't been rescued
         retry_uids = all_failed - all_completed - completed
         uid_to_model = {m["uid"]: m for m in models}
@@ -950,12 +1355,75 @@ def generate_pairs(
 
         print(f"  RETRY MODE: {len(remaining)} previously-failed models to retry")
     else:
-        skip_uids = completed | permanently_failed | all_completed
+        skip_uids = completed | all_failed | all_completed
         remaining = [m for m in models if m["uid"] not in skip_uids]
         print(f"  Already completed (this shard): {len(completed)}")
         print(f"  Already completed (all shards): {len(all_completed)}")
-        print(f"  Previously failed: {len(permanently_failed)}")
+        print(f"  Previously failed (all runs): {len(all_failed)}")
         print(f"  Remaining: {len(remaining)}")
+
+    if not remaining:
+        print("  No remaining models for this shard; skipping TRELLIS load")
+        rss_watchdog.stop()
+        return {
+            "recycle_requested": False,
+            "recycle_reason": None,
+            "processed": 0,
+            "remaining": 0,
+        }
+
+    # Load TRELLIS.2 only after progress/failure/recycle preflight so
+    # pathological load_mesh recycles don't force another full model reload.
+    print("Loading TRELLIS.2...")
+    _set_current_model(phase="pipeline_load")
+    os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+    sys.path.insert(0, trellis2_dir)
+    from trellis2.pipelines import Trellis2ImageTo3DPipeline
+
+    t0 = time.time()
+    if os.path.exists(model_dir):
+        pipeline = Trellis2ImageTo3DPipeline.from_pretrained(model_dir)
+    else:
+        pipeline = Trellis2ImageTo3DPipeline.from_pretrained("microsoft/TRELLIS.2-4B")
+
+    print(f"  RSS after from_pretrained: {get_rss_gb():.1f} GiB")
+    removed_models = prune_pipeline_models(pipeline, pipeline_type, geometry_only)
+    if removed_models:
+        print(f"  Pruned {len(removed_models)} unused model branches")
+    if disable_rembg_model and getattr(pipeline, "rembg_model", None) is not None:
+        pipeline.rembg_model = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        if use_malloc_trim:
+            malloc_trim()
+        print("  Unloaded rembg model (input renders already include alpha)")
+    print(f"  RSS after pruning/unload: {get_rss_gb():.1f} GiB")
+
+    # Disable low_vram to keep all models on GPU (A100 80GB has plenty of VRAM).
+    # With low_vram=True, each TRELLIS call shuffles models CPU↔GPU (3-5s overhead).
+    # With low_vram=False, models stay on GPU and inference is ~3x faster.
+    if not low_vram:
+        pipeline.low_vram = False
+        for m in pipeline.models.values():
+            if hasattr(m, "low_vram"):
+                m.low_vram = False
+        if hasattr(pipeline, "image_cond_model") and pipeline.image_cond_model is not None:
+            if hasattr(pipeline.image_cond_model, "low_vram"):
+                pipeline.image_cond_model.low_vram = False
+        print("  low_vram disabled: all models will stay on GPU")
+
+    pipeline.cuda()
+    print(f"  RSS after pipeline.cuda(): {get_rss_gb():.1f} GiB")
+    if torch.cuda.is_available():
+        a_mb, r_mb, m_mb = get_cuda_memory_stats_mb()
+        print(f"  CUDA mem after pipeline.cuda(): alloc={a_mb:.0f}MiB reserved={r_mb:.0f}MiB max={m_mb:.0f}MiB")
+    gc.collect()
+    torch.cuda.empty_cache()
+    _set_current_model()
+    print(f"  Pipeline loaded in {time.time()-t0:.1f}s")
 
     # ── Counters ──
     pairs_created = 0
@@ -981,13 +1449,21 @@ def generate_pairs(
 
             uid = model["uid"]
             mesh_path = model["path"]
+            prepared_workdir = None
+            prepared_asset_path = None
+            mesh = None
 
             _set_current_model(uid=uid, path=mesh_path, phase="load_mesh")
             t_start = time.time()
             fail_reason = None
 
-            # ── Step 1: Load mesh robustly ──
-            mesh, fail_reason = load_mesh_robust(mesh_path)
+            # ── Step 1: Load + normalize mesh in a subprocess ──
+            prepared_asset_path, fail_reason, prepared_workdir, prep_meta = prepare_mesh_asset_subprocess(
+                mesh_path=mesh_path,
+                shard_id=shard_id,
+                memory_limit_gb=mesh_prep_memory_limit_gb,
+                timeout_sec=mesh_prep_timeout_sec,
+            )
             if fail_reason:
                 with progress_lock:
                     failure_counts[fail_reason] += 1
@@ -1001,10 +1477,47 @@ def generate_pairs(
                 _set_current_model()
                 continue
 
+            if render_backend == "trimesh":
+                try:
+                    mesh = trimesh.load(prepared_asset_path, force="mesh", process=False)
+                except Exception:
+                    fail_reason = FAIL_MESH_LOAD
+                    with progress_lock:
+                        failure_counts[fail_reason] += 1
+                        failures += 1
+                        permanently_failed.add(uid)
+                        failure_details[uid] = {
+                            "reason": fail_reason,
+                            "path": mesh_path,
+                            "prepared_asset": prepared_asset_path,
+                        }
+                    _save_all_progress()
+                    _clear_recycle_artifacts()
+                    if prepared_workdir is not None:
+                        shutil.rmtree(prepared_workdir, ignore_errors=True)
+                    cleanup_memory(use_malloc_trim=use_malloc_trim)
+                    _set_current_model()
+                    continue
+
             # ── Step 2: Render multiple views ──
             _set_current_model(uid=uid, path=mesh_path, phase="render")
-            images, fail_reason = render_multiview(mesh, num_views, render_size)
-            total_views_rendered += num_views
+            initial_view_count = min(num_views, INITIAL_RENDER_VIEWS)
+            initial_views = CAMERA_VIEWS[:initial_view_count]
+            if render_backend == "blender":
+                images, fail_reason = render_multiview_blender_asset(
+                    asset_path=prepared_asset_path,
+                    shard_id=shard_id,
+                    blender_bin=blender_bin,
+                    blender_samples=blender_samples,
+                    num_views=initial_view_count,
+                    image_size=render_size,
+                    views=initial_views,
+                )
+            else:
+                images, fail_reason = render_multiview(
+                    mesh, initial_view_count, render_size, views=initial_views
+                )
+            total_views_rendered += initial_view_count
 
             if fail_reason:
                 with progress_lock:
@@ -1014,7 +1527,10 @@ def generate_pairs(
                     failure_details[uid] = {"reason": fail_reason, "path": mesh_path}
                 _save_all_progress()
                 _clear_recycle_artifacts()
-                del mesh
+                if mesh is not None:
+                    del mesh
+                if prepared_workdir is not None:
+                    shutil.rmtree(prepared_workdir, ignore_errors=True)
                 gc.collect()
                 if use_malloc_trim:
                     malloc_trim()
@@ -1024,13 +1540,37 @@ def generate_pairs(
             # ── Step 3: Silhouette gate ──
             _set_current_model(uid=uid, path=mesh_path, phase="gate")
             gated, has_any_fg = silhouette_gate(images, min_fg_frac, max_fg_frac, edge_margin)
+            if not gated and num_views > initial_view_count:
+                _set_current_model(uid=uid, path=mesh_path, phase="render_expand")
+                extra_views = CAMERA_VIEWS[initial_view_count:num_views]
+                if render_backend == "blender":
+                    expanded_images, expanded_fail_reason = render_multiview_blender_asset(
+                        asset_path=prepared_asset_path,
+                        shard_id=shard_id,
+                        blender_bin=blender_bin,
+                        blender_samples=blender_samples,
+                        num_views=len(extra_views),
+                        image_size=render_size,
+                        views=extra_views,
+                    )
+                else:
+                    expanded_images, expanded_fail_reason = render_multiview(
+                        mesh, len(extra_views), render_size, views=extra_views
+                    )
+                total_views_rendered += len(extra_views)
+                if expanded_images:
+                    images.extend(expanded_images)
+                if expanded_fail_reason and not expanded_images:
+                    fail_reason = expanded_fail_reason
+                _set_current_model(uid=uid, path=mesh_path, phase="gate")
+                gated, has_any_fg = silhouette_gate(images, min_fg_frac, max_fg_frac, edge_margin)
             valid_images = [g[0] for g in gated]
             total_views_passed += len(valid_images)
 
             if not valid_images:
-                if not has_any_fg:
+                if fail_reason is None and not has_any_fg:
                     fail_reason = FAIL_RENDER_ZERO_FG
-                else:
+                elif fail_reason is None:
                     fail_reason = FAIL_GATE_REJECTED
                 fg_fracs = []
                 for img in images:
@@ -1047,15 +1587,19 @@ def generate_pairs(
                     }
                 _save_all_progress()
                 _clear_recycle_artifacts()
-                del mesh
+                if mesh is not None:
+                    del mesh
+                if prepared_workdir is not None:
+                    shutil.rmtree(prepared_workdir, ignore_errors=True)
                 del images
                 del valid_images
                 del gated
-                gc.collect()
-                if use_malloc_trim:
-                    malloc_trim()
+                cleanup_memory(use_malloc_trim=use_malloc_trim)
                 _set_current_model()
                 continue
+
+            selected_views = select_diverse_gated_views(gated, MAX_VIEWS_TO_TRY)
+            valid_images = [view[0] for view in selected_views]
 
             # ── Step 4: Multi-seed + multi-view TRELLIS.2 generation ──
             _set_current_model(uid=uid, path=mesh_path, phase="trellis")
@@ -1067,92 +1611,336 @@ def generate_pairs(
             rss_before_trellis = get_rss_gb()
 
             consecutive_empty = 0
-            views_to_try = valid_images[:MAX_VIEWS_TO_TRY]
-            for view_idx, image in enumerate(views_to_try):
-                for seed in GENERATION_SEEDS:
-                    total_trellis_attempts += 1
-                    rss_pre = get_rss_gb()
-                    _set_current_model(uid=uid, path=mesh_path, phase=f"trellis:view{view_idx}:seed{seed}")
-                    try:
-                        coarse = generate_coarse_mesh(
-                            pipeline, image, pipeline_type, seed=seed,
-                            geometry_only=geometry_only,
-                        )
+            attempt_plan = build_trellis_attempt_plan(selected_views)
+            for view_idx, image, seed in attempt_plan:
+                total_trellis_attempts += 1
+                rss_pre = get_rss_gb()
+                _set_current_model(uid=uid, path=mesh_path, phase=f"trellis:view{view_idx}:seed{seed}")
+                try:
+                    coarse = generate_coarse_mesh(
+                        pipeline, image, pipeline_type, seed=seed,
+                        geometry_only=geometry_only,
+                        verbose_trellis_progress=verbose_trellis_progress,
+                    )
 
-                        n_verts = int(coarse.vertices.shape[0])
-                        if n_verts < MIN_COARSE_VERTS or n_verts > MAX_COARSE_VERTS:
-                            del coarse
-                            torch.cuda.empty_cache()
-                            consecutive_empty = 0  # Non-empty result resets counter
-                            rss_post = get_rss_gb()
-                            print(f"    [trellis] v{view_idx}/s{seed} quality_reject verts={n_verts} RSS={rss_post:.1f}GiB (Δ={rss_post-rss_pre:+.1f})")
-                            continue  # Try next seed — quality too low/high
-
-                        # ── Save pair ──
-                        pair_dir = save_pair(coarse, mesh_path, shard_output_dir, uid)
-                        image.save(os.path.join(pair_dir, "rendered.png"))
-
-                        meta = {
-                            "uid": uid,
-                            "fine_path": mesh_path,
-                            "coarse_vertices": n_verts,
-                            "coarse_faces": int(coarse.faces.shape[0]),
-                            "seed": seed,
-                            "view_index": view_idx,
-                            "trellis_attempts": total_trellis_attempts,
-                            "views_rendered": len(images),
-                            "views_passed_gate": len(valid_images),
-                            "winning_fg_fraction": float(gated[view_idx][1]) if view_idx < len(gated) else -1,
-                            "render_size": render_size,
-                            "pipeline_type": pipeline_type,
-                        }
-                        with open(os.path.join(pair_dir, "meta.json"), "w") as f:
-                            json.dump(meta, f, indent=2)
-
-                        with progress_lock:
-                            completed.add(uid)
-                            pairs_created += 1
-                            elapsed = time.time() - t_start
-                            total_time += elapsed
-                        success = True
-                        _clear_recycle_artifacts()
-
+                    n_verts = int(coarse.vertices.shape[0])
+                    if n_verts < MIN_COARSE_VERTS or n_verts > MAX_COARSE_VERTS:
                         del coarse
-                        torch.cuda.empty_cache()
+                        cleanup_memory(use_malloc_trim=use_malloc_trim)
+                        consecutive_empty = 0  # Non-empty result resets counter
                         rss_post = get_rss_gb()
-                        print(f"    [trellis] v{view_idx}/s{seed} SUCCESS verts={n_verts} RSS={rss_post:.1f}GiB (Δ={rss_post-rss_pre:+.1f})")
-                        break
+                        print(f"    [trellis] v{view_idx}/s{seed} quality_reject verts={n_verts} RSS={rss_post:.1f}GiB (Δ={rss_post-rss_pre:+.1f})")
+                        continue  # Try next seed — quality too low/high
 
-                    except RuntimeError as e:
-                        err_msg = str(e)
-                        if "numel() == 0" in err_msg:
-                            trellis_empty_count += 1
-                            consecutive_empty += 1
-                            torch.cuda.empty_cache()
-                            rss_post = get_rss_gb()
-                            print(f"    [trellis] v{view_idx}/s{seed} empty RSS={rss_post:.1f}GiB (Δ={rss_post-rss_pre:+.1f})")
-                            continue
-                        elif "out of memory" in err_msg.lower():
-                            trellis_oom_count += 1
-                            torch.cuda.empty_cache()
-                            rss_post = get_rss_gb()
-                            print(f"    [trellis] v{view_idx}/s{seed} OOM RSS={rss_post:.1f}GiB (Δ={rss_post-rss_pre:+.1f})")
-                            continue
-                        else:
-                            trellis_errors.append(err_msg[:200])
-                            torch.cuda.empty_cache()
-                            rss_post = get_rss_gb()
-                            print(f"    [trellis] v{view_idx}/s{seed} error RSS={rss_post:.1f}GiB (Δ={rss_post-rss_pre:+.1f})")
-                            break  # Non-recoverable for this view
-                    except Exception as e:
-                        trellis_errors.append(f"{type(e).__name__}: {str(e)[:200]}")
-                        torch.cuda.empty_cache()
-                        rss_post = get_rss_gb()
-                        print(f"    [trellis] v{view_idx}/s{seed} exception RSS={rss_post:.1f}GiB (Δ={rss_post-rss_pre:+.1f})")
-                        break
+                    # ── Save pair ──
+                    pair_dir = save_pair(coarse, mesh_path, shard_output_dir, uid)
+                    image.save(os.path.join(pair_dir, "rendered.png"))
 
-                if success:
+                    meta = {
+                        "uid": uid,
+                        "fine_path": mesh_path,
+                        "coarse_vertices": n_verts,
+                        "coarse_faces": int(coarse.faces.shape[0]),
+                        "seed": seed,
+                        "view_index": view_idx,
+                        "trellis_attempts": total_trellis_attempts,
+                        "views_rendered": len(images),
+                        "views_passed_gate": len(valid_images),
+                        "winning_fg_fraction": float(selected_views[view_idx][1]) if view_idx < len(selected_views) else -1,
+                        "winning_view_metrics": selected_views[view_idx][5] if view_idx < len(selected_views) else None,
+                        "render_size": render_size,
+                        "pipeline_type": pipeline_type,
+                    }
+                    with open(os.path.join(pair_dir, "meta.json"), "w") as f:
+                        json.dump(meta, f, indent=2)
+
+                    with progress_lock:
+                        completed.add(uid)
+                        pairs_created += 1
+                        elapsed = time.time() - t_start
+                        total_time += elapsed
+                    success = True
+                    _clear_recycle_artifacts()
+
+                    del coarse
+                    cleanup_memory(use_malloc_trim=use_malloc_trim)
+                    rss_post = get_rss_gb()
+                    print(f"    [trellis] v{view_idx}/s{seed} SUCCESS verts={n_verts} RSS={rss_post:.1f}GiB (Δ={rss_post-rss_pre:+.1f})")
                     break
+
+                except RuntimeError as e:
+                    err_msg = str(e)
+                    if "numel() == 0" in err_msg:
+                        trellis_empty_count += 1
+                        consecutive_empty += 1
+                        cleanup_memory(use_malloc_trim=use_malloc_trim)
+                        rss_post = get_rss_gb()
+                        print(f"    [trellis] v{view_idx}/s{seed} empty RSS={rss_post:.1f}GiB (Δ={rss_post-rss_pre:+.1f})")
+                        continue
+                    if "out of memory" in err_msg.lower():
+                        trellis_oom_count += 1
+                        cleanup_memory(use_malloc_trim=use_malloc_trim)
+                        rss_post = get_rss_gb()
+                        print(f"    [trellis] v{view_idx}/s{seed} OOM RSS={rss_post:.1f}GiB (Δ={rss_post-rss_pre:+.1f})")
+                        continue
+                    trellis_errors.append(err_msg[:200])
+                    cleanup_memory(use_malloc_trim=use_malloc_trim)
+                    rss_post = get_rss_gb()
+                    print(f"    [trellis] v{view_idx}/s{seed} error RSS={rss_post:.1f}GiB (Δ={rss_post-rss_pre:+.1f})")
+                    break
+                except Exception as e:
+                    trellis_errors.append(f"{type(e).__name__}: {str(e)[:200]}")
+                    cleanup_memory(use_malloc_trim=use_malloc_trim)
+                    rss_post = get_rss_gb()
+                    print(f"    [trellis] v{view_idx}/s{seed} exception RSS={rss_post:.1f}GiB (Δ={rss_post-rss_pre:+.1f})")
+                    break
+
+            if (
+                not success
+                and selected_views
+                and trellis_empty_count == total_trellis_attempts
+                and total_trellis_attempts > 0
+            ):
+                rescue_camera_idx = selected_views[0][3]
+                primary_view = CAMERA_VIEWS[rescue_camera_idx]
+                selected_indices = {view[3] for view in selected_views}
+                rescue_candidates = []
+                rescue_attempts_used = 0
+
+                extra_gated = [view for view in gated if view[3] not in selected_indices]
+                extra_gated.sort(
+                    key=lambda view: (
+                        -min(abs(view[3] - chosen[3]) for chosen in selected_views),
+                        view[4],
+                    )
+                )
+                for view in extra_gated[:2]:
+                    rescue_candidates.append(
+                        (f"alt_view_{view[3]}", view[0], float(view[1]), float(view[4]), view[5], [42, 123])
+                    )
+
+                seen_rotations = set()
+                for yaw_shift in (45.0, -45.0, 90.0, -90.0):
+                    rotated_view = (
+                        normalize_yaw_deg(primary_view[0] + yaw_shift),
+                        primary_view[1],
+                    )
+                    rounded_view = (round(rotated_view[0], 3), round(rotated_view[1], 3))
+                    if rounded_view in seen_rotations:
+                        continue
+                    seen_rotations.add(rounded_view)
+                    if render_backend == "blender":
+                        rotated_image, rotated_fail = render_single_view_blender_asset(
+                            asset_path=prepared_asset_path,
+                            shard_id=shard_id,
+                            blender_bin=blender_bin,
+                            blender_samples=blender_samples,
+                            view=rotated_view,
+                            image_size=render_size,
+                            fill_fraction=0.9,
+                        )
+                    else:
+                        rotated_image, rotated_fail = render_single_view(
+                            mesh,
+                            rotated_view,
+                            image_size=render_size,
+                            fill_fraction=0.9,
+                        )
+                    if rotated_image is not None:
+                        metrics = compute_silhouette_metrics(
+                            rotated_image,
+                            min_fg_frac=min_fg_frac,
+                            max_fg_frac=max_fg_frac,
+                            edge_margin=edge_margin,
+                        )
+                        if metrics["has_fg"] and metrics["score"] < 0.60:
+                            rescue_candidates.append(
+                                (f"rot_{int(yaw_shift):+d}", rotated_image, metrics["fg_frac"], metrics["score"], metrics, [42])
+                            )
+                    elif rotated_fail:
+                        print(f"    [trellis] rescue render skipped ({yaw_shift:+.0f}deg): {rotated_fail}")
+
+                for pitch_shift in RESCUE_PITCH_SHIFTS:
+                    rotated_view = (
+                        primary_view[0],
+                        max(-75.0, min(75.0, primary_view[1] + pitch_shift)),
+                    )
+                    rounded_view = (round(rotated_view[0], 3), round(rotated_view[1], 3))
+                    if rounded_view in seen_rotations:
+                        continue
+                    seen_rotations.add(rounded_view)
+                    if render_backend == "blender":
+                        rotated_image, rotated_fail = render_single_view_blender_asset(
+                            asset_path=prepared_asset_path,
+                            shard_id=shard_id,
+                            blender_bin=blender_bin,
+                            blender_samples=blender_samples,
+                            view=rotated_view,
+                            image_size=render_size,
+                            fill_fraction=0.9,
+                        )
+                    else:
+                        rotated_image, rotated_fail = render_single_view(
+                            mesh,
+                            rotated_view,
+                            image_size=render_size,
+                            fill_fraction=0.9,
+                        )
+                    if rotated_image is not None:
+                        metrics = compute_silhouette_metrics(
+                            rotated_image,
+                            min_fg_frac=min_fg_frac,
+                            max_fg_frac=max_fg_frac,
+                            edge_margin=edge_margin,
+                        )
+                        if metrics["has_fg"] and metrics["score"] < 0.60:
+                            rescue_candidates.append(
+                                (f"pitch_{int(pitch_shift):+d}", rotated_image, metrics["fg_frac"], metrics["score"], metrics, [42])
+                            )
+                    elif rotated_fail:
+                        print(f"    [trellis] rescue render skipped (pitch {pitch_shift:+.0f}deg): {rotated_fail}")
+
+                if render_backend == "blender":
+                    same_view_image, same_view_fail = render_single_view_blender_asset(
+                        asset_path=prepared_asset_path,
+                        shard_id=shard_id,
+                        blender_bin=blender_bin,
+                        blender_samples=blender_samples,
+                        view=primary_view,
+                        image_size=render_size,
+                        fill_fraction=0.9,
+                    )
+                else:
+                    same_view_image, same_view_fail = render_single_view(
+                        mesh,
+                        primary_view,
+                        image_size=render_size,
+                        fill_fraction=0.9,
+                    )
+                if same_view_image is not None:
+                    metrics = compute_silhouette_metrics(
+                        same_view_image,
+                        min_fg_frac=min_fg_frac,
+                        max_fg_frac=max_fg_frac,
+                        edge_margin=edge_margin,
+                    )
+                    if metrics["has_fg"]:
+                        rescue_candidates.append(
+                            ("tight_zoom", same_view_image, metrics["fg_frac"], metrics["score"], metrics, RESCUE_TIGHT_ZOOM_SEEDS)
+                        )
+                elif same_view_fail:
+                    print(f"    [trellis] rescue render skipped (tight_zoom): {same_view_fail}")
+
+                print(
+                    "    [trellis] rescue sampler: "
+                    f"sparse={RESCUE_SPARSE_SAMPLER_PARAMS}, "
+                    f"shape={RESCUE_SHAPE_SAMPLER_PARAMS}"
+                )
+                if rescue_candidates:
+                    rescue_candidates.sort(key=lambda item: (item[3], -item[2], item[0]))
+                    rescue_candidates = rescue_candidates[:MAX_RESCUE_CANDIDATES]
+                    print(
+                        "    [trellis] rescue candidates: "
+                        + ", ".join(
+                            f"{label}({format_silhouette_metrics(metrics)})"
+                            for label, _, _, _, metrics, _ in rescue_candidates
+                        )
+                    )
+                    for rescue_label, rescue_image, rescue_fg, _rescue_score, rescue_metrics, rescue_seeds in rescue_candidates:
+                        if success:
+                            break
+                        if rescue_attempts_used >= MAX_RESCUE_ATTEMPTS:
+                            print(f"    [trellis] rescue budget exhausted ({MAX_RESCUE_ATTEMPTS} attempts)")
+                            break
+                        print(f"    [trellis] rescue view: {rescue_label}")
+                        if rescue_image is None:
+                            continue
+                        rescue_succeeded = False
+                        for seed in rescue_seeds:
+                            if rescue_attempts_used >= MAX_RESCUE_ATTEMPTS:
+                                print(f"    [trellis] rescue budget exhausted ({MAX_RESCUE_ATTEMPTS} attempts)")
+                                break
+                            total_trellis_attempts += 1
+                            rescue_attempts_used += 1
+                            rss_pre = get_rss_gb()
+                            _set_current_model(uid=uid, path=mesh_path, phase=f"trellis:rescue:{rescue_label}:seed{seed}")
+                            try:
+                                coarse = generate_coarse_mesh(
+                                    pipeline, rescue_image, pipeline_type, seed=seed,
+                                    geometry_only=geometry_only,
+                                    verbose_trellis_progress=verbose_trellis_progress,
+                                    sparse_structure_sampler_params=RESCUE_SPARSE_SAMPLER_PARAMS,
+                                    shape_slat_sampler_params=RESCUE_SHAPE_SAMPLER_PARAMS,
+                                )
+                                n_verts = int(coarse.vertices.shape[0])
+                                if n_verts < MIN_COARSE_VERTS or n_verts > MAX_COARSE_VERTS:
+                                    del coarse
+                                    cleanup_memory(use_malloc_trim=use_malloc_trim)
+                                    rss_post = get_rss_gb()
+                                    print(f"    [trellis] rescue/{rescue_label}/s{seed} quality_reject verts={n_verts} RSS={rss_post:.1f}GiB (Δ={rss_post-rss_pre:+.1f})")
+                                    continue
+
+                                pair_dir = save_pair(coarse, mesh_path, shard_output_dir, uid)
+                                rescue_image.save(os.path.join(pair_dir, "rendered.png"))
+                                meta = {
+                                    "uid": uid,
+                                    "fine_path": mesh_path,
+                                    "coarse_vertices": n_verts,
+                                    "coarse_faces": int(coarse.faces.shape[0]),
+                                    "seed": seed,
+                                    "view_index": f"rescue_{rescue_label}",
+                                    "trellis_attempts": total_trellis_attempts,
+                                    "views_rendered": len(images) + 1,
+                                    "views_passed_gate": len(valid_images),
+                                    "winning_fg_fraction": rescue_fg,
+                                    "winning_view_metrics": rescue_metrics,
+                                    "render_size": render_size,
+                                    "pipeline_type": pipeline_type,
+                                }
+                                with open(os.path.join(pair_dir, "meta.json"), "w") as f:
+                                    json.dump(meta, f, indent=2)
+
+                                with progress_lock:
+                                    completed.add(uid)
+                                    pairs_created += 1
+                                    elapsed = time.time() - t_start
+                                    total_time += elapsed
+                                success = True
+                                rescue_succeeded = True
+                                _clear_recycle_artifacts()
+
+                                del coarse
+                                cleanup_memory(use_malloc_trim=use_malloc_trim)
+                                rss_post = get_rss_gb()
+                                print(f"    [trellis] rescue/{rescue_label}/s{seed} SUCCESS verts={n_verts} RSS={rss_post:.1f}GiB (Δ={rss_post-rss_pre:+.1f})")
+                                break
+                            except RuntimeError as e:
+                                err_msg = str(e)
+                                if "numel() == 0" in err_msg:
+                                    trellis_empty_count += 1
+                                    cleanup_memory(use_malloc_trim=use_malloc_trim)
+                                    rss_post = get_rss_gb()
+                                    print(f"    [trellis] rescue/{rescue_label}/s{seed} empty RSS={rss_post:.1f}GiB (Δ={rss_post-rss_pre:+.1f})")
+                                    continue
+                                if "out of memory" in err_msg.lower():
+                                    trellis_oom_count += 1
+                                    cleanup_memory(use_malloc_trim=use_malloc_trim)
+                                    rss_post = get_rss_gb()
+                                    print(f"    [trellis] rescue/{rescue_label}/s{seed} OOM RSS={rss_post:.1f}GiB (Δ={rss_post-rss_pre:+.1f})")
+                                    continue
+                                trellis_errors.append(err_msg[:200])
+                                cleanup_memory(use_malloc_trim=use_malloc_trim)
+                                rss_post = get_rss_gb()
+                                print(f"    [trellis] rescue/{rescue_label}/s{seed} error RSS={rss_post:.1f}GiB (Δ={rss_post-rss_pre:+.1f})")
+                                break
+                            except Exception as e:
+                                trellis_errors.append(f"{type(e).__name__}: {str(e)[:200]}")
+                                cleanup_memory(use_malloc_trim=use_malloc_trim)
+                                rss_post = get_rss_gb()
+                                print(f"    [trellis] rescue/{rescue_label}/s{seed} exception RSS={rss_post:.1f}GiB (Δ={rss_post-rss_pre:+.1f})")
+                                break
+                        if rescue_succeeded:
+                            break
 
             rss_after_trellis = get_rss_gb()
             rss_delta_model = rss_after_trellis - rss_before_trellis
@@ -1180,20 +1968,28 @@ def generate_pairs(
                         "empty_count": trellis_empty_count,
                         "oom_count": trellis_oom_count,
                         "errors": trellis_errors[:3],
+                        "selected_view_metrics": [view[5] for view in selected_views],
                     }
+                if fail_reason == FAIL_TRELLIS_EMPTY and selected_views:
+                    summary = " | ".join(
+                        f"v{view[3]} {format_silhouette_metrics(view[5])}"
+                        for view in selected_views
+                    )
+                    print(f"    [trellis] empty view stats: {summary}")
                 _save_all_progress()
                 _clear_recycle_artifacts()
 
             _set_current_model(uid=uid, path=mesh_path, phase="cleanup")
 
             # Drop per-model buffers aggressively to avoid long-run RSS creep.
-            del mesh
+            if mesh is not None:
+                del mesh
+            if prepared_workdir is not None:
+                shutil.rmtree(prepared_workdir, ignore_errors=True)
             del images
             del valid_images
             del gated
-            gc.collect()
-            if use_malloc_trim:
-                malloc_trim()
+            cleanup_memory(use_malloc_trim=use_malloc_trim)
             _set_current_model()
 
             # ── Periodic save + status ──
@@ -1219,7 +2015,7 @@ def generate_pairs(
                     f"avg:{avg_time:.1f}s/ok | "
                     f"FAIL: {fc_str}"
                     f"{f', RSS:{get_rss_gb():.1f}GiB' if log_rss_every and processed % log_rss_every == 0 else ''}"
-                    f"{f', CUDAmax:{get_cuda_memory_stats_mb()[2]:.0f}MiB' if torch.cuda.is_available() and log_rss_every and processed % log_rss_every == 0 else ''}"
+                    f"{f', CUDA:{get_cuda_memory_stats_mb()[0]:.0f}/{get_cuda_memory_stats_mb()[1]:.0f}/{get_cuda_memory_stats_mb()[2]:.0f}MiB' if torch.cuda.is_available() and log_rss_every and processed % log_rss_every == 0 else ''}"
                 )
     finally:
         rss_watchdog.stop()
@@ -1283,6 +2079,25 @@ def _save_progress(progress_path, failed_path, failure_details_path,
         os.replace(tmp, path)
 
 
+def _load_uid_list(path: Path) -> set[str]:
+    """Best-effort JSON UID list loader."""
+    if not path.exists():
+        return set()
+    try:
+        with open(path) as f:
+            return set(json.load(f))
+    except Exception:
+        return set()
+
+
+def _collect_all_failed_uids(base_output: Path) -> set[str]:
+    """Collect historical failures from the global and per-shard outputs."""
+    failed = _load_uid_list(base_output / "failed.json")
+    for shard_dir in sorted(base_output.glob("shard_*")):
+        failed.update(_load_uid_list(shard_dir / "failed.json"))
+    return failed
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate coarse/fine training pairs (v5)")
     parser.add_argument("--input_json", type=str, required=True)
@@ -1322,10 +2137,23 @@ def main():
     parser.add_argument("--low_vram", action=argparse.BooleanOptionalAction, default=False,
                         help="Keep TRELLIS.2 models on CPU between inference steps (default: False, "
                              "models stay on GPU for faster inference on A100 80GB)")
+    parser.add_argument("--verbose_trellis_progress", action="store_true",
+                        help="Keep TRELLIS inner tqdm/progress output enabled")
     parser.add_argument("--no_malloc_trim", action="store_true",
                         help="Disable glibc malloc_trim calls after cleanup points")
     parser.add_argument("--recycle_exit_code", type=int, default=75,
                         help="Exit code used when recycle is requested")
+    parser.add_argument("--render_backend", type=str, default=DEFAULT_RENDER_BACKEND,
+                        choices=["trimesh", "blender"],
+                        help="Renderer used for synthetic views")
+    parser.add_argument("--blender_bin", type=str, default=DEFAULT_BLENDER_BIN,
+                        help="Path to Blender binary for --render_backend blender")
+    parser.add_argument("--blender_samples", type=int, default=DEFAULT_BLENDER_SAMPLES,
+                        help="Cycles samples per rendered view")
+    parser.add_argument("--mesh_prep_memory_limit_gb", type=float, default=DEFAULT_MESH_PREP_MEMORY_LIMIT_GB,
+                        help="Address-space cap for isolated mesh prep subprocess")
+    parser.add_argument("--mesh_prep_timeout_sec", type=int, default=DEFAULT_MESH_PREP_TIMEOUT_SEC,
+                        help="Timeout for isolated mesh prep subprocess")
     args = parser.parse_args()
 
     result = generate_pairs(
@@ -1353,8 +2181,14 @@ def main():
         args.max_models_per_run,
         args.max_emergency_recycles_per_uid,
         args.low_vram,
+        args.verbose_trellis_progress,
         not args.no_malloc_trim,
         args.recycle_exit_code,
+        args.render_backend,
+        args.blender_bin,
+        args.blender_samples,
+        args.mesh_prep_memory_limit_gb,
+        args.mesh_prep_timeout_sec,
     )
     if result.get("recycle_requested", False):
         raise SystemExit(args.recycle_exit_code)
