@@ -68,7 +68,7 @@ from tqdm import tqdm
 # ── Constants ───────────────────────────────────────────────────────────────
 
 TRANSPARENT_BG = [0, 0, 0, 0]
-DEFAULT_RENDER_BACKEND = "trimesh"
+DEFAULT_RENDER_BACKEND = "blender"
 DEFAULT_BLENDER_BIN = "/workspace/tools/blender-3.0.1-linux-x64/blender"
 DEFAULT_BLENDER_SAMPLES = 16
 DEFAULT_MESH_PREP_MEMORY_LIMIT_GB = 96.0
@@ -85,6 +85,7 @@ STRONG_SECONDARY_VIEW_MIN_FG = 0.12
 SECONDARY_VIEW_EXTRA_SEEDS = [123]
 MAX_RESCUE_CANDIDATES = 3
 MAX_RESCUE_ATTEMPTS = 4
+MAX_CONSECUTIVE_EMPTY = 3  # Skip remaining attempts + rescue if first N all produce empty voxels
 RESCUE_TIGHT_ZOOM_SEEDS = [42, 123]
 RESCUE_SPARSE_SAMPLER_PARAMS = {
     "steps": 16,
@@ -536,16 +537,29 @@ def compute_fit_distance(mesh, fov_deg: float = 40.0, fill_fraction: float = 0.7
 # ── Rendering ───────────────────────────────────────────────────────────────
 
 def prepare_render_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
-    """Return a render-safe copy with texture materials stripped.
+    """Return a render-safe copy with texture materials replaced by vertex/face colors.
 
     Some Objaverse assets carry texture metadata that triggers repeated pyglet
-    GL errors during `scene.save_image()`. Rendering with flat face colors keeps
-    geometry intact while avoiding that slow failure path.
+    GL errors during ``scene.save_image()``.  When the mesh already has usable
+    vertex or face colors (ColorVisuals), we keep them — they give DINOv2 more
+    signal than flat gray.  Only when the original visual is a TextureVisuals
+    (UV-mapped textures, material references) do we fall back to flat gray,
+    which avoids the pyglet GL failure path while keeping geometry intact.
     """
     render_mesh = mesh.copy()
-    face_color = np.tile(np.array([[200, 200, 200, 255]], dtype=np.uint8), (len(render_mesh.faces), 1))
     try:
-        render_mesh.visual = trimesh.visual.ColorVisuals(mesh=render_mesh, face_colors=face_color)
+        visual = render_mesh.visual
+        # If the mesh already carries simple vertex/face colors, keep them.
+        if isinstance(visual, trimesh.visual.ColorVisuals):
+            return render_mesh
+        # TextureVisuals (or unknown) → replace with flat gray to avoid GL errors.
+        face_color = np.tile(
+            np.array([[200, 200, 200, 255]], dtype=np.uint8),
+            (len(render_mesh.faces), 1),
+        )
+        render_mesh.visual = trimesh.visual.ColorVisuals(
+            mesh=render_mesh, face_colors=face_color,
+        )
     except Exception:
         pass
     return render_mesh
@@ -1675,7 +1689,10 @@ def generate_pairs(
                         consecutive_empty += 1
                         cleanup_memory(use_malloc_trim=use_malloc_trim)
                         rss_post = get_rss_gb()
-                        print(f"    [trellis] v{view_idx}/s{seed} empty RSS={rss_post:.1f}GiB (Δ={rss_post-rss_pre:+.1f})")
+                        print(f"    [trellis] v{view_idx}/s{seed} empty ({consecutive_empty}/{MAX_CONSECUTIVE_EMPTY}) RSS={rss_post:.1f}GiB (Δ={rss_post-rss_pre:+.1f})")
+                        if consecutive_empty >= MAX_CONSECUTIVE_EMPTY:
+                            print(f"    [trellis] {consecutive_empty} consecutive empties — skipping remaining attempts")
+                            break
                         continue
                     if "out of memory" in err_msg.lower():
                         trellis_oom_count += 1
@@ -1700,6 +1717,7 @@ def generate_pairs(
                 and selected_views
                 and trellis_empty_count == total_trellis_attempts
                 and total_trellis_attempts > 0
+                and consecutive_empty < MAX_CONSECUTIVE_EMPTY
             ):
                 rescue_camera_idx = selected_views[0][3]
                 primary_view = CAMERA_VIEWS[rescue_camera_idx]
