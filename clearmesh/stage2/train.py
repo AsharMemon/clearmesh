@@ -542,8 +542,8 @@ class Trainer:
             # Reconstruct predicted SDF from noise prediction
             pred_sdf = (noisy_sdf - (1 - alpha).sqrt() * pred_noise) / alpha.sqrt()
 
-            # Losses
-            losses = self.criterion(pred_sdf=pred_sdf, gt_sdf=gt_sdf)
+            # Losses (pass positions for spatial eikonal regularisation)
+            losses = self.criterion(pred_sdf=pred_sdf, gt_sdf=gt_sdf, positions=positions)
 
         # FlexiCubes mesh-space losses (every K steps)
         fc_interval = self.config.get("flexicubes_interval", 10)

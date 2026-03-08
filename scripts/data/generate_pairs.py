@@ -1076,6 +1076,33 @@ def generate_coarse_mesh_shape_only(
                 else:
                     cond_feats = None
 
+                # Shape assertions — catch extraction bugs early
+                if coords_np is not None:
+                    if coords_np.ndim != 2 or coords_np.shape[1] != 3:
+                        print(f"    [intermediates] WARNING: coords shape {coords_np.shape}, expected (N, 3)")
+                        coords_np = None
+
+                if slat_feats is not None:
+                    if slat_feats.ndim != 2 or slat_feats.shape[1] != 32:
+                        print(f"    [intermediates] WARNING: SLAT shape {slat_feats.shape}, expected (N, 32)")
+                        slat_feats = None
+
+                if cond_feats is not None:
+                    # DINOv2-ViT-L: 1024-dim, typically 257 tokens (256 patches + CLS)
+                    # or 1025 for higher-res. Accept any reasonable M.
+                    if cond_feats.ndim != 2 or cond_feats.shape[1] != 1024:
+                        print(f"    [intermediates] WARNING: DINOv2 shape {cond_feats.shape}, expected (M, 1024)")
+                        cond_feats = None
+                    elif cond_feats.shape[0] not in (257, 1025):
+                        print(f"    [intermediates] NOTE: DINOv2 token count {cond_feats.shape[0]}"
+                              f" (expected 257 or 1025, continuing anyway)")
+
+                if coords_np is not None and slat_feats is not None:
+                    if coords_np.shape[0] != slat_feats.shape[0]:
+                        print(f"    [intermediates] WARNING: coords/SLAT count mismatch:"
+                              f" {coords_np.shape[0]} vs {slat_feats.shape[0]}")
+                        coords_np, slat_feats = None, None
+
                 if coords_np is not None and slat_feats is not None:
                     intermediates = {
                         'positions': coords_np,
@@ -1243,8 +1270,15 @@ def generate_pairs(
     if limit:
         models = models[:limit]
 
-    # Shard: interleaved distribution
+    # Shard: shuffle with fixed seed then interleave to balance quality across shards.
+    # Without shuffling, interleaved modulo assignment groups Objaverse models by source
+    # dataset (e.g., shard 0 gets all ShapeNet, shard 1 gets all Thingiverse), creating
+    # quality imbalance.
     if num_shards > 1:
+        import random as _random
+        _rng = _random.Random(42)
+        models = list(models)  # copy so we don't mutate the original
+        _rng.shuffle(models)
         models = [m for i, m in enumerate(models) if i % num_shards == shard_id]
 
     print(f"Generating coarse/fine pairs for {len(models)} models (shard {shard_id}/{num_shards})")

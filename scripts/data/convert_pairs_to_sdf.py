@@ -129,15 +129,44 @@ def compute_sdf_for_pair(args: tuple) -> tuple[str, bool, str]:
         # TRELLIS.2 sparse structure coords are in [0, ss_res-1]
         world_positions = positions.astype(np.float64) / max(actual_res - 1, 1) - 0.5
 
-        # Compute signed distance
-        # trimesh uses winding number method — positive inside, negative outside
-        sdf_values = trimesh.proximity.signed_distance(mesh, world_positions)
+        # Watertight check — signed_distance uses winding numbers which
+        # can produce incorrect signs for non-watertight meshes.
+        is_watertight = mesh.is_watertight
+        sdf_method = "signed"
+
+        if not is_watertight:
+            # Try to make watertight by filling holes
+            try:
+                mesh.fill_holes()
+                is_watertight = mesh.is_watertight
+            except Exception:
+                pass
+
+        if is_watertight:
+            # Reliable: winding-number signed distance
+            sdf_values = trimesh.proximity.signed_distance(mesh, world_positions)
+            sdf_method = "signed"
+        else:
+            # Fallback: unsigned distance (always positive).
+            # Use negative sign for points inside the convex hull as a
+            # rough approximation — not perfect but better than wrong signs.
+            closest, distance, _ = trimesh.proximity.closest_point(mesh, world_positions)
+            sdf_values = distance.astype(np.float64)
+
+            # Approximate inside/outside via ray parity test
+            try:
+                contains = mesh.contains(world_positions)
+                sdf_values[contains] *= -1.0
+            except Exception:
+                # If contains() also fails, leave unsigned
+                pass
+            sdf_method = "unsigned_fallback"
 
         # Save as (N, 1) float32
         sdf_out = sdf_values.astype(np.float32).reshape(-1, 1)
         np.save(str(output_file), sdf_out)
 
-        return (uid, True, f"ok N={len(sdf_values)}")
+        return (uid, True, f"ok N={len(sdf_values)} method={sdf_method}")
 
     except Exception as e:
         return (uid, False, f"SDF computation error: {e}")

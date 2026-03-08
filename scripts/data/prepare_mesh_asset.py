@@ -45,12 +45,48 @@ def apply_memory_limit(memory_limit_gb: float) -> None:
 
 
 def prepare_render_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    """Return a render-safe copy with meaningful vertex colors for DINOv2.
+
+    Preserves existing vertex/face colors when they carry real variation.
+    Falls back to normal-based shading (not flat gray) so DINOv2 gets
+    geometric cues — concavities look dark, convexities look bright.
+
+    NOTE: This must stay in sync with the identical function in
+    generate_pairs.py — both the Blender (subprocess) and trimesh
+    (in-process) render paths need the same shading logic.
+    """
     render_mesh = mesh.copy()
-    face_color = np.tile(np.array([[200, 200, 200, 255]], dtype=np.uint8), (len(render_mesh.faces), 1))
     try:
-        render_mesh.visual = trimesh.visual.ColorVisuals(mesh=render_mesh, face_colors=face_color)
+        visual = render_mesh.visual
+        # If the mesh already carries varied vertex/face colors, keep them.
+        if isinstance(visual, trimesh.visual.ColorVisuals):
+            if hasattr(visual, "vertex_colors") and visual.vertex_colors is not None:
+                vc = visual.vertex_colors
+                if len(vc) > 0 and np.std(vc[:, :3].astype(float)) > 5.0:
+                    return render_mesh
+
+        # Normal-based shading gives DINOv2 geometric cues.
+        normals = render_mesh.vertex_normals
+        light_dir = np.array([0.5, 0.3, 0.8])
+        light_dir /= np.linalg.norm(light_dir)
+        diffuse = np.clip(normals @ light_dir, 0.15, 1.0)
+        colors = (diffuse[:, None] * np.array([[210, 210, 215]])).clip(0, 255).astype(np.uint8)
+        alpha = np.full((len(colors), 1), 255, dtype=np.uint8)
+        render_mesh.visual = trimesh.visual.ColorVisuals(
+            mesh=render_mesh, vertex_colors=np.hstack([colors, alpha]),
+        )
     except Exception:
-        pass
+        # Last resort: flat color (better than crashing)
+        face_color = np.tile(
+            np.array([[200, 200, 200, 255]], dtype=np.uint8),
+            (len(render_mesh.faces), 1),
+        )
+        try:
+            render_mesh.visual = trimesh.visual.ColorVisuals(
+                mesh=render_mesh, face_colors=face_color,
+            )
+        except Exception:
+            pass
     return render_mesh
 
 

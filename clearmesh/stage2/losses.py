@@ -56,29 +56,79 @@ def eikonal_loss(
     pred_sdf: torch.Tensor,
     gt_sdf: torch.Tensor,
     truncation: float = 0.1,
+    positions: torch.Tensor | None = None,
+    k: int = 6,
 ) -> torch.Tensor:
     """Eikonal regularisation: encourage |∇SDF| ≈ 1 near the surface.
 
-    Uses finite differences on predicted SDF values.  Only penalises
-    points inside the truncation band (where the gradient matters).
+    For sparse voxel inputs (the common case), uses k-nearest-neighbour
+    spatial gradients.  For each near-surface point we find its k spatial
+    neighbours, compute (ΔSDF / Δpos) for each pair, and penalise
+    deviations from unit gradient magnitude.
 
-    Expects ``pred_sdf`` as a **flat** tensor (B, N, 1) with corresponding
-    positions laid out on a regular grid.  For irregular point clouds this
-    is an approximation — we compute pairwise differences between adjacent
-    tokens (sorted by position).
+    Args:
+        pred_sdf:  (B, N, 1)  predicted SDF values
+        gt_sdf:    (B, N, 1)  ground-truth SDF values (for surface mask)
+        truncation: τ — only penalise inside this band
+        positions: (B, N, 3)  world-space positions of the tokens.
+                   Required for sparse inputs.  If None, falls back to
+                   a 1-D finite-difference approximation (grid-like layout).
+        k: number of spatial neighbours for gradient estimation (default 6,
+           matching the 6-connected neighbourhood on a regular grid)
 
-    For grid-based SDF (B, R, R, R) see ``eikonal_loss_grid``.
+    For dense grid SDF (B, R, R, R) see ``eikonal_loss_grid``.
     """
-    # Finite differences along token dimension (approximate)
-    dx = pred_sdf[:, 1:, :] - pred_sdf[:, :-1, :]  # (B, N-1, 1)
-    grad_mag = dx.abs()  # simplistic 1-D proxy
+    if positions is None:
+        # Legacy fallback: 1-D finite differences (only valid for grid-ordered tokens)
+        dx = pred_sdf[:, 1:, :] - pred_sdf[:, :-1, :]
+        grad_mag = dx.abs()
+        near_surface = gt_sdf[:, :-1, :].abs() < truncation
+        if near_surface.sum() == 0:
+            return torch.tensor(0.0, device=pred_sdf.device)
+        return ((grad_mag[near_surface] - 1.0) ** 2).mean()
 
-    # Mask: only penalise near-surface region
-    near_surface = gt_sdf[:, :-1, :].abs() < truncation
-    if near_surface.sum() == 0:
+    B, N, _ = pred_sdf.shape
+    if N < k + 1:
         return torch.tensor(0.0, device=pred_sdf.device)
 
-    return ((grad_mag[near_surface] - 1.0) ** 2).mean()
+    losses = []
+    for b in range(B):
+        # Near-surface mask
+        near_mask = gt_sdf[b, :, 0].abs() < truncation  # (N,)
+        if near_mask.sum() == 0:
+            continue
+
+        pos_b = positions[b]        # (N, 3) float
+        sdf_b = pred_sdf[b, :, 0]   # (N,)
+
+        # k-NN on positions (using cdist — N is small, typically <8192)
+        with torch.no_grad():
+            dists = torch.cdist(pos_b.unsqueeze(0), pos_b.unsqueeze(0)).squeeze(0)  # (N, N)
+            # Exclude self (set diagonal to inf)
+            dists.fill_diagonal_(float('inf'))
+            # Get k nearest neighbours
+            actual_k = min(k, N - 1)
+            _, nn_idx = dists.topk(actual_k, dim=1, largest=False)  # (N, k)
+
+        # Compute spatial gradients via finite differences to neighbours
+        nn_sdf = sdf_b[nn_idx]           # (N, k)
+        nn_pos = pos_b[nn_idx]           # (N, k, 3)
+        delta_sdf = nn_sdf - sdf_b.unsqueeze(1)              # (N, k)
+        delta_pos = nn_pos - pos_b.unsqueeze(1)               # (N, k, 3)
+        delta_dist = delta_pos.norm(dim=-1).clamp(min=1e-8)   # (N, k)
+
+        # |∇SDF| ≈ |ΔSDF| / |Δpos| for each neighbour pair
+        grad_mag = (delta_sdf.abs() / delta_dist)  # (N, k)
+
+        # Average over neighbours, then penalise deviation from 1
+        grad_mag_mean = grad_mag.mean(dim=1)  # (N,)
+
+        loss_b = ((grad_mag_mean[near_mask] - 1.0) ** 2).mean()
+        losses.append(loss_b)
+
+    if not losses:
+        return torch.tensor(0.0, device=pred_sdf.device)
+    return torch.stack(losses).mean()
 
 
 def eikonal_loss_grid(
@@ -229,6 +279,8 @@ class ClearMeshLoss(nn.Module):
         self,
         pred_sdf: torch.Tensor,
         gt_sdf: torch.Tensor,
+        # Sparse token positions for spatial eikonal
+        positions: torch.Tensor | None = None,
         # Optional mesh-space args (from FlexiCubes extraction)
         extracted_vertices: torch.Tensor | None = None,
         extracted_faces: torch.Tensor | None = None,
@@ -256,7 +308,8 @@ class ClearMeshLoss(nn.Module):
                 )
             else:
                 losses["eikonal"] = self.eikonal_weight * eikonal_loss(
-                    pred_sdf, gt_sdf, self.sdf_truncation
+                    pred_sdf, gt_sdf, self.sdf_truncation,
+                    positions=positions,
                 )
 
         # --- Mesh-space losses (when FlexiCubes provides them) ---
