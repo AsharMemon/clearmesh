@@ -44,6 +44,8 @@ watertight_weight: 0.2           # Watertight regularisation (FlexiCubes steps o
 # === FlexiCubes ===
 flexicubes_interval: 10          # Run FlexiCubes extraction every N steps
                                  # (expensive; lower = better quality, slower)
+flexicubes_resolution: 0         # 0=disabled; set to 16-20 for training-time FC
+                                 # (R=20 needs 8000 tokens, fits at step 30K+)
 
 # === Progressive Training Schedule ===
 # Gradually increase token count for stability (inspired by UltraShape)

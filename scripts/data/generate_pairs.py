@@ -964,6 +964,7 @@ def generate_coarse_mesh_shape_only(
     verbose_trellis_progress: bool = False,
     sparse_structure_sampler_params: dict | None = None,
     shape_slat_sampler_params: dict | None = None,
+    return_intermediates: bool = False,
 ):
     """Run TRELLIS.2 shape-only path (skip texture generation)."""
     with torch.no_grad():
@@ -1027,12 +1028,74 @@ def generate_coarse_mesh_shape_only(
 
         coarse_mesh = meshes[0]
 
+        # Capture intermediates for Stage 2 training before cleanup
+        intermediates = None
+        if return_intermediates:
+            try:
+                # coords: sparse structure voxel positions
+                # May be (N, 4) with [batch, x, y, z] or (N, 3) [x, y, z]
+                if isinstance(coords, torch.Tensor):
+                    if coords.dim() == 2 and coords.shape[1] == 4:
+                        coords_np = coords[:, 1:].cpu().numpy().astype(np.int32)
+                    elif coords.dim() == 2 and coords.shape[1] == 3:
+                        coords_np = coords.cpu().numpy().astype(np.int32)
+                    else:
+                        coords_np = coords.cpu().numpy().astype(np.int32)
+                elif hasattr(coords, 'coords'):
+                    # SparseTensor from spconv
+                    c = coords.coords
+                    coords_np = (c[:, 1:] if c.shape[1] == 4 else c).cpu().numpy().astype(np.int32)
+                else:
+                    coords_np = None
+
+                # shape_slat: SLAT features (N, 32)
+                if hasattr(shape_slat, 'feats'):
+                    slat_feats = shape_slat.feats.cpu().numpy().astype(np.float16)
+                elif hasattr(shape_slat, 'F'):
+                    slat_feats = shape_slat.F.cpu().numpy().astype(np.float16)
+                elif isinstance(shape_slat, torch.Tensor):
+                    t = shape_slat.squeeze(0) if shape_slat.dim() == 3 else shape_slat
+                    slat_feats = t.cpu().numpy().astype(np.float16)
+                else:
+                    slat_feats = None
+
+                # cond_512: DINOv2 features (M, 1024)
+                if isinstance(cond_512, dict):
+                    cond_tensor = cond_512.get('cond', cond_512.get('image_cond'))
+                    if cond_tensor is None:
+                        # Try first value
+                        cond_tensor = next(iter(cond_512.values()))
+                elif isinstance(cond_512, (list, tuple)):
+                    cond_tensor = cond_512[0]
+                else:
+                    cond_tensor = cond_512
+
+                if isinstance(cond_tensor, torch.Tensor):
+                    ct = cond_tensor.squeeze(0) if cond_tensor.dim() == 3 else cond_tensor
+                    cond_feats = ct.cpu().numpy().astype(np.float16)
+                else:
+                    cond_feats = None
+
+                if coords_np is not None and slat_feats is not None:
+                    intermediates = {
+                        'positions': coords_np,
+                        'coarse_voxels': slat_feats,
+                        'cond_features': cond_feats,
+                        'ss_res': ss_res,
+                    }
+            except Exception as e:
+                print(f"    [intermediates] failed to capture: {e}")
+                intermediates = None
+
         # Eagerly release intermediates before returning — their CPU shadows
         # from low_vram model shuffling are the main source of RSS growth.
         del processed_image, cond_512, coords, shape_slat, meshes
         if cond_1024 is not None:
             del cond_1024
         cleanup_memory(use_malloc_trim=False)
+
+        if return_intermediates:
+            return coarse_mesh, intermediates
         return coarse_mesh
 
 
@@ -1045,6 +1108,7 @@ def generate_coarse_mesh(
     verbose_trellis_progress: bool = False,
     sparse_structure_sampler_params: dict | None = None,
     shape_slat_sampler_params: dict | None = None,
+    return_intermediates: bool = False,
 ):
     """Run TRELLIS.2 to generate a coarse mesh from an image."""
     if geometry_only:
@@ -1056,6 +1120,7 @@ def generate_coarse_mesh(
             verbose_trellis_progress=verbose_trellis_progress,
             sparse_structure_sampler_params=sparse_structure_sampler_params,
             shape_slat_sampler_params=shape_slat_sampler_params,
+            return_intermediates=return_intermediates,
         )
 
     with torch.no_grad():
@@ -1073,8 +1138,14 @@ def generate_coarse_mesh(
         return coarse_mesh
 
 
-def save_pair(coarse_mesh, fine_mesh_path: str, output_dir: str, uid: str):
-    """Save a coarse/fine pair to disk."""
+def save_pair(coarse_mesh, fine_mesh_path: str, output_dir: str, uid: str,
+              intermediates: dict | None = None):
+    """Save a coarse/fine pair to disk.
+
+    If *intermediates* is provided (from return_intermediates=True),
+    also saves SLAT features, voxel positions, and DINOv2 conditioning
+    as numpy arrays for Stage 2 training.
+    """
     pair_dir = os.path.join(output_dir, uid)
     os.makedirs(pair_dir, exist_ok=True)
 
@@ -1096,6 +1167,19 @@ def save_pair(coarse_mesh, fine_mesh_path: str, output_dir: str, uid: str):
         except OSError:
             import shutil
             shutil.copy2(fine_mesh_path, fine_link)
+
+    # Save SLAT + DINOv2 intermediates for Stage 2 training
+    if intermediates is not None:
+        try:
+            np.save(os.path.join(pair_dir, "coarse_voxels.npy"),
+                    intermediates['coarse_voxels'])
+            np.save(os.path.join(pair_dir, "positions.npy"),
+                    intermediates['positions'])
+            if intermediates.get('cond_features') is not None:
+                np.save(os.path.join(pair_dir, "cond_features.npy"),
+                        intermediates['cond_features'])
+        except Exception as e:
+            print(f"    [save_pair] warning: failed to save intermediates: {e}")
 
     return pair_dir
 
@@ -1647,17 +1731,22 @@ def generate_pairs(
                 rss_pre = get_rss_gb()
                 _set_current_model(uid=uid, path=mesh_path, phase=f"trellis:view{view_idx}:seed{seed}")
                 try:
-                    coarse = generate_coarse_mesh(
+                    trellis_result = generate_coarse_mesh(
                         pipeline, image, pipeline_type, seed=seed,
                         geometry_only=geometry_only,
                         verbose_trellis_progress=verbose_trellis_progress,
                         sparse_structure_sampler_params=DEFAULT_SPARSE_SAMPLER_PARAMS,
                         shape_slat_sampler_params=DEFAULT_SHAPE_SAMPLER_PARAMS,
+                        return_intermediates=True,
                     )
+                    if isinstance(trellis_result, tuple):
+                        coarse, slat_intermediates = trellis_result
+                    else:
+                        coarse, slat_intermediates = trellis_result, None
 
                     n_verts = int(coarse.vertices.shape[0])
                     if n_verts < MIN_COARSE_VERTS:
-                        del coarse
+                        del coarse, slat_intermediates
                         cleanup_memory(use_malloc_trim=use_malloc_trim)
                         consecutive_empty = 0  # Non-empty result resets counter
                         rss_post = get_rss_gb()
@@ -1676,7 +1765,8 @@ def generate_pairs(
                         print(f"    [trellis] v{view_idx}/s{seed} decimated to verts={n_verts}")
 
                     # ── Save pair ──
-                    pair_dir = save_pair(coarse, mesh_path, shard_output_dir, uid)
+                    pair_dir = save_pair(coarse, mesh_path, shard_output_dir, uid,
+                                        intermediates=slat_intermediates)
                     image.save(os.path.join(pair_dir, "rendered.png"))
 
                     meta = {
@@ -1693,6 +1783,8 @@ def generate_pairs(
                         "winning_view_metrics": selected_views[view_idx][5] if view_idx < len(selected_views) else None,
                         "render_size": render_size,
                         "pipeline_type": pipeline_type,
+                        "ss_res": slat_intermediates.get("ss_res") if slat_intermediates else None,
+                        "has_slat": slat_intermediates is not None,
                     }
                     with open(os.path.join(pair_dir, "meta.json"), "w") as f:
                         json.dump(meta, f, indent=2)
@@ -1705,7 +1797,7 @@ def generate_pairs(
                     success = True
                     _clear_recycle_artifacts()
 
-                    del coarse
+                    del coarse, slat_intermediates
                     cleanup_memory(use_malloc_trim=use_malloc_trim)
                     rss_post = get_rss_gb()
                     print(f"    [trellis] v{view_idx}/s{seed} SUCCESS verts={n_verts} RSS={rss_post:.1f}GiB (Δ={rss_post-rss_pre:+.1f})")
@@ -1912,22 +2004,29 @@ def generate_pairs(
                             rss_pre = get_rss_gb()
                             _set_current_model(uid=uid, path=mesh_path, phase=f"trellis:rescue:{rescue_label}:seed{seed}")
                             try:
-                                coarse = generate_coarse_mesh(
+                                trellis_result = generate_coarse_mesh(
                                     pipeline, rescue_image, pipeline_type, seed=seed,
                                     geometry_only=geometry_only,
                                     verbose_trellis_progress=verbose_trellis_progress,
                                     sparse_structure_sampler_params=RESCUE_SPARSE_SAMPLER_PARAMS,
                                     shape_slat_sampler_params=RESCUE_SHAPE_SAMPLER_PARAMS,
+                                    return_intermediates=True,
                                 )
+                                if isinstance(trellis_result, tuple):
+                                    coarse, slat_intermediates = trellis_result
+                                else:
+                                    coarse, slat_intermediates = trellis_result, None
+
                                 n_verts = int(coarse.vertices.shape[0])
                                 if n_verts < MIN_COARSE_VERTS or n_verts > MAX_COARSE_VERTS:
-                                    del coarse
+                                    del coarse, slat_intermediates
                                     cleanup_memory(use_malloc_trim=use_malloc_trim)
                                     rss_post = get_rss_gb()
                                     print(f"    [trellis] rescue/{rescue_label}/s{seed} quality_reject verts={n_verts} RSS={rss_post:.1f}GiB (Δ={rss_post-rss_pre:+.1f})")
                                     continue
 
-                                pair_dir = save_pair(coarse, mesh_path, shard_output_dir, uid)
+                                pair_dir = save_pair(coarse, mesh_path, shard_output_dir, uid,
+                                                    intermediates=slat_intermediates)
                                 rescue_image.save(os.path.join(pair_dir, "rendered.png"))
                                 meta = {
                                     "uid": uid,
@@ -1943,6 +2042,8 @@ def generate_pairs(
                                     "winning_view_metrics": rescue_metrics,
                                     "render_size": render_size,
                                     "pipeline_type": pipeline_type,
+                                    "ss_res": slat_intermediates.get("ss_res") if slat_intermediates else None,
+                                    "has_slat": slat_intermediates is not None,
                                 }
                                 with open(os.path.join(pair_dir, "meta.json"), "w") as f:
                                     json.dump(meta, f, indent=2)
@@ -1956,7 +2057,7 @@ def generate_pairs(
                                 rescue_succeeded = True
                                 _clear_recycle_artifacts()
 
-                                del coarse
+                                del coarse, slat_intermediates
                                 cleanup_memory(use_malloc_trim=use_malloc_trim)
                                 rss_post = get_rss_gb()
                                 print(f"    [trellis] rescue/{rescue_label}/s{seed} SUCCESS verts={n_verts} RSS={rss_post:.1f}GiB (Δ={rss_post-rss_pre:+.1f})")

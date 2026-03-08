@@ -20,6 +20,7 @@ Usage:
 
 import argparse
 import json
+import logging
 import math
 import os
 import signal
@@ -37,6 +38,8 @@ from tqdm import tqdm
 from clearmesh.stage2.losses import ClearMeshLoss
 from clearmesh.stage2.model import RefinementDiT
 
+logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # Dataset — loads coarse/fine voxel pairs with near-surface sampling
@@ -49,10 +52,12 @@ class VoxelPairDataset(Dataset):
       - coarse_features:  (N, voxel_dim)  features at occupied voxel positions
       - positions:        (N, 3)          integer voxel coordinates
       - gt_sdf:           (N, 1)          ground-truth SDF at those positions
+      - cond_features:    (M, 1024) or None — DINOv2 conditioning features
+      - cond_mask:        (M,) bool or None — foreground mask for cond tokens
       - uid:              str             model identifier
 
     Sampling strategy (for SDF imbalance mitigation):
-      - near_surface_ratio of points sampled where |SDF| < τ
+      - near_surface_ratio of points sampled where |SDF| < tau
       - remaining points sampled uniformly
     """
 
@@ -69,6 +74,7 @@ class VoxelPairDataset(Dataset):
         self.near_surface_ratio = near_surface_ratio
         self.sdf_truncation = sdf_truncation
         self.voxel_dim = voxel_dim
+        self._warned_uids: set[str] = set()
 
         # Load or discover pairs
         manifest = self.data_dir / "pairs_manifest.json"
@@ -78,27 +84,61 @@ class VoxelPairDataset(Dataset):
         else:
             self.pairs = self._discover_pairs()
 
+        if len(self.pairs) == 0:
+            raise RuntimeError(
+                f"No valid training pairs found in {data_dir}. "
+                f"Each pair directory must contain coarse_voxels.npy and fine_sdf.npy. "
+                f"Run convert_pairs_to_sdf.py first."
+            )
+
+        # Filter to only valid pairs (must have coarse_voxels and fine_sdf)
+        valid_pairs = [p for p in self.pairs if "coarse_voxels" in p]
+        if len(valid_pairs) < len(self.pairs):
+            n_skipped = len(self.pairs) - len(valid_pairs)
+            logger.warning(
+                f"Skipping {n_skipped} pairs without pre-computed voxel features. "
+                f"Run convert_pairs_to_sdf.py to generate missing files."
+            )
+        self.pairs = valid_pairs
+
+        if len(self.pairs) == 0:
+            raise RuntimeError(
+                f"No pairs with coarse_voxels.npy found in {data_dir}. "
+                f"Run convert_pairs_to_sdf.py first."
+            )
+
+        logger.info(f"Loaded {len(self.pairs)} training pairs from {data_dir}")
+
     def _discover_pairs(self) -> list[dict]:
         pairs = []
-        for d in sorted(self.data_dir.iterdir()):
-            if not d.is_dir():
+        # Check for shard subdirectories (generate_pairs.py creates shard_0/, shard_1/, etc.)
+        shard_dirs = sorted(self.data_dir.glob("shard_*"))
+        search_dirs = shard_dirs if shard_dirs else [self.data_dir]
+
+        for parent_dir in search_dirs:
+            if not parent_dir.is_dir():
                 continue
-            coarse = list(d.glob("coarse_voxels.npy"))
-            fine = list(d.glob("fine_sdf.npy"))
-            if coarse and fine:
-                pairs.append({
-                    "uid": d.name,
-                    "coarse_voxels": str(coarse[0]),
-                    "fine_sdf": str(fine[0]),
-                    "positions": str(d / "positions.npy"),
-                })
-            # Fallback: original mesh-based pairs
-            elif list(d.glob("coarse.*")) and list(d.glob("fine.*")):
-                pairs.append({
-                    "uid": d.name,
-                    "coarse": str(list(d.glob("coarse.*"))[0]),
-                    "fine": str(list(d.glob("fine.*"))[0]),
-                })
+            for d in sorted(parent_dir.iterdir()):
+                if not d.is_dir():
+                    continue
+                coarse = d / "coarse_voxels.npy"
+                fine = d / "fine_sdf.npy"
+                if coarse.exists() and fine.exists():
+                    entry = {
+                        "uid": d.name,
+                        "coarse_voxels": str(coarse),
+                        "fine_sdf": str(fine),
+                        "positions": str(d / "positions.npy"),
+                    }
+                    # Optional: DINOv2 conditioning features
+                    cond_path = d / "cond_features.npy"
+                    if cond_path.exists():
+                        entry["cond_features"] = str(cond_path)
+                    # Optional: rendered conditioning image (for deriving cond_mask)
+                    rendered_path = d / "rendered.png"
+                    if rendered_path.exists():
+                        entry["rendered"] = str(rendered_path)
+                    pairs.append(entry)
         return pairs
 
     def __len__(self) -> int:
@@ -106,19 +146,12 @@ class VoxelPairDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict:
         pair = self.pairs[idx]
+        uid = pair.get("uid", "unknown")
 
         try:
-            # Preferred: pre-computed voxel features + SDF
-            if "coarse_voxels" in pair:
-                features = torch.from_numpy(np.load(pair["coarse_voxels"])).float()
-                gt_sdf = torch.from_numpy(np.load(pair["fine_sdf"])).float()
-                positions = torch.from_numpy(np.load(pair["positions"])).float()
-            else:
-                # Fallback: generate on-the-fly (placeholder)
-                N = self.max_tokens
-                features = torch.randn(N, self.voxel_dim)
-                gt_sdf = torch.randn(N, 1)
-                positions = torch.rand(N, 3) * 127  # fake integer coords
+            features = torch.from_numpy(np.load(pair["coarse_voxels"])).float()
+            gt_sdf = torch.from_numpy(np.load(pair["fine_sdf"])).float()
+            positions = torch.from_numpy(np.load(pair["positions"])).float()
 
             # --- Near-surface sampling ---
             N_total = features.shape[0]
@@ -148,23 +181,112 @@ class VoxelPairDataset(Dataset):
                 gt_sdf = gt_sdf[sel]
                 positions = positions[sel]
 
+            # Pad if fewer tokens than max_tokens
+            if features.shape[0] < self.max_tokens:
+                pad_n = self.max_tokens - features.shape[0]
+                features = F.pad(features, (0, 0, 0, pad_n))
+                gt_sdf = F.pad(gt_sdf, (0, 0, 0, pad_n))
+                positions = F.pad(positions, (0, 0, 0, pad_n))
+
             # Ensure gt_sdf is (N, 1)
             if gt_sdf.dim() == 1:
                 gt_sdf = gt_sdf.unsqueeze(-1)
 
-        except Exception:
-            # Safety fallback — zeros
-            N = self.max_tokens
-            features = torch.zeros(N, self.voxel_dim)
-            gt_sdf = torch.zeros(N, 1)
-            positions = torch.zeros(N, 3)
+            # --- Optional: DINOv2 conditioning ---
+            cond_features = None
+            cond_mask = None
+            if pair.get("cond_features"):
+                cond_path = Path(pair["cond_features"])
+                if cond_path.exists():
+                    cond_features = torch.from_numpy(np.load(str(cond_path))).float()
+                    # Derive foreground mask from rendered image alpha
+                    rendered_path = pair.get("rendered")
+                    if rendered_path and Path(rendered_path).exists():
+                        try:
+                            from PIL import Image
+                            img = Image.open(rendered_path).convert("RGBA")
+                            alpha = np.array(img)[:, :, 3]
+                            M = cond_features.shape[0]
+                            grid_size = int(M ** 0.5)
+                            # CLS token adjustment
+                            if grid_size * grid_size != M and (grid_size + 1) * (grid_size + 1) != M:
+                                grid_size = int((M - 1) ** 0.5)
+                                if grid_size * grid_size == M - 1:
+                                    # Has CLS token — mask all True for CLS, patch mask from alpha
+                                    alpha_small = np.array(
+                                        Image.fromarray(alpha).resize(
+                                            (grid_size, grid_size), Image.BILINEAR
+                                        )
+                                    )
+                                    patch_mask = (alpha_small > 128).flatten()
+                                    cond_mask = torch.from_numpy(
+                                        np.concatenate([[True], patch_mask])
+                                    )
+                                else:
+                                    cond_mask = torch.ones(M, dtype=torch.bool)
+                            else:
+                                alpha_small = np.array(
+                                    Image.fromarray(alpha).resize(
+                                        (grid_size, grid_size), Image.BILINEAR
+                                    )
+                                )
+                                cond_mask = torch.from_numpy(
+                                    (alpha_small > 128).flatten()
+                                )
+                        except Exception:
+                            cond_mask = torch.ones(cond_features.shape[0], dtype=torch.bool)
+                    else:
+                        cond_mask = torch.ones(cond_features.shape[0], dtype=torch.bool)
+
+        except Exception as e:
+            if uid not in self._warned_uids:
+                logger.warning(f"Failed to load pair '{uid}': {e}")
+                self._warned_uids.add(uid)
+            # Skip to a different valid sample (with recursion guard)
+            alt_idx = torch.randint(0, len(self), (1,)).item()
+            if alt_idx == idx:
+                alt_idx = (idx + 1) % len(self)
+            return self[alt_idx]
 
         return {
             "coarse_features": features,       # (N, voxel_dim)
             "positions": positions,             # (N, 3)
             "gt_sdf": gt_sdf,                  # (N, 1)
-            "uid": pair.get("uid", "unknown"),
+            "cond_features": cond_features,    # (M, cond_dim) or None
+            "cond_mask": cond_mask,            # (M,) bool or None
+            "uid": uid,
         }
+
+
+def voxelpair_collate_fn(batch: list[dict]) -> dict:
+    """Custom collate that handles optional variable-length cond_features."""
+    result = {
+        "coarse_features": torch.stack([b["coarse_features"] for b in batch]),
+        "positions": torch.stack([b["positions"] for b in batch]),
+        "gt_sdf": torch.stack([b["gt_sdf"] for b in batch]),
+        "uid": [b["uid"] for b in batch],
+    }
+
+    # DINOv2 conditioning: only include if ALL samples in batch have it
+    if all(b.get("cond_features") is not None for b in batch):
+        max_M = max(b["cond_features"].shape[0] for b in batch)
+        cond_dim = batch[0]["cond_features"].shape[1]
+        cond_feats = torch.zeros(len(batch), max_M, cond_dim)
+        cond_masks = torch.zeros(len(batch), max_M, dtype=torch.bool)
+        for i, b in enumerate(batch):
+            M = b["cond_features"].shape[0]
+            cond_feats[i, :M] = b["cond_features"]
+            if b.get("cond_mask") is not None:
+                cond_masks[i, :M] = b["cond_mask"]
+            else:
+                cond_masks[i, :M] = True
+        result["cond_features"] = cond_feats
+        result["cond_mask"] = cond_masks
+    else:
+        result["cond_features"] = None
+        result["cond_mask"] = None
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -295,10 +417,15 @@ class Trainer:
         )
 
         # --- FlexiCubes ---
-        self.flexicubes = FlexiCubesExtractor(
-            resolution=config.get("resolution", 128),
-            device=str(self.device),
-        )
+        fc_res = config.get("flexicubes_resolution", 0)
+        if fc_res > 0:
+            self.flexicubes = FlexiCubesExtractor(
+                resolution=fc_res, device=str(self.device),
+            )
+            logger.info(f"FlexiCubes enabled at resolution {fc_res}")
+        else:
+            self.flexicubes = None
+            logger.info("FlexiCubes disabled (flexicubes_resolution=0)")
 
         # --- Progressive schedule ---
         self.progressive = config.get("progressive_schedule", [])
@@ -342,6 +469,7 @@ class Trainer:
             num_workers=self.config.get("num_workers", 4),
             pin_memory=True,
             drop_last=True,
+            collate_fn=voxelpair_collate_fn,
         )
 
     # ------------------------------------------------------------------
@@ -388,6 +516,14 @@ class Trainer:
         gt_sdf = batch["gt_sdf"].to(self.device)              # (B, N, 1)
         B = features.shape[0]
 
+        # DINOv2 conditioning (optional — works without it)
+        cond_features = batch.get("cond_features")
+        cond_mask = batch.get("cond_mask")
+        if cond_features is not None:
+            cond_features = cond_features.to(self.device)
+        if cond_mask is not None:
+            cond_mask = cond_mask.to(self.device)
+
         # Diffusion forward process
         t = torch.rand(B, device=self.device)
         noise = torch.randn_like(gt_sdf)
@@ -398,8 +534,8 @@ class Trainer:
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             pred_noise = self.model(
                 features, positions, t,
-                cond_features=None,  # TODO: add DINO features when available
-                cond_mask=None,
+                cond_features=cond_features,
+                cond_mask=cond_mask,
                 noisy_sdf=noisy_sdf,
             )
 
@@ -411,27 +547,46 @@ class Trainer:
 
         # FlexiCubes mesh-space losses (every K steps)
         fc_interval = self.config.get("flexicubes_interval", 10)
-        if fc_interval > 0 and self.global_step % fc_interval == 0:
+        fc_res = self.config.get("flexicubes_resolution", 0)
+
+        if (self.flexicubes is not None and fc_interval > 0 and fc_res > 0
+                and self.global_step % fc_interval == 0):
             try:
-                R = self.config.get("resolution", 128)
-                if pred_sdf.shape[1] >= R ** 3:
-                    sdf_grid = pred_sdf[0, : R ** 3, 0].float().view(R, R, R)
-                    verts, faces = self.flexicubes.extract(sdf_grid)
-                    if verts is not None and verts.shape[0] > 0:
-                        gt_grid = gt_sdf[0, : R ** 3, 0].float().view(R, R, R)
-                        gt_v, gt_f = self.flexicubes.extract(gt_grid)
-                        if gt_v is not None and gt_v.shape[0] > 0:
-                            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                                losses = self.criterion(
-                                    pred_sdf=pred_sdf, gt_sdf=gt_sdf,
-                                    extracted_vertices=verts,
-                                    extracted_faces=faces,
-                                    gt_vertices=gt_v, gt_faces=gt_f,
-                                    pred_points=verts.unsqueeze(0),
-                                    gt_points=gt_v.unsqueeze(0),
-                                )
-            except Exception:
-                pass  # Fall back to SDF-only loss
+                R_fc = fc_res
+                R_data = self.config.get("resolution", 128)
+
+                # Scatter sparse token predictions into a small dense grid
+                # via nearest-neighbor interpolation
+                pos_norm = (positions[0].float() / max(R_data - 1, 1)) * 2 - 1  # (N, 3) in [-1, 1]
+                lin = torch.linspace(-1, 1, R_fc, device=self.device)
+                gx, gy, gz = torch.meshgrid(lin, lin, lin, indexing="ij")
+                grid_pts = torch.stack([gx, gy, gz], -1).reshape(-1, 3)  # (R_fc^3, 3)
+
+                # Find nearest training token for each grid point
+                dists = torch.cdist(grid_pts.unsqueeze(0), pos_norm.unsqueeze(0))
+                nn_idx = dists.argmin(dim=2).squeeze(0)  # (R_fc^3,)
+
+                pred_grid = pred_sdf[0, nn_idx, 0].float().view(R_fc, R_fc, R_fc)
+                gt_grid = gt_sdf[0, nn_idx, 0].float().view(R_fc, R_fc, R_fc)
+
+                verts, faces = self.flexicubes.extract(pred_grid)
+                if verts is not None and verts.shape[0] > 0:
+                    gt_v, gt_f = self.flexicubes.extract(gt_grid)
+                    if gt_v is not None and gt_v.shape[0] > 0:
+                        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                            losses = self.criterion(
+                                pred_sdf=pred_sdf, gt_sdf=gt_sdf,
+                                extracted_vertices=verts,
+                                extracted_faces=faces,
+                                gt_vertices=gt_v, gt_faces=gt_f,
+                                pred_points=verts.unsqueeze(0),
+                                gt_points=gt_v.unsqueeze(0),
+                            )
+            except Exception as e:
+                if self.global_step % (fc_interval * 100) == 0:
+                    logger.warning(
+                        f"FlexiCubes extraction failed at step {self.global_step}: {e}"
+                    )
 
         # Backward
         self.optimizer.zero_grad()

@@ -16,7 +16,7 @@ voxel_dim: 32                    # Input voxel feature dimension
 model_dim: 512                   # Transformer hidden dimension
 num_heads: 8                     # Attention heads
 num_layers: 12                   # DiT blocks
-cond_dim: 768                    # DINO ViT-B conditioning feature dim
+cond_dim: 1024                   # DINOv2-ViT-L output dim (TRELLIS.2-4B uses ViT-L)
 
 # === Training ===
 batch_size: 4                    # A100 80GB can handle batch_size=4 at 128^3
@@ -28,6 +28,7 @@ num_workers: 4                   # DataLoader workers
 
 # === FlexiCubes (Option C) ===
 flexicubes_interval: 10          # Run FlexiCubes extraction every N steps
+flexicubes_resolution: 0         # 0=disabled; set to 16-20 for training-time FC
 
 # === Loss Weights ===
 chamfer_weight: 1.0              # Chamfer distance
