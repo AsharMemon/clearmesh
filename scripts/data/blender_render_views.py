@@ -122,18 +122,52 @@ def normalize_object(obj: bpy.types.Object) -> float:
 
 
 def assign_material(obj: bpy.types.Object) -> None:
-    mat = bpy.data.materials.new(name="ClearmeshGray")
+    """Create a Cycles material for the mesh.
+
+    If the mesh has vertex colors (from normal-based shading in
+    prepare_mesh_asset.py), the material uses a Color Attribute node so
+    Blender renders geometric cues that DINOv2 can extract meaningful
+    features from.  Falls back to flat gray only when no vertex colors
+    exist.
+    """
+    mat = bpy.data.materials.new(name="ClearmeshRender")
     mat.use_nodes = True
-    bsdf = mat.node_tree.nodes.get("Principled BSDF")
-    if bsdf is not None:
+    tree = mat.node_tree
+    bsdf = tree.nodes.get("Principled BSDF")
+    if bsdf is None:
+        # Shouldn't happen, but guard against unusual Blender versions
+        obj.data.materials.clear()
+        obj.data.materials.append(mat)
+        return
+
+    # Check for vertex colors (Blender 3.x: color_attributes; 2.x: vertex_colors)
+    mesh_data = obj.data
+    has_vcol = False
+    vcol_name = None
+    if hasattr(mesh_data, "color_attributes") and len(mesh_data.color_attributes) > 0:
+        has_vcol = True
+        vcol_name = mesh_data.color_attributes[0].name
+    elif hasattr(mesh_data, "vertex_colors") and len(mesh_data.vertex_colors) > 0:
+        has_vcol = True
+        vcol_name = mesh_data.vertex_colors[0].name
+
+    if has_vcol and vcol_name:
+        # Wire vertex colors → Base Color via Color Attribute node
+        attr_node = tree.nodes.new("ShaderNodeVertexColor")
+        attr_node.layer_name = vcol_name
+        tree.links.new(attr_node.outputs["Color"], bsdf.inputs["Base Color"])
+    else:
+        # No vertex colors — use flat gray (last resort)
         bsdf.inputs["Base Color"].default_value = (0.82, 0.82, 0.82, 1.0)
-        bsdf.inputs["Roughness"].default_value = 0.7
-        spec_input = (
-            bsdf.inputs.get("Specular IOR Level")
-            or bsdf.inputs.get("Specular")
-        )
-        if spec_input is not None:
-            spec_input.default_value = 0.2
+
+    bsdf.inputs["Roughness"].default_value = 0.7
+    spec_input = (
+        bsdf.inputs.get("Specular IOR Level")
+        or bsdf.inputs.get("Specular")
+    )
+    if spec_input is not None:
+        spec_input.default_value = 0.2
+
     obj.data.materials.clear()
     obj.data.materials.append(mat)
 
