@@ -1,0 +1,65 @@
+# ClearMesh Stage 2 Training Configuration — SLAT-space diffusion
+#
+# Trains RefinementDiT to predict refined SLAT features (32-dim) via
+# epsilon-prediction diffusion. Training pairs: coarse SLAT (512 model)
+# → fine SLAT (1024 model). At inference, refined SLAT is decoded by
+# TRELLIS.2's frozen FlexiDualGridVaeDecoder.
+#
+# Usage:
+#   # Single GPU
+#   python -m clearmesh.stage2.train --config configs/train_stage2_slat.yaml
+#
+#   # Multi-GPU (DDP)
+#   torchrun --nproc_per_node=4 -m clearmesh.stage2.train \
+#       --config configs/train_stage2_slat.yaml
+
+# === Data ===
+data_dir: /workspace/data/slat_pairs
+# slat_mean / slat_std: leave unset to use TRELLIS.2 4B defaults hardcoded
+# in SlatPairDataset. Override only if using a different TRELLIS.2 variant.
+
+# === Model (matched to TRELLIS.2 SLatFlowModel) ===
+voxel_dim: 32                    # TRELLIS.2 SLAT latent dim (32 channels)
+model_dim: 1536                  # TRELLIS.2 hidden dim
+num_heads: 12                    # TRELLIS.2 attention heads (head_dim=128)
+num_layers: 12                   # First 12 of TRELLIS.2's 30 blocks (~528M params)
+cond_dim: 1024                   # DINOv2-ViT-L output dim
+mlp_ratio: 5.3334                # TRELLIS.2 FFN ratio (hidden=8192)
+
+# === Pretrained Backbone ===
+# Initialize transformer blocks from TRELLIS.2's 512-step shape flow model.
+# noisy_slat_proj and out_head are always freshly initialized (dimension mismatch).
+pretrained_checkpoint: /workspace/models/trellis2-4b/ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.safetensors
+use_checkpoint: true             # Gradient checkpointing (~60% VRAM savings)
+
+# === Training ===
+batch_size: 8                    # Default batch size (overridden by progressive_schedule)
+learning_rate: 0.00005           # 5e-5 for pretrained backbone; fresh heads get 5x
+weight_decay: 0.01               # AdamW weight decay
+total_steps: 10000               # Total training steps (370 pairs → overfit quickly, checkpoint frequently)
+warmup_steps: 200                # Linear warmup steps
+max_grad_norm: 1.0               # Gradient clipping
+
+# === SLAT diffusion loss ===
+# Primary: noise prediction MSE across 32-dim SLAT channels
+# Secondary: x0 reconstruction loss at low noise (t < 0.3)
+x0_weight: 0.1                  # Weight for x0 reconstruction auxiliary loss
+
+# === Dataloader ===
+num_workers: 4                   # DataLoader workers
+
+# === Progressive Training Schedule ===
+# Starts with fewer tokens (faster iteration), ramps up for fine detail.
+# batch_size scales inversely to keep VRAM bounded (~60-65 GB on H100 80GB).
+progressive_schedule:
+  - {step: 0,      num_tokens: 2048, batch_size: 16}  # ~35 GB — fast warmup
+  - {step: 3000,   num_tokens: 4096, batch_size: 8}   # ~50 GB — standard
+  - {step: 7000,   num_tokens: 8192, batch_size: 4}   # ~65 GB — full detail
+
+# === Checkpointing ===
+output_dir: /workspace/checkpoints/clearmesh_stage2_slat
+save_interval: 500               # Save checkpoint every N steps
+log_interval: 25                 # Log losses every N steps
+
+# === Logging ===
+use_wandb: false                 # Set true after `wandb login`

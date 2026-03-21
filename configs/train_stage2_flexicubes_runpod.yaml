@@ -2,10 +2,14 @@
 # Identical to train_stage2_flexicubes.yaml but with /workspace paths for RunPod.
 #
 # Usage:
+#   # Single GPU
 #   python -m clearmesh.stage2.train --config configs/train_stage2_flexicubes_runpod.yaml
+#
+#   # Multi-GPU (DDP)
+#   torchrun --nproc_per_node=N -m clearmesh.stage2.train --config configs/train_stage2_flexicubes_runpod.yaml
 
 # === Data ===
-data_dir: /workspace/training_pairs
+data_dir: /runpod-volume/data/training_pairs
 resolution: 128                  # Voxel grid resolution (128^3)
 
 # === Model (matched to TRELLIS.2 SLatFlowModel) ===
@@ -17,14 +21,14 @@ cond_dim: 1024                   # DINOv2-ViT-L output dim (TRELLIS.2-4B uses Vi
 mlp_ratio: 5.3334                # TRELLIS.2 FFN ratio (hidden=8192)
 
 # === Pretrained Backbone ===
-pretrained_checkpoint: /workspace/models/trellis2-4b/ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.safetensors
+pretrained_checkpoint: /runpod-volume/models/trellis2-4b/ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.safetensors
 use_checkpoint: true             # Gradient checkpointing (~60% VRAM savings)
 
 # === Training ===
-batch_size: 4                    # A100 80GB with bf16 + grad checkpoint
+batch_size: 24                   # Default batch size (overridden by progressive_schedule)
 learning_rate: 0.00005           # 5e-5 for pretrained backbone; fresh heads get 5x
 weight_decay: 0.01               # AdamW weight decay
-total_steps: 100000              # Total training steps
+total_steps: 20000               # Adjusted for 6x larger batches (~same total samples)
 max_grad_norm: 1.0               # Gradient clipping
 num_workers: 4                   # DataLoader workers
 
@@ -35,7 +39,7 @@ near_surface_ratio: 0.6          # 60% supervision points sampled near surface
 
 # === Loss Weights ===
 sdf_weight: 1.0                  # Truncated, surface-weighted SDF L1
-eikonal_weight: 0.1              # |∇SDF| ≈ 1 regularisation
+eikonal_weight: 0.0              # Disabled: incompatible with noise-prediction diffusion
 chamfer_weight: 1.0              # Chamfer distance (FlexiCubes steps only)
 normal_weight: 0.5               # Normal consistency (FlexiCubes steps only)
 edge_weight: 0.3                 # Edge sharpness (FlexiCubes steps only)
@@ -46,15 +50,19 @@ flexicubes_interval: 10          # Run FlexiCubes extraction every N steps
 flexicubes_resolution: 0         # 0=disabled; set to 16-20 for training-time FC
 
 # === Progressive Training Schedule ===
+# batch_size scales down as tokens scale up to fit in 80GB VRAM.
+# Total samples per step = batch_size × num_tokens.
+# At batch_size=4: 100K steps × 4 = 400K sample-steps
+# At batch_size=24: ~17K steps × 24 ≈ 400K sample-steps (same data coverage)
 progressive_schedule:
-  - {step: 0,     num_tokens: 2048}    # Warm up with fewer tokens
-  - {step: 30000, num_tokens: 4096}    # Standard resolution
-  - {step: 70000, num_tokens: 8192}    # High detail (if VRAM permits)
+  - {step: 0,     num_tokens: 2048, batch_size: 24}   # ~35 GB — fast warmup
+  - {step: 5000,  num_tokens: 4096, batch_size: 12}   # ~45 GB — standard
+  - {step: 12000, num_tokens: 8192, batch_size: 6}    # ~55 GB — high detail
 
 # === Checkpointing (Spot pod resilience) ===
-output_dir: /workspace/checkpoints/clearmesh_stage2
-save_interval: 1000              # Save checkpoint every N steps
-log_interval: 100                # Log losses every N steps
+output_dir: /runpod-volume/checkpoints/clearmesh_stage2
+save_interval: 500               # More frequent saves (fewer total steps)
+log_interval: 25                 # Log losses every N steps
 
 # === Logging ===
-use_wandb: true                  # Enable WandB logging
+use_wandb: false                 # Disabled until wandb login configured

@@ -173,18 +173,25 @@ def compute_sdf_for_pair(args: tuple) -> tuple[str, bool, str]:
 
 
 def discover_pair_dirs(pairs_dir: Path) -> list[Path]:
-    """Find all pair directories that have positions.npy."""
+    """Find all pair directories that have positions.npy.
+
+    Scans both root-level pairs and shard_* subdirectories.
+    """
     pair_dirs = []
 
-    # Check for shard subdirectories
+    # Always scan root level plus any shard subdirectories
+    search_dirs = [pairs_dir]
     shard_dirs = sorted(pairs_dir.glob("shard_*"))
-    search_dirs = shard_dirs if shard_dirs else [pairs_dir]
+    search_dirs.extend(shard_dirs)
 
     for parent in search_dirs:
         if not parent.is_dir():
             continue
         for d in sorted(parent.iterdir()):
             if not d.is_dir():
+                continue
+            # Skip shard directories when scanning root (they're scanned separately)
+            if parent == pairs_dir and d.name.startswith("shard_"):
                 continue
             if (d / "positions.npy").exists():
                 pair_dirs.append(d)

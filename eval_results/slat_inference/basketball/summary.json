@@ -1,0 +1,11 @@
+{
+  "name": "basketball",
+  "n_points": 4763,
+  "trellis_time": 2.98,
+  "delta_scale": 1.0,
+  "decode_time": 0.06,
+  "total_time": 3.05,
+  "slat_delta_mean": 1.2335669994354248,
+  "slat_delta_max": 14.378230094909668,
+  "mesh": "246998 verts, 494860 faces"
+}

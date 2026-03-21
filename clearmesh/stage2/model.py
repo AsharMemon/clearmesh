@@ -1,13 +1,23 @@
-"""Stage 2 Refinement DiT — architecture matched to TRELLIS.2 for pretrained weight loading.
+"""Stage 2 Refinement DiT — direct residual prediction with TRELLIS.2 backbone.
+
+Predicts a SLAT delta (residual) that refines coarse SLAT features:
+    refined_slat = coarse_slat + model(coarse_slat, cond_features)
+
+Single forward pass, deterministic output, no noise schedule or DDIM sampling.
+The predicted delta is decoded by TRELLIS.2's frozen FlexiDualGridVaeDecoder.
 
 Key design decisions:
   - Matches TRELLIS.2's SLatFlowModel state_dict layout (hidden=1536, heads=12,
     fused QKV, shared AdaLN, QK RMS norm) so we can load pretrained weights
   - Loads first N of 30 TRELLIS.2 blocks (default 12 — ~528M params)
-  - Adds refinement-specific: sdf_proj (diffusion input), out_layer predicts SDF (dim=1)
+  - Frozen backbone: first N-K blocks frozen, last K blocks trainable (~50-80M)
+  - Fixed dummy timestep t=0 for AdaLN compatibility with pretrained weights
+  - out_head MLP predicts 32-dim SLAT residual (delta)
   - Dense attention (not sparse) — same weight shapes, works on batched tensors
   - Gradient checkpointing for memory efficiency during training
   - Image token masking for cleaner DINO conditioning
+  - All operations in normalized SLAT space (zero-mean, unit-std per channel)
+  - Output fed through TRELLIS.2's FlexiDualGridVaeDecoder at inference
 
 Architecture (per block, matching TRELLIS.2):
   1. AdaLN-modulated self-attention with 3D RoPE + QK RMS Norm
@@ -190,6 +200,9 @@ class CrossAttention(nn.Module):
         M = context.shape[1]
         H, D = self.num_heads, self.head_dim
 
+        if M == 0:
+            return x.new_zeros(B, N, self.dim)
+
         q = self.to_q(x).reshape(B, N, H, D).transpose(1, 2)
         kv = self.to_kv(context).reshape(B, M, 2, H, D)
         k, v = kv.unbind(2)
@@ -201,12 +214,20 @@ class CrossAttention(nn.Module):
 
         # Image token masking: suppress background tokens
         attn_mask = None
+        valid_context = None
         if context_mask is not None:
-            # (B, M) → (B, 1, 1, M) broadcast over heads and queries
-            attn_mask = context_mask[:, None, None, :].expand(B, H, N, M)
-            attn_mask = torch.where(attn_mask, 0.0, float("-inf")).to(q.dtype)
+            # Guard against all-false rows: keep one dummy token alive to avoid NaNs,
+            # then zero the whole output for samples with no valid conditioning.
+            valid_context = context_mask.any(dim=1)
+            safe_mask = context_mask
+            if not valid_context.all():
+                safe_mask = context_mask.clone()
+                safe_mask[~valid_context, 0] = True
+            attn_mask = safe_mask[:, None, None, :].expand(B, H, N, M)
 
         out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        if valid_context is not None and not valid_context.all():
+            out = out * valid_context[:, None, None, None].to(out.dtype)
         return self.to_out(out.transpose(1, 2).reshape(B, N, self.dim))
 
 
@@ -332,14 +353,25 @@ class TimestepEmbedder(nn.Module):
 # ---------------------------------------------------------------------------
 
 class RefinementDiT(nn.Module):
-    """Stage 2 Refinement Diffusion Transformer.
+    """Stage 2 Refinement DiT — direct residual prediction in SLAT space.
 
     Architecture matched to TRELLIS.2's ``SLatFlowModel`` (1.3 B shape model)
     so that pretrained weights can be loaded for the transformer body.
 
+    Predicts a SLAT residual (delta) via single forward pass:
+        refined_slat = coarse_slat + model(coarse_slat, cond_features)
+
+    At inference, refined SLAT is decoded by TRELLIS.2's frozen decoder.
+
+    Training strategy:
+      - Freeze pretrained backbone blocks (first N-K of N total)
+      - Train only last K blocks + out_head MLP (~50-80M trainable params)
+      - Fixed dummy timestep t=0 for AdaLN compatibility with pretrained weights
+      - Loss = L1(coarse + predicted_delta, fine_slat)
+
     Differences from TRELLIS.2:
-      - ``sdf_proj``  : projects noisy SDF into token space  (NEW — fresh init)
-      - ``out_layer``  : predicts SDF (dim 1) not SLAT (dim 32)  (RE-INIT)
+      - ``noisy_slat_proj``: kept for state_dict compatibility, unused in residual mode
+      - ``out_head``: MLP predicts SLAT delta (LN + 256 hidden + GELU + 32) (FRESH)
       - Dense attention instead of sparse  (same weight shapes)
       - Gradient checkpointing  (optional, for training)
 
@@ -365,16 +397,20 @@ class RefinementDiT(nn.Module):
     ):
         super().__init__()
         self.model_dim = model_dim
+        self.voxel_dim = voxel_dim
         self.num_layers = num_layers
         self.use_checkpoint = use_checkpoint
 
         # Input projection  (key: input_layer — matches TRELLIS.2 if voxel_dim=32)
+        # Projects coarse SLAT (conditioning) into token space
         self.input_layer = nn.Linear(voxel_dim, model_dim)
 
-        # SDF projection  (NOT in TRELLIS.2 — always freshly initialised)
-        self.sdf_proj = nn.Linear(1, model_dim)
+        # Noisy SLAT projection — kept for state_dict compatibility with pretrained
+        # weights and diffusion checkpoints. NOT used in residual prediction mode.
+        self.noisy_slat_proj = nn.Linear(voxel_dim, model_dim)
 
         # Timestep embedding  (keys: t_embedder.mlp.*)
+        # In residual mode: always receives t=0 so AdaLN modulation still functions
         self.t_embedder = TimestepEmbedder(model_dim, sin_dim=256)
 
         # Shared AdaLN modulation  (keys: adaLN_modulation.1.*)
@@ -388,14 +424,23 @@ class RefinementDiT(nn.Module):
             [DiTBlock(model_dim, num_heads, cond_dim, mlp_ratio) for _ in range(num_layers)]
         )
 
-        # Output head  (predicts SDF — dim 1, NOT 32 like TRELLIS.2)
-        self.out_layer = nn.Linear(model_dim, 1)
+        # Output head  (MLP with LayerNorm)
+        # Predicts 32-dim SLAT residual (delta = fine - coarse)
+        self.out_head = nn.Sequential(
+            nn.LayerNorm(model_dim),
+            nn.Linear(model_dim, 256),
+            nn.GELU(),
+            nn.Linear(256, voxel_dim),  # 32-dim SLAT delta
+        )
 
         # Careful initialisation for fresh-init layers
-        nn.init.zeros_(self.out_layer.weight)
-        nn.init.zeros_(self.out_layer.bias)
-        nn.init.normal_(self.sdf_proj.weight, std=0.02)
-        nn.init.zeros_(self.sdf_proj.bias)
+        # out_head: near-zero init so initial prediction ≈ identity (delta ≈ 0)
+        nn.init.normal_(self.out_head[1].weight, std=0.02)
+        nn.init.zeros_(self.out_head[1].bias)
+        nn.init.zeros_(self.out_head[3].weight)  # zero init → delta starts at 0
+        nn.init.zeros_(self.out_head[3].bias)
+        nn.init.normal_(self.noisy_slat_proj.weight, std=0.02)
+        nn.init.zeros_(self.noisy_slat_proj.bias)
 
     # ------------------------------------------------------------------
 
@@ -403,27 +448,33 @@ class RefinementDiT(nn.Module):
         self,
         coarse_voxels: torch.Tensor,
         positions: torch.Tensor,
-        timestep: torch.Tensor,
+        timestep: Optional[torch.Tensor] = None,
         cond_features: Optional[torch.Tensor] = None,
         cond_mask: Optional[torch.Tensor] = None,
-        noisy_sdf: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """
+        """Forward pass — predicts SLAT delta (residual).
+
+        In residual mode, timestep is fixed at t=0 internally. The noisy_slat_proj
+        is NOT used. The model takes coarse SLAT as input and predicts a delta.
+
         Args:
-            coarse_voxels: (B, N, voxel_dim) coarse voxel features
+            coarse_voxels: (B, N, voxel_dim) coarse SLAT features (normalized)
             positions: (B, N, 3) **integer** voxel coords (0…R-1)
-            timestep: (B,) diffusion timestep in [0, 1]
+            timestep: (B,) optional — if None, uses fixed t=0 (residual mode)
             cond_features: (B, M, cond_dim) DINO image features
             cond_mask: (B, M) bool — True = foreground token to keep
-            noisy_sdf: (B, N, 1) noisy SDF (diffusion training)
 
         Returns:
-            (B, N, 1) predicted noise
+            (B, N, voxel_dim) predicted SLAT delta (residual)
         """
+        B = coarse_voxels.shape[0]
+        device = coarse_voxels.device
+
         x = self.input_layer(coarse_voxels)
 
-        if noisy_sdf is not None:
-            x = x + self.sdf_proj(noisy_sdf)
+        # Fixed t=0 for AdaLN compatibility with pretrained weights
+        if timestep is None:
+            timestep = torch.zeros(B, device=device)
 
         # Timestep → shared modulation for all blocks
         t_emb = self.t_embedder(timestep)
@@ -438,42 +489,87 @@ class RefinementDiT(nn.Module):
             else:
                 x = block(x, positions, shared_mod, cond_features, cond_mask)
 
-        return self.out_layer(x)
+        return self.out_head(x)
+
+    # ------------------------------------------------------------------
+
+    def freeze_backbone(self, trainable_blocks: int = 3):
+        """Freeze pretrained backbone, keeping only last K blocks + out_head trainable.
+
+        Freezes: input_layer, t_embedder, adaLN_modulation, noisy_slat_proj,
+                 blocks[0 : num_layers - trainable_blocks]
+        Trainable: blocks[num_layers - trainable_blocks :], out_head
+
+        Args:
+            trainable_blocks: Number of final blocks to keep trainable (default 3).
+                With 12 blocks: freezes 0-8, trains 9-11 + out_head.
+                Each block ≈ 28.9M params → 3 blocks + head ≈ 87M trainable.
+        """
+        freeze_until = self.num_layers - trainable_blocks
+
+        # Freeze shared layers
+        for param in self.input_layer.parameters():
+            param.requires_grad = False
+        for param in self.t_embedder.parameters():
+            param.requires_grad = False
+        for param in self.adaLN_modulation.parameters():
+            param.requires_grad = False
+        for param in self.noisy_slat_proj.parameters():
+            param.requires_grad = False
+
+        # Freeze early blocks
+        for i, block in enumerate(self.blocks):
+            if i < freeze_until:
+                for param in block.parameters():
+                    param.requires_grad = False
+            else:
+                for param in block.parameters():
+                    param.requires_grad = True
+
+        # out_head always trainable
+        for param in self.out_head.parameters():
+            param.requires_grad = True
+
+        # Summary
+        frozen = sum(p.numel() for p in self.parameters() if not p.requires_grad)
+        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        total = frozen + trainable
+        print(f"Backbone frozen: {frozen/1e6:.1f}M frozen, {trainable/1e6:.1f}M trainable "
+              f"(blocks {freeze_until}-{self.num_layers-1} + out_head)")
+        return trainable
 
     # ------------------------------------------------------------------
 
     @torch.no_grad()
-    def refine(
+    def refine_residual(
         self,
         coarse_voxels: torch.Tensor,
         positions: torch.Tensor,
         cond_features: Optional[torch.Tensor] = None,
         cond_mask: Optional[torch.Tensor] = None,
-        num_steps: int = 50,
+        delta_scale: float = 1.0,
     ) -> torch.Tensor:
-        """DDPM denoising inference — refine coarse voxels to SDF."""
-        B, N, _ = coarse_voxels.shape
-        device = coarse_voxels.device
+        """Direct residual refinement — single forward pass.
 
-        sdf = torch.randn(B, N, 1, device=device)
-        timesteps = torch.linspace(1.0, 0.0, num_steps + 1, device=device)
+        Computes: refined_slat = coarse_slat + delta_scale * model(coarse_slat, cond)
 
-        for i in range(num_steps):
-            t = timesteps[i].expand(B)
-            t_next = timesteps[i + 1].expand(B)
+        Args:
+            coarse_voxels: (B, N, 32) **normalized** coarse SLAT features
+            positions: (B, N, 3) integer voxel coords
+            cond_features: (B, M, cond_dim) DINO image conditioning
+            cond_mask: (B, M) bool foreground mask
+            delta_scale: Scale factor for predicted delta (1.0 = full refinement,
+                         <1.0 = conservative, >1.0 = aggressive). Default 1.0.
 
-            noise_pred = self.forward(
-                coarse_voxels, positions, t, cond_features, cond_mask, sdf
-            )
-
-            alpha_t = (1 - t).view(B, 1, 1)
-            alpha_next = (1 - t_next).view(B, 1, 1)
-
-            sdf = (sdf - (1 - alpha_t).sqrt() * noise_pred) / alpha_t.sqrt()
-            if i < num_steps - 1:
-                sdf = alpha_next.sqrt() * sdf + (1 - alpha_next).sqrt() * torch.randn_like(sdf)
-
-        return sdf
+        Returns:
+            (B, N, 32) refined SLAT features in normalized space
+        """
+        delta = self.forward(
+            coarse_voxels, positions,
+            cond_features=cond_features,
+            cond_mask=cond_mask,
+        )
+        return coarse_voxels + delta_scale * delta
 
     # ------------------------------------------------------------------
     # Pretrained weight loading
@@ -489,7 +585,7 @@ class RefinementDiT(nn.Module):
         """Create model and load TRELLIS.2 pretrained weights.
 
         Loads the first ``num_layers`` blocks from TRELLIS.2's shape DiT.
-        Re-initialises ``out_layer`` (dim mismatch) and ``sdf_proj`` (new).
+        Re-initialises ``out_layer`` (dim mismatch) and ``noisy_slat_proj`` (new).
 
         Args:
             checkpoint_path: Path to .safetensors or .pt checkpoint
@@ -534,7 +630,37 @@ class RefinementDiT(nn.Module):
         for s in skipped_shape:
             print(s)
         print(f"  Not in model:     {len(skipped_extra)} (higher blocks, etc.)")
-        print(f"  Fresh init:       out_layer, sdf_proj")
+        print(f"  Fresh init:       out_head (MLP), noisy_slat_proj")
         print(f"{'='*60}\n")
 
+        return model
+
+    @classmethod
+    def from_residual_checkpoint(
+        cls,
+        checkpoint_path: str,
+        num_layers: int = 12,
+        trainable_blocks: int = 3,
+        **kwargs,
+    ) -> "RefinementDiT":
+        """Load a Stage 2 residual prediction checkpoint.
+
+        Loads the full model state (including frozen backbone weights)
+        from a Stage 2 training checkpoint, then re-freezes the backbone.
+
+        Args:
+            checkpoint_path: Path to Stage 2 .pt checkpoint
+            num_layers: Blocks in the model
+            trainable_blocks: Number of final blocks that were trainable
+        """
+        model = cls(num_layers=num_layers, **kwargs)
+
+        ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+        state_dict = {k.replace("module.", ""): v for k, v in ckpt["model"].items()}
+        model.load_state_dict(state_dict, strict=True)
+
+        step = ckpt.get("global_step", "?")
+        print(f"Loaded residual checkpoint (step {step}) from {checkpoint_path}")
+
+        model.freeze_backbone(trainable_blocks)
         return model

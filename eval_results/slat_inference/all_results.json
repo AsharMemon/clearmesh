@@ -1,0 +1,57 @@
+[
+  {
+    "name": "airplane_model",
+    "n_points": 768,
+    "trellis_time": 3.09,
+    "delta_scale": 1.0,
+    "decode_time": 0.03,
+    "total_time": 3.12,
+    "slat_delta_mean": 1.670217752456665,
+    "slat_delta_max": 17.759231567382812,
+    "mesh": "217976 verts, 422958 faces"
+  },
+  {
+    "name": "backpack",
+    "n_points": 2857,
+    "trellis_time": 2.58,
+    "delta_scale": 1.0,
+    "decode_time": 0.04,
+    "total_time": 2.62,
+    "slat_delta_mean": 2.2691690921783447,
+    "slat_delta_max": 20.50386619567871,
+    "mesh": "259676 verts, 486681 faces"
+  },
+  {
+    "name": "basketball",
+    "n_points": 4763,
+    "trellis_time": 2.98,
+    "delta_scale": 1.0,
+    "decode_time": 0.06,
+    "total_time": 3.05,
+    "slat_delta_mean": 1.2335669994354248,
+    "slat_delta_max": 14.378230094909668,
+    "mesh": "246998 verts, 494860 faces"
+  },
+  {
+    "name": "bicycle",
+    "n_points": 913,
+    "trellis_time": 2.58,
+    "delta_scale": 1.0,
+    "decode_time": 0.03,
+    "total_time": 2.61,
+    "slat_delta_mean": 2.245605230331421,
+    "slat_delta_max": 15.341458320617676,
+    "mesh": "151077 verts, 272170 faces"
+  },
+  {
+    "name": "bonsai_tree",
+    "n_points": 1675,
+    "trellis_time": 2.63,
+    "delta_scale": 1.0,
+    "decode_time": 0.03,
+    "total_time": 2.66,
+    "slat_delta_mean": 2.5590250492095947,
+    "slat_delta_max": 21.63672637939453,
+    "mesh": "252493 verts, 446396 faces"
+  }
+]

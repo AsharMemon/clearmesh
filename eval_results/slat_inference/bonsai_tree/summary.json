@@ -1,0 +1,11 @@
+{
+  "name": "bonsai_tree",
+  "n_points": 1675,
+  "trellis_time": 2.63,
+  "delta_scale": 1.0,
+  "decode_time": 0.03,
+  "total_time": 2.66,
+  "slat_delta_mean": 2.5590250492095947,
+  "slat_delta_max": 21.63672637939453,
+  "mesh": "252493 verts, 446396 faces"
+}

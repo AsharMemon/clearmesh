@@ -1,0 +1,11 @@
+{
+  "name": "bicycle",
+  "n_points": 913,
+  "trellis_time": 2.58,
+  "delta_scale": 1.0,
+  "decode_time": 0.03,
+  "total_time": 2.61,
+  "slat_delta_mean": 2.245605230331421,
+  "slat_delta_max": 15.341458320617676,
+  "mesh": "151077 verts, 272170 faces"
+}

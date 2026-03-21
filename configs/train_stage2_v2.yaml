@@ -1,0 +1,71 @@
+# Stage 2 v2 FlowMatchingDiT — clean-room refinement in SLAT space
+# Flow matching with velocity prediction, matching TRELLIS.2's rectified flow
+
+# === Model (inherit from TRELLIS.2, verify via Gate 0C) ===
+model_dim: 1536        # TRELLIS.2 hidden dim
+num_heads: 12          # TRELLIS.2 attention heads
+num_layers: 30         # TRELLIS.2 full backbone (verify in Gate 0C)
+voxel_dim: 32          # SLAT feature dimension
+cond_dim: 1024         # DINOv2 output dim (from TRELLIS.2 pipeline)
+mlp_ratio: 5.3334      # TRELLIS.2 MLP ratio (verify in Gate 0C)
+use_checkpoint: true    # Gradient checkpointing for memory
+
+# === Pretrained weights (TRELLIS.2 shape DiT) ===
+# Set to the path of TRELLIS.2's shape DiT checkpoint (.safetensors)
+# Expected: slat_flow_img2shape_dit_1_3B_512_bf16.safetensors
+pretrained_checkpoint: /workspace/models/trellis2-4b/ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.safetensors
+
+# === Data ===
+data_dir: /workspace/data/slat_pairs_v2
+num_workers: 4
+
+# === Training ===
+total_steps: 85000
+warmup_steps: 1000
+batch_size: 1           # per GPU
+grad_accum_steps: 4     # effective batch = batch_size * world_size * grad_accum
+
+# === Differential learning rates ===
+lr_backbone: 1.0e-5     # pretrained blocks (slow LR to preserve knowledge)
+lr_new: 1.0e-4          # input_proj, out_head (fast LR for new layers)
+lr_cross_attn_kv: 5.0e-5  # cross-attn KV projections
+
+# === Optimizer ===
+betas: [0.9, 0.99]
+weight_decay: 0.01
+max_grad_norm: 1.0
+
+# === Flow matching ===
+# Convention: t=0 data, t=1 noise (verify matches TRELLIS.2 in Gate 0C)
+# Velocity prediction: v_target = noise - data
+# Loss: unweighted MSE
+
+# === CFG ===
+cfg_dropout: 0.1        # 10% of batches zero out conditioning
+
+# === EMA ===
+ema_decay: 0.9999
+
+# === Progressive schedule (matching UltraShape) ===
+progressive_schedule:
+  - step: 0
+    num_tokens: 4096
+    batch_size: 1
+  - step: 10000
+    num_tokens: 8192
+    batch_size: 1
+  - step: 25000
+    num_tokens: 10240
+    batch_size: 1
+
+# === Geometry regularizer ===
+# Set to 0 to disable. Set to 10-50 to enable.
+# Determined by Gate 0A-1, 0A-2, 0D results.
+geometry_loss_interval: 0   # 0 = disabled (enable after gates pass)
+geometry_loss_weight: 0.1   # weight for geometry loss term
+
+# === Logging & checkpointing ===
+output_dir: /workspace/outputs/stage2_v2
+save_interval: 2500
+log_interval: 50
+use_wandb: true

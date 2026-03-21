@@ -1,0 +1,61 @@
+# TRELLIS.2 Decoder Fine-tuning with Feature Jitter
+# Adapted from UltraShape's decoder fine-tuning recipe (55K steps)
+#
+# UltraShape recipe:
+#   - 40K steps at 4096 tokens + 15K steps at 8192 tokens
+#   - Query perturbation: U[-1/128, 1/128] in normalized [-1,1] space
+#   - LR: 1e-5, cosine schedule with 500 step warmup
+#   - Loss: MSE + L1 on SDF predictions
+#
+# Our adaptation for TRELLIS.2's sparse conv decoder:
+#   - Feature-space jitter instead of coordinate jitter
+#   - Self-distillation loss (teacher=frozen, student=trainable)
+#   - Same progressive schedule and learning rate
+
+# === Pipeline ===
+pipeline_path: /workspace/models/trellis2-4b
+
+# === Data (output from generate_slat_pairs.py) ===
+# Supports single path or list of paths
+data_dir:
+  - /workspace/data/slat_pairs
+  - /workspace/data/slat_pairs_3k
+num_workers: 4
+
+# === Training schedule ===
+# Original UltraShape: 55K steps × batch=1.
+# With DDP (2 GPUs), effective batch=2 per step, so halve steps
+# to maintain same total data exposure: 27.5K × 2 = 55K samples.
+total_steps: 27500
+warmup_steps: 500
+batch_size: 1           # per GPU (process samples sequentially due to sparse conv memory)
+grad_accum_steps: 1     # effective batch = batch_size * world_size * grad_accum
+
+# === Optimizer ===
+lr: 1.0e-5              # matching UltraShape
+betas: [0.9, 0.99]
+weight_decay: 0.01
+max_grad_norm: 1.0
+
+# === Feature jitter ===
+# Scale of perturbation applied to SLAT features.
+# UltraShape uses 1/128 ~ 0.0078 for coordinate jitter in [-1,1] space.
+# For feature space, we use a larger scale since features have different
+# sensitivity than coordinates.
+jitter_scale: 0.05      # U[-0.05, 0.05] added to SLAT features (conservative start)
+noise_type: uniform     # "uniform" or "gaussian"
+
+# === Progressive schedule (halved for DDP 2-GPU) ===
+# Original: 40K@4096 + 15K@8192 = 55K total
+# DDP 2x:   20K@4096 + 7.5K@8192 = 27.5K total (same data exposure)
+progressive_schedule:
+  - step: 0
+    num_tokens: 4096     # Phase 1: 20K steps at 4096 tokens
+  - step: 20000
+    num_tokens: 8192     # Phase 2: 7.5K steps at 8192 tokens
+
+# === Logging & checkpointing ===
+output_dir: /workspace/outputs/decoder_finetune
+save_interval: 5000
+log_interval: 50
+use_wandb: false

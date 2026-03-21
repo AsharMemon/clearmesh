@@ -62,8 +62,13 @@ def configure_cycles(scene: bpy.types.Scene, samples: int) -> None:
     scene.cycles.glossy_bounces = 1
     scene.cycles.transparent_max_bounces = 2
     scene.cycles.transmission_bounces = 0
-    scene.cycles.device = "GPU"
 
+    # Check if GPU rendering is forced off (e.g. driver incompatibility)
+    if os.environ.get("BLENDER_FORCE_CPU", ""):
+        scene.cycles.device = "CPU"
+        return
+
+    scene.cycles.device = "GPU"
     prefs = bpy.context.preferences.addons["cycles"].preferences
     for backend in ("OPTIX", "CUDA"):
         try:

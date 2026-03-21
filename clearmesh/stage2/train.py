@@ -1,21 +1,35 @@
 #!/usr/bin/env python3
-"""Training loop for Stage 2 RefinementDiT.
+"""Training loop for Stage 2 RefinementDiT — direct residual prediction.
+
+Trains the DiT to predict SLAT residuals (deltas) via single forward pass:
+    refined_slat = coarse_slat + model(coarse_slat, cond_features)
+    loss = L1(refined_slat, fine_slat)
+
+Training pairs: coarse SLAT (512 model) → fine SLAT (1024 model).
+At inference, refined SLAT is decoded by TRELLIS.2's frozen decoder.
 
 Features:
   - Loads TRELLIS.2 pretrained weights (first N blocks)
+  - Freezes backbone, trains only last K blocks + out_head (~50-80M params)
+  - Fixed dummy timestep t=0 for AdaLN compatibility
   - bf16 mixed-precision via torch.autocast
   - Gradient checkpointing (configured in model)
-  - Progressive training schedule (token count ramp)
-  - Near-surface supervision point sampling
+  - Progressive training schedule (token count + batch size ramp)
+  - SLAT normalization (zero-mean, unit-std per channel from TRELLIS.2 stats)
   - Image token masking for DINO conditioning
-  - FlexiCubes-in-the-loop mesh extraction (every K steps)
   - Checkpoint every N steps (Spot VM resilience)
   - SIGUSR1 handler for emergency checkpoint on preemption
+  - Multi-GPU DDP support (torchrun compatible)
   - WandB logging
 
 Usage:
+    # Single GPU
     python -m clearmesh.stage2.train \\
-        --config configs/train_stage2_flexicubes.yaml
+        --config configs/train_stage2_residual.yaml
+
+    # Multi-GPU (DDP)
+    torchrun --nproc_per_node=4 -m clearmesh.stage2.train \\
+        --config configs/train_stage2_residual.yaml
 """
 
 import argparse
@@ -29,52 +43,98 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn as nn
+import torch.distributed as dist
 import torch.nn.functional as F
 import yaml
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset
+from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
-from clearmesh.stage2.losses import ClearMeshLoss
 from clearmesh.stage2.model import RefinementDiT
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Dataset — loads coarse/fine voxel pairs with near-surface sampling
+# Distributed helpers
 # ---------------------------------------------------------------------------
 
-class VoxelPairDataset(Dataset):
-    """Dataset of coarse/fine O-Voxel pairs for Stage 2 training.
+def setup_distributed() -> tuple[int, int, int]:
+    """Initialize DDP if launched via torchrun, else return single-GPU defaults.
+
+    Returns:
+        (rank, local_rank, world_size)
+    """
+    if "RANK" in os.environ:
+        dist.init_process_group("nccl")
+        rank = int(os.environ["RANK"])
+        local_rank = int(os.environ["LOCAL_RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        torch.cuda.set_device(local_rank)
+        return rank, local_rank, world_size
+    return 0, 0, 1
+
+
+def is_main_process(rank: int) -> bool:
+    return rank == 0
+
+
+# ---------------------------------------------------------------------------
+# Dataset — loads coarse/fine SLAT pairs for SLAT-space diffusion
+# ---------------------------------------------------------------------------
+
+class SlatPairDataset(Dataset):
+    """Dataset of coarse/fine SLAT pairs for Stage 2 SLAT-space training.
 
     Each sample provides:
-      - coarse_features:  (N, voxel_dim)  features at occupied voxel positions
-      - positions:        (N, 3)          integer voxel coordinates
-      - gt_sdf:           (N, 1)          ground-truth SDF at those positions
-      - cond_features:    (M, 1024) or None — DINOv2 conditioning features
-      - cond_mask:        (M,) bool or None — foreground mask for cond tokens
-      - uid:              str             model identifier
+      - coarse_slat:    (N, voxel_dim)  coarse SLAT features (512 model)
+      - fine_slat:      (N, voxel_dim)  fine SLAT features (1024 model)
+      - positions:      (N, 3)          integer voxel coordinates
+      - cond_features:  (M, 1024) or None — DINOv2 conditioning features
+      - cond_mask:      (M,) bool or None — foreground mask for cond tokens
+      - uid:            str             model identifier
 
-    Sampling strategy (for SDF imbalance mitigation):
-      - near_surface_ratio of points sampled where |SDF| < tau
-      - remaining points sampled uniformly
+    Both coarse and fine SLAT are normalized to TRELLIS.2's SLAT space
+    (zero-mean, unit-std per channel) before returning.
     """
 
     def __init__(
         self,
         data_dir: str,
         max_tokens: int = 4096,
-        near_surface_ratio: float = 0.6,
-        sdf_truncation: float = 0.1,
         voxel_dim: int = 32,
+        slat_mean: list[float] = None,
+        slat_std: list[float] = None,
+        overfit_uid: str = None,
     ):
         self.data_dir = Path(data_dir)
         self.max_tokens = max_tokens
-        self.near_surface_ratio = near_surface_ratio
-        self.sdf_truncation = sdf_truncation
         self.voxel_dim = voxel_dim
         self._warned_uids: set[str] = set()
+
+        # SLAT normalization from TRELLIS.2's pipeline.json
+        if slat_mean is not None and slat_std is not None:
+            self.slat_mean = torch.tensor(slat_mean, dtype=torch.float32)
+            self.slat_std = torch.tensor(slat_std, dtype=torch.float32)
+        else:
+            # Default: TRELLIS.2 4B shape_slat_normalization
+            self.slat_mean = torch.tensor([
+                0.781296, 0.018091, -0.495192, -0.558457, 1.06053, 0.093252,
+                1.518149, -0.933218, -0.732996, 2.604095, -0.118341, -2.143904,
+                0.495076, -2.179512, -2.130751, -0.996944, 0.261421, -2.217463,
+                1.260067, -0.150213, 3.790713, 1.481266, -1.046058, -1.523667,
+                -0.059621, 2.22078, 1.621212, 0.87723, 0.567247, -3.175944,
+                -3.186688, 1.578665,
+            ], dtype=torch.float32)
+            self.slat_std = torch.tensor([
+                5.972266, 4.706852, 5.44501, 5.209927, 5.32022, 4.547237,
+                5.020802, 5.444004, 5.226681, 5.683095, 4.831436, 5.286469,
+                5.652043, 5.367606, 5.525084, 4.730578, 4.805265, 5.124013,
+                5.530808, 5.619001, 5.10393, 5.41767, 5.269677, 5.547194,
+                5.634698, 5.235274, 6.110351, 5.511298, 6.237273, 4.879207,
+                5.347008, 5.405691,
+            ], dtype=torch.float32)
 
         # Load or discover pairs
         manifest = self.data_dir / "pairs_manifest.json"
@@ -86,34 +146,40 @@ class VoxelPairDataset(Dataset):
 
         if len(self.pairs) == 0:
             raise RuntimeError(
-                f"No valid training pairs found in {data_dir}. "
-                f"Each pair directory must contain coarse_voxels.npy and fine_sdf.npy. "
-                f"Run convert_pairs_to_sdf.py first."
+                f"No valid SLAT pairs found in {data_dir}. "
+                f"Each pair directory must contain coarse_slat.npy and fine_slat.npy."
             )
 
-        # Filter to only valid pairs (must have coarse_voxels and fine_sdf)
-        valid_pairs = [p for p in self.pairs if "coarse_voxels" in p]
+        # Filter to only valid pairs
+        valid_pairs = [p for p in self.pairs if "coarse_slat" in p and "fine_slat" in p]
         if len(valid_pairs) < len(self.pairs):
             n_skipped = len(self.pairs) - len(valid_pairs)
-            logger.warning(
-                f"Skipping {n_skipped} pairs without pre-computed voxel features. "
-                f"Run convert_pairs_to_sdf.py to generate missing files."
-            )
+            logger.warning(f"Skipping {n_skipped} pairs without coarse_slat/fine_slat.")
         self.pairs = valid_pairs
 
         if len(self.pairs) == 0:
             raise RuntimeError(
-                f"No pairs with coarse_voxels.npy found in {data_dir}. "
-                f"Run convert_pairs_to_sdf.py first."
+                f"No pairs with coarse_slat.npy + fine_slat.npy found in {data_dir}."
             )
 
-        logger.info(f"Loaded {len(self.pairs)} training pairs from {data_dir}")
+        # Overfit mode: use only a single pair (repeated)
+        if overfit_uid:
+            overfit_pairs = [p for p in self.pairs if overfit_uid in p.get("uid", "")]
+            if not overfit_pairs:
+                overfit_pairs = [p for p in self.pairs if overfit_uid in p.get("coarse_slat", "")]
+            if overfit_pairs:
+                self.pairs = overfit_pairs
+                logger.info(f"OVERFIT MODE: using {len(self.pairs)} pair(s) matching '{overfit_uid}'")
+            else:
+                logger.warning(f"OVERFIT MODE: no pairs match '{overfit_uid}', using all pairs")
+
+        logger.info(f"Loaded {len(self.pairs)} SLAT training pairs from {data_dir}")
 
     def _discover_pairs(self) -> list[dict]:
         pairs = []
-        # Check for shard subdirectories (generate_pairs.py creates shard_0/, shard_1/, etc.)
+        search_dirs = [self.data_dir]
         shard_dirs = sorted(self.data_dir.glob("shard_*"))
-        search_dirs = shard_dirs if shard_dirs else [self.data_dir]
+        search_dirs.extend(shard_dirs)
 
         for parent_dir in search_dirs:
             if not parent_dir.is_dir():
@@ -121,25 +187,26 @@ class VoxelPairDataset(Dataset):
             for d in sorted(parent_dir.iterdir()):
                 if not d.is_dir():
                     continue
-                coarse = d / "coarse_voxels.npy"
-                fine = d / "fine_sdf.npy"
+                if parent_dir == self.data_dir and d.name.startswith("shard_"):
+                    continue
+                coarse = d / "coarse_slat.npy"
+                fine = d / "fine_slat.npy"
                 if coarse.exists() and fine.exists():
                     entry = {
                         "uid": d.name,
-                        "coarse_voxels": str(coarse),
-                        "fine_sdf": str(fine),
+                        "coarse_slat": str(coarse),
+                        "fine_slat": str(fine),
                         "positions": str(d / "positions.npy"),
                     }
-                    # Optional: DINOv2 conditioning features
                     cond_path = d / "cond_features.npy"
                     if cond_path.exists():
                         entry["cond_features"] = str(cond_path)
-                    # Optional: rendered conditioning image (for deriving cond_mask)
-                    rendered_path = d / "rendered.png"
-                    if rendered_path.exists():
-                        entry["rendered"] = str(rendered_path)
                     pairs.append(entry)
         return pairs
+
+    def _normalize_slat(self, slat: torch.Tensor) -> torch.Tensor:
+        """Normalize SLAT features to zero-mean, unit-std per channel."""
+        return (slat - self.slat_mean) / self.slat_std
 
     def __len__(self) -> int:
         return len(self.pairs)
@@ -149,48 +216,42 @@ class VoxelPairDataset(Dataset):
         uid = pair.get("uid", "unknown")
 
         try:
-            features = torch.from_numpy(np.load(pair["coarse_voxels"])).float()
-            gt_sdf = torch.from_numpy(np.load(pair["fine_sdf"])).float()
+            coarse_slat = torch.from_numpy(np.load(pair["coarse_slat"])).float()
+            fine_slat = torch.from_numpy(np.load(pair["fine_slat"])).float()
             positions = torch.from_numpy(np.load(pair["positions"])).float()
 
-            # --- Near-surface sampling ---
-            N_total = features.shape[0]
+            # Reconcile lengths
+            min_len = min(coarse_slat.shape[0], fine_slat.shape[0], positions.shape[0])
+            coarse_slat = coarse_slat[:min_len]
+            fine_slat = fine_slat[:min_len]
+            positions = positions[:min_len]
+
+            # Ensure correct shapes
+            if coarse_slat.dim() == 1:
+                coarse_slat = coarse_slat.unsqueeze(-1)
+            if fine_slat.dim() == 1:
+                fine_slat = fine_slat.unsqueeze(-1)
+
+            # Normalize to TRELLIS.2's SLAT space (zero-mean, unit-std per channel)
+            coarse_slat = self._normalize_slat(coarse_slat)
+            fine_slat = self._normalize_slat(fine_slat)
+
+            # --- Token subsampling ---
+            N_total = coarse_slat.shape[0]
             N_target = min(self.max_tokens, N_total)
 
-            if N_total > N_target and gt_sdf is not None:
-                near_mask = gt_sdf.abs().squeeze(-1) < self.sdf_truncation
-                near_idx = near_mask.nonzero(as_tuple=True)[0]
-                far_idx = (~near_mask).nonzero(as_tuple=True)[0]
-
-                N_near = min(int(N_target * self.near_surface_ratio), len(near_idx))
-                N_far = N_target - N_near
-
-                if len(near_idx) >= N_near and len(far_idx) >= N_far:
-                    sel_near = near_idx[torch.randperm(len(near_idx))[:N_near]]
-                    sel_far = far_idx[torch.randperm(len(far_idx))[:N_far]]
-                    sel = torch.cat([sel_near, sel_far])
-                else:
-                    sel = torch.randperm(N_total)[:N_target]
-
-                features = features[sel]
-                gt_sdf = gt_sdf[sel] if gt_sdf.dim() >= 1 else gt_sdf
-                positions = positions[sel]
-            elif N_total > N_target:
+            if N_total > N_target:
                 sel = torch.randperm(N_total)[:N_target]
-                features = features[sel]
-                gt_sdf = gt_sdf[sel]
+                coarse_slat = coarse_slat[sel]
+                fine_slat = fine_slat[sel]
                 positions = positions[sel]
 
             # Pad if fewer tokens than max_tokens
-            if features.shape[0] < self.max_tokens:
-                pad_n = self.max_tokens - features.shape[0]
-                features = F.pad(features, (0, 0, 0, pad_n))
-                gt_sdf = F.pad(gt_sdf, (0, 0, 0, pad_n))
+            if coarse_slat.shape[0] < self.max_tokens:
+                pad_n = self.max_tokens - coarse_slat.shape[0]
+                coarse_slat = F.pad(coarse_slat, (0, 0, 0, pad_n))
+                fine_slat = F.pad(fine_slat, (0, 0, 0, pad_n))
                 positions = F.pad(positions, (0, 0, 0, pad_n))
-
-            # Ensure gt_sdf is (N, 1)
-            if gt_sdf.dim() == 1:
-                gt_sdf = gt_sdf.unsqueeze(-1)
 
             # --- Optional: DINOv2 conditioning ---
             cond_features = None
@@ -199,81 +260,48 @@ class VoxelPairDataset(Dataset):
                 cond_path = Path(pair["cond_features"])
                 if cond_path.exists():
                     cond_features = torch.from_numpy(np.load(str(cond_path))).float()
-                    # Derive foreground mask from rendered image alpha
-                    rendered_path = pair.get("rendered")
-                    if rendered_path and Path(rendered_path).exists():
-                        try:
-                            from PIL import Image
-                            img = Image.open(rendered_path).convert("RGBA")
-                            alpha = np.array(img)[:, :, 3]
-                            M = cond_features.shape[0]
-                            grid_size = int(M ** 0.5)
-                            # CLS token adjustment
-                            if grid_size * grid_size != M and (grid_size + 1) * (grid_size + 1) != M:
-                                grid_size = int((M - 1) ** 0.5)
-                                if grid_size * grid_size == M - 1:
-                                    # Has CLS token — mask all True for CLS, patch mask from alpha
-                                    alpha_small = np.array(
-                                        Image.fromarray(alpha).resize(
-                                            (grid_size, grid_size), Image.BILINEAR
-                                        )
-                                    )
-                                    patch_mask = (alpha_small > 128).flatten()
-                                    cond_mask = torch.from_numpy(
-                                        np.concatenate([[True], patch_mask])
-                                    )
-                                else:
-                                    cond_mask = torch.ones(M, dtype=torch.bool)
-                            else:
-                                alpha_small = np.array(
-                                    Image.fromarray(alpha).resize(
-                                        (grid_size, grid_size), Image.BILINEAR
-                                    )
-                                )
-                                cond_mask = torch.from_numpy(
-                                    (alpha_small > 128).flatten()
-                                )
-                        except Exception:
-                            cond_mask = torch.ones(cond_features.shape[0], dtype=torch.bool)
-                    else:
-                        cond_mask = torch.ones(cond_features.shape[0], dtype=torch.bool)
+                    cond_mask = torch.ones(cond_features.shape[0], dtype=torch.bool)
 
         except Exception as e:
             if uid not in self._warned_uids:
-                logger.warning(f"Failed to load pair '{uid}': {e}")
+                logger.warning(f"Failed to load SLAT pair '{uid}': {e}")
                 self._warned_uids.add(uid)
-            # Skip to a different valid sample (with recursion guard)
             alt_idx = torch.randint(0, len(self), (1,)).item()
             if alt_idx == idx:
                 alt_idx = (idx + 1) % len(self)
             return self[alt_idx]
 
         return {
-            "coarse_features": features,       # (N, voxel_dim)
+            "coarse_slat": coarse_slat,        # (N, voxel_dim) normalized
+            "fine_slat": fine_slat,             # (N, voxel_dim) normalized
             "positions": positions,             # (N, 3)
-            "gt_sdf": gt_sdf,                  # (N, 1)
-            "cond_features": cond_features,    # (M, cond_dim) or None
-            "cond_mask": cond_mask,            # (M,) bool or None
+            "cond_features": cond_features,     # (M, cond_dim) or None
+            "cond_mask": cond_mask,             # (M,) bool or None
             "uid": uid,
         }
 
 
-def voxelpair_collate_fn(batch: list[dict]) -> dict:
+def slatpair_collate_fn(batch: list[dict]) -> dict:
     """Custom collate that handles optional variable-length cond_features."""
     result = {
-        "coarse_features": torch.stack([b["coarse_features"] for b in batch]),
+        "coarse_slat": torch.stack([b["coarse_slat"] for b in batch]),
+        "fine_slat": torch.stack([b["fine_slat"] for b in batch]),
         "positions": torch.stack([b["positions"] for b in batch]),
-        "gt_sdf": torch.stack([b["gt_sdf"] for b in batch]),
         "uid": [b["uid"] for b in batch],
     }
 
-    # DINOv2 conditioning: only include if ALL samples in batch have it
-    if all(b.get("cond_features") is not None for b in batch):
-        max_M = max(b["cond_features"].shape[0] for b in batch)
-        cond_dim = batch[0]["cond_features"].shape[1]
+    # DINO conditioning: mixed batches are allowed. Samples without conditioning
+    # get zero features and an all-false mask, which the attention path treats
+    # as an unconditional example.
+    samples_with_cond = [b for b in batch if b.get("cond_features") is not None]
+    if samples_with_cond:
+        max_M = max(b["cond_features"].shape[0] for b in samples_with_cond)
+        cond_dim = samples_with_cond[0]["cond_features"].shape[1]
         cond_feats = torch.zeros(len(batch), max_M, cond_dim)
         cond_masks = torch.zeros(len(batch), max_M, dtype=torch.bool)
         for i, b in enumerate(batch):
+            if b.get("cond_features") is None:
+                continue
             M = b["cond_features"].shape[0]
             cond_feats[i, :M] = b["cond_features"]
             if b.get("cond_mask") is not None:
@@ -287,48 +315,6 @@ def voxelpair_collate_fn(batch: list[dict]) -> dict:
         result["cond_mask"] = None
 
     return result
-
-
-# ---------------------------------------------------------------------------
-# FlexiCubes Extractor
-# ---------------------------------------------------------------------------
-
-class FlexiCubesExtractor:
-    """Wrapper around NVIDIA Kaolin FlexiCubes."""
-
-    def __init__(self, resolution: int = 128, device: str = "cuda"):
-        self.resolution = resolution
-        self.device = device
-        self._fc = None
-
-    @property
-    def fc(self):
-        if self._fc is None:
-            from kaolin.non_commercial import FlexiCubes
-            self._fc = FlexiCubes(device=self.device)
-        return self._fc
-
-    def extract(self, sdf_grid: torch.Tensor):
-        if sdf_grid.dim() == 4:
-            sdf_grid = sdf_grid[0]
-        R = sdf_grid.shape[0]
-        x = torch.linspace(-1, 1, R, device=sdf_grid.device)
-        gx, gy, gz = torch.meshgrid(x, x, x, indexing="ij")
-        pts = torch.stack([gx, gy, gz], -1).reshape(-1, 3)
-        return self.fc(pts, sdf_grid.reshape(-1), self._cubes(R), R)
-
-    def _cubes(self, R: int) -> torch.Tensor:
-        cubes = []
-        for i in range(R - 1):
-            for j in range(R - 1):
-                for k in range(R - 1):
-                    v0 = i * R * R + j * R + k
-                    cubes.append([
-                        v0, v0 + 1, v0 + R, v0 + R + 1,
-                        v0 + R * R, v0 + R * R + 1,
-                        v0 + R * R + R, v0 + R * R + R + 1,
-                    ])
-        return torch.tensor(cubes, dtype=torch.long, device=self.device)
 
 
 # ---------------------------------------------------------------------------
@@ -349,16 +335,27 @@ def get_progressive_value(schedule: list[dict], step: int, key: str, default):
 # ---------------------------------------------------------------------------
 
 class Trainer:
-    """Stage 2 trainer with pretrained init, progressive schedule, bf16."""
+    """Stage 2 trainer — direct residual prediction with frozen backbone."""
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, rank: int = 0, local_rank: int = 0, world_size: int = 1):
         self.config = config
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.rank = rank
+        self.local_rank = local_rank
+        self.world_size = world_size
+        self.is_main = is_main_process(rank)
+
+        if world_size > 1:
+            self.device = torch.device(f"cuda:{local_rank}")
+        else:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        trainable_blocks = config.get("trainable_blocks", 3)
 
         # --- Model ---
         pretrained = config.get("pretrained_checkpoint")
         if pretrained and Path(pretrained).exists():
-            print(f"Loading pretrained weights from {pretrained}")
+            if self.is_main:
+                print(f"Loading pretrained weights from {pretrained}")
             self.model = RefinementDiT.from_pretrained(
                 pretrained,
                 num_layers=config.get("num_layers", 12),
@@ -370,7 +367,8 @@ class Trainer:
                 use_checkpoint=config.get("use_checkpoint", True),
             ).to(self.device)
         else:
-            print("No pretrained checkpoint — training from scratch")
+            if self.is_main:
+                print("No pretrained checkpoint — training from scratch")
             self.model = RefinementDiT(
                 voxel_dim=config.get("voxel_dim", 32),
                 model_dim=config.get("model_dim", 1536),
@@ -381,51 +379,51 @@ class Trainer:
                 use_checkpoint=config.get("use_checkpoint", True),
             ).to(self.device)
 
-        total_params = sum(p.numel() for p in self.model.parameters())
-        trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-        print(f"Model params: {total_params / 1e6:.1f}M total, {trainable / 1e6:.1f}M trainable")
+        # Freeze backbone — only train last K blocks + out_head
+        raw_model = self.model.module if isinstance(self.model, DDP) else self.model
+        raw_model.freeze_backbone(trainable_blocks)
 
-        # --- Loss ---
-        self.criterion = ClearMeshLoss(
-            sdf_weight=config.get("sdf_weight", 1.0),
-            eikonal_weight=config.get("eikonal_weight", 0.1),
-            chamfer_weight=config.get("chamfer_weight", 1.0),
-            normal_weight=config.get("normal_weight", 0.5),
-            edge_weight=config.get("edge_weight", 0.3),
-            watertight_weight=config.get("watertight_weight", 0.2),
-            sdf_truncation=config.get("sdf_truncation", 0.1),
-            sdf_surface_weight=config.get("sdf_surface_weight", 5.0),
+        # Wrap in DDP if multi-GPU (find_unused_parameters for frozen params)
+        if world_size > 1:
+            self.model = DDP(self.model, device_ids=[local_rank], find_unused_parameters=True)
+            if self.is_main:
+                print(f"DDP enabled: {world_size} GPUs")
+
+        if self.is_main:
+            raw_model = self.model.module if isinstance(self.model, DDP) else self.model
+            total_params = sum(p.numel() for p in raw_model.parameters())
+            trainable = sum(p.numel() for p in raw_model.parameters() if p.requires_grad)
+            print(f"Model params: {total_params / 1e6:.1f}M total, {trainable / 1e6:.1f}M trainable")
+
+        # --- Optimizer (only trainable params) ---
+        raw_model = self.model.module if isinstance(self.model, DDP) else self.model
+        trainable_params = [p for p in raw_model.parameters() if p.requires_grad]
+
+        base_lr = config.get("learning_rate", 1e-4)
+        # Sqrt LR scaling for multi-GPU
+        effective_lr = base_lr * math.sqrt(world_size) if world_size > 1 else base_lr
+
+        self.optimizer = torch.optim.AdamW(
+            trainable_params,
+            lr=effective_lr,
+            weight_decay=config.get("weight_decay", 0.01),
         )
 
-        # --- Optimizer ---
-        # Lower LR for pretrained layers, higher for fresh layers
-        pretrained_params, fresh_params = [], []
-        fresh_names = {"sdf_proj", "out_layer"}
-        for name, param in self.model.named_parameters():
-            if any(fn in name for fn in fresh_names):
-                fresh_params.append(param)
-            else:
-                pretrained_params.append(param)
+        total_steps = config.get("total_steps", 100_000)
+        warmup_steps = config.get("warmup_steps", 200)
+        self.warmup_steps = warmup_steps
 
-        self.optimizer = torch.optim.AdamW([
-            {"params": pretrained_params, "lr": config.get("learning_rate", 5e-5)},
-            {"params": fresh_params, "lr": config.get("learning_rate", 5e-5) * 5},
-        ], weight_decay=config.get("weight_decay", 0.01))
+        # Cosine schedule with linear warmup
+        def lr_lambda(step):
+            if step < warmup_steps:
+                return step / max(warmup_steps, 1)  # linear warmup 0→1
+            # Cosine decay after warmup
+            progress = (step - warmup_steps) / max(total_steps - warmup_steps, 1)
+            return 0.5 * (1.0 + math.cos(math.pi * progress))
 
-        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer, T_max=config.get("total_steps", 100_000)
+        self.scheduler = torch.optim.lr_scheduler.LambdaLR(
+            self.optimizer, lr_lambda=lr_lambda
         )
-
-        # --- FlexiCubes ---
-        fc_res = config.get("flexicubes_resolution", 0)
-        if fc_res > 0:
-            self.flexicubes = FlexiCubesExtractor(
-                resolution=fc_res, device=str(self.device),
-            )
-            logger.info(f"FlexiCubes enabled at resolution {fc_res}")
-        else:
-            self.flexicubes = None
-            logger.info("FlexiCubes disabled (flexicubes_resolution=0)")
 
         # --- Progressive schedule ---
         self.progressive = config.get("progressive_schedule", [])
@@ -433,16 +431,18 @@ class Trainer:
         # --- Training state ---
         self.global_step = 0
         self.epoch = 0
+        self._checkpoint_loaded = False
         self.output_dir = Path(config["output_dir"])
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        if self.is_main:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
 
         # Preemption handling
         self._emergency_save = False
         signal.signal(signal.SIGUSR1, self._handle_preemption)
 
-        # WandB
+        # WandB (rank 0 only)
         self.wandb = None
-        if config.get("use_wandb", False):
+        if config.get("use_wandb", False) and self.is_main:
             import wandb
             wandb.init(project="clearmesh", config=config)
             self.wandb = wandb
@@ -450,26 +450,37 @@ class Trainer:
     # ------------------------------------------------------------------
 
     def _handle_preemption(self, signum, frame):
-        print("\n!!! PREEMPTION — saving emergency checkpoint !!!")
+        print(f"\n!!! PREEMPTION (rank {self.rank}) — saving emergency checkpoint !!!")
         self._emergency_save = True
 
-    def _build_dataloader(self, max_tokens: int) -> DataLoader:
-        """Build dataloader with the given max token count."""
-        dataset = VoxelPairDataset(
+    def _build_dataloader(self, max_tokens: int, batch_size: int) -> DataLoader:
+        """Build dataloader with the given max token count and batch size."""
+        dataset = SlatPairDataset(
             data_dir=self.config["data_dir"],
             max_tokens=max_tokens,
-            near_surface_ratio=self.config.get("near_surface_ratio", 0.6),
-            sdf_truncation=self.config.get("sdf_truncation", 0.1),
             voxel_dim=self.config.get("voxel_dim", 32),
+            slat_mean=self.config.get("slat_mean"),
+            slat_std=self.config.get("slat_std"),
+            overfit_uid=self.config.get("overfit_uid", None),
         )
+
+        sampler = None
+        shuffle = True
+        if self.world_size > 1:
+            sampler = DistributedSampler(
+                dataset, num_replicas=self.world_size, rank=self.rank, shuffle=True,
+            )
+            shuffle = False  # sampler handles shuffling
+
         return DataLoader(
             dataset,
-            batch_size=self.config.get("batch_size", 4),
-            shuffle=True,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            sampler=sampler,
             num_workers=self.config.get("num_workers", 4),
             pin_memory=True,
             drop_last=True,
-            collate_fn=voxelpair_collate_fn,
+            collate_fn=slatpair_collate_fn,
         )
 
     # ------------------------------------------------------------------
@@ -477,8 +488,11 @@ class Trainer:
     # ------------------------------------------------------------------
 
     def save_checkpoint(self, tag: str = "latest"):
+        if not self.is_main:
+            return
+        raw_model = self.model.module if isinstance(self.model, DDP) else self.model
         ckpt = {
-            "model": self.model.state_dict(),
+            "model": raw_model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "scheduler": self.scheduler.state_dict(),
             "global_step": self.global_step,
@@ -493,16 +507,22 @@ class Trainer:
     def load_checkpoint(self, path: str | None = None):
         p = Path(path) if path else self.output_dir / "checkpoint_latest.pt"
         if not p.exists():
-            print("No checkpoint found, starting from scratch.")
-            return
-        print(f"Resuming from {p}")
+            if self.is_main:
+                print("No checkpoint found, starting from scratch.")
+            return False
+        if self.is_main:
+            print(f"Resuming from {p}")
         ckpt = torch.load(p, map_location=self.device, weights_only=False)
-        self.model.load_state_dict(ckpt["model"])
+        raw_model = self.model.module if isinstance(self.model, DDP) else self.model
+        raw_model.load_state_dict(ckpt["model"])
         self.optimizer.load_state_dict(ckpt["optimizer"])
         self.scheduler.load_state_dict(ckpt["scheduler"])
         self.global_step = ckpt["global_step"]
         self.epoch = ckpt["epoch"]
-        print(f"Resumed at step {self.global_step}, epoch {self.epoch}")
+        self._checkpoint_loaded = True
+        if self.is_main:
+            print(f"Resumed at step {self.global_step}, epoch {self.epoch}")
+        return True
 
     # ------------------------------------------------------------------
     # Training step
@@ -511,10 +531,10 @@ class Trainer:
     def train_step(self, batch: dict) -> dict[str, float]:
         self.model.train()
 
-        features = batch["coarse_features"].to(self.device)   # (B, N, voxel_dim)
-        positions = batch["positions"].to(self.device)         # (B, N, 3)
-        gt_sdf = batch["gt_sdf"].to(self.device)              # (B, N, 1)
-        B = features.shape[0]
+        coarse_slat = batch["coarse_slat"].to(self.device)    # (B, N, voxel_dim) normalized
+        fine_slat = batch["fine_slat"].to(self.device)         # (B, N, voxel_dim) normalized
+        positions = batch["positions"].to(self.device)          # (B, N, 3)
+        B = coarse_slat.shape[0]
 
         # DINOv2 conditioning (optional — works without it)
         cond_features = batch.get("cond_features")
@@ -524,75 +544,43 @@ class Trainer:
         if cond_mask is not None:
             cond_mask = cond_mask.to(self.device)
 
-        # Diffusion forward process
-        t = torch.rand(B, device=self.device)
-        noise = torch.randn_like(gt_sdf)
-        alpha = (1 - t).view(B, 1, 1)
-        noisy_sdf = alpha.sqrt() * gt_sdf + (1 - alpha).sqrt() * noise
+        # Ground truth delta
+        target_delta = fine_slat - coarse_slat  # (B, N, 32)
 
         # --- Forward pass with bf16 autocast ---
+        # Fixed t=0 passed internally by model (no timestep needed)
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            pred_noise = self.model(
-                features, positions, t,
+            pred_delta = self.model(
+                coarse_slat, positions,
                 cond_features=cond_features,
                 cond_mask=cond_mask,
-                noisy_sdf=noisy_sdf,
             )
 
-            # Reconstruct predicted SDF from noise prediction
-            pred_sdf = (noisy_sdf - (1 - alpha).sqrt() * pred_noise) / alpha.sqrt()
+            # Primary loss: L1 on predicted delta vs ground truth delta
+            delta_l1 = F.l1_loss(pred_delta, target_delta)
 
-            # Losses (pass positions for spatial eikonal regularisation)
-            losses = self.criterion(pred_sdf=pred_sdf, gt_sdf=gt_sdf, positions=positions)
+            # Secondary: direct reconstruction L1 (coarse + delta vs fine)
+            pred_fine = coarse_slat + pred_delta
+            recon_l1 = F.l1_loss(pred_fine, fine_slat)
 
-        # FlexiCubes mesh-space losses (every K steps)
-        fc_interval = self.config.get("flexicubes_interval", 10)
-        fc_res = self.config.get("flexicubes_resolution", 0)
+            # Also track MSE for comparison with diffusion baseline
+            delta_mse = F.mse_loss(pred_delta, target_delta)
 
-        if (self.flexicubes is not None and fc_interval > 0 and fc_res > 0
-                and self.global_step % fc_interval == 0):
-            try:
-                R_fc = fc_res
-                R_data = self.config.get("resolution", 128)
-
-                # Scatter sparse token predictions into a small dense grid
-                # via nearest-neighbor interpolation
-                pos_norm = (positions[0].float() / max(R_data - 1, 1)) * 2 - 1  # (N, 3) in [-1, 1]
-                lin = torch.linspace(-1, 1, R_fc, device=self.device)
-                gx, gy, gz = torch.meshgrid(lin, lin, lin, indexing="ij")
-                grid_pts = torch.stack([gx, gy, gz], -1).reshape(-1, 3)  # (R_fc^3, 3)
-
-                # Find nearest training token for each grid point
-                dists = torch.cdist(grid_pts.unsqueeze(0), pos_norm.unsqueeze(0))
-                nn_idx = dists.argmin(dim=2).squeeze(0)  # (R_fc^3,)
-
-                pred_grid = pred_sdf[0, nn_idx, 0].float().view(R_fc, R_fc, R_fc)
-                gt_grid = gt_sdf[0, nn_idx, 0].float().view(R_fc, R_fc, R_fc)
-
-                verts, faces = self.flexicubes.extract(pred_grid)
-                if verts is not None and verts.shape[0] > 0:
-                    gt_v, gt_f = self.flexicubes.extract(gt_grid)
-                    if gt_v is not None and gt_v.shape[0] > 0:
-                        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                            losses = self.criterion(
-                                pred_sdf=pred_sdf, gt_sdf=gt_sdf,
-                                extracted_vertices=verts,
-                                extracted_faces=faces,
-                                gt_vertices=gt_v, gt_faces=gt_f,
-                                pred_points=verts.unsqueeze(0),
-                                gt_points=gt_v.unsqueeze(0),
-                            )
-            except Exception as e:
-                if self.global_step % (fc_interval * 100) == 0:
-                    logger.warning(
-                        f"FlexiCubes extraction failed at step {self.global_step}: {e}"
-                    )
+            losses = {
+                "delta_l1": delta_l1,
+                "recon_l1": recon_l1,
+                "delta_mse": delta_mse,
+                "total": delta_l1,  # primary loss for backprop
+            }
 
         # Backward
         self.optimizer.zero_grad()
         losses["total"].backward()
+
+        # Only clip trainable params
+        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
         torch.nn.utils.clip_grad_norm_(
-            self.model.parameters(), self.config.get("max_grad_norm", 1.0)
+            trainable_params, self.config.get("max_grad_norm", 1.0)
         )
         self.optimizer.step()
         self.scheduler.step()
@@ -606,34 +594,53 @@ class Trainer:
     def train(self):
         total_steps = self.config.get("total_steps", 100_000)
         save_interval = self.config.get("save_interval", 1000)
-        log_interval = self.config.get("log_interval", 100)
+        log_interval = self.config.get("log_interval", 50)
 
-        self.load_checkpoint()
+        if not self._checkpoint_loaded:
+            self.load_checkpoint()
 
-        # Determine current progressive max_tokens
+        # Determine current progressive values
         cur_tokens = get_progressive_value(
             self.progressive, self.global_step, "num_tokens", 4096
         )
-        dataloader = self._build_dataloader(cur_tokens)
+        cur_batch = get_progressive_value(
+            self.progressive, self.global_step, "batch_size",
+            self.config.get("batch_size", 4),
+        )
+        dataloader = self._build_dataloader(cur_tokens, cur_batch)
 
-        print(f"\n{'='*60}")
-        print(f"=== Training Stage 2 RefinementDiT ===")
-        print(f"  Total steps:     {total_steps}")
-        print(f"  Current step:    {self.global_step}")
-        print(f"  Dataset size:    {len(dataloader.dataset)}")
-        print(f"  Batch size:      {self.config.get('batch_size', 4)}")
-        print(f"  Initial tokens:  {cur_tokens}")
-        print(f"  Progressive:     {self.progressive}")
-        print(f"  bf16:            enabled")
-        print(f"  Grad checkpoint: {self.config.get('use_checkpoint', True)}")
-        print(f"{'='*60}\n")
+        if self.is_main:
+            raw_model = self.model.module if isinstance(self.model, DDP) else self.model
+            trainable = sum(p.numel() for p in raw_model.parameters() if p.requires_grad)
+            print(f"\n{'='*60}")
+            print(f"=== Training Stage 2 RefinementDiT (Residual) ===")
+            print(f"  Mode:            Direct residual prediction (L1 loss)")
+            print(f"  Trainable:       {trainable / 1e6:.1f}M params")
+            print(f"  Total steps:     {total_steps}")
+            print(f"  Current step:    {self.global_step}")
+            print(f"  Dataset size:    {len(dataloader.dataset)}")
+            print(f"  Batch size:      {cur_batch} (per GPU)")
+            print(f"  World size:      {self.world_size} GPU(s)")
+            print(f"  Effective batch: {cur_batch * self.world_size}")
+            print(f"  Initial tokens:  {cur_tokens}")
+            print(f"  Progressive:     {self.progressive}")
+            print(f"  bf16:            enabled")
+            print(f"  Grad checkpoint: {self.config.get('use_checkpoint', True)}")
+            print(f"{'='*60}\n")
 
         with open("/tmp/train.pid", "w") as f:
             f.write(str(os.getpid()))
 
-        pbar = tqdm(total=total_steps, initial=self.global_step, desc="Training")
+        pbar = tqdm(
+            total=total_steps, initial=self.global_step, desc="Training",
+            disable=not self.is_main,
+        )
 
         while self.global_step < total_steps:
+            # Set epoch for DistributedSampler
+            if hasattr(dataloader, "sampler") and isinstance(dataloader.sampler, DistributedSampler):
+                dataloader.sampler.set_epoch(self.epoch)
+
             for batch in dataloader:
                 if self.global_step >= total_steps:
                     break
@@ -641,17 +648,27 @@ class Trainer:
                 # Emergency save
                 if self._emergency_save:
                     self.save_checkpoint(f"emergency_{self.global_step}")
-                    print("Emergency checkpoint saved. Exiting.")
+                    if self.is_main:
+                        print("Emergency checkpoint saved. Exiting.")
+                    if self.world_size > 1:
+                        dist.destroy_process_group()
                     sys.exit(0)
 
-                # Progressive schedule: rebuild dataloader if token count changed
+                # Progressive schedule: rebuild dataloader if tokens or batch size changed
                 new_tokens = get_progressive_value(
                     self.progressive, self.global_step, "num_tokens", 4096
                 )
-                if new_tokens != cur_tokens:
-                    print(f"\n>>> Progressive: tokens {cur_tokens} → {new_tokens} at step {self.global_step}")
+                new_batch = get_progressive_value(
+                    self.progressive, self.global_step, "batch_size",
+                    self.config.get("batch_size", 4),
+                )
+                if new_tokens != cur_tokens or new_batch != cur_batch:
+                    if self.is_main:
+                        print(f"\n>>> Progressive: tokens {cur_tokens}→{new_tokens}, "
+                              f"batch {cur_batch}→{new_batch} at step {self.global_step}")
                     cur_tokens = new_tokens
-                    dataloader = self._build_dataloader(cur_tokens)
+                    cur_batch = new_batch
+                    dataloader = self._build_dataloader(cur_tokens, cur_batch)
                     break  # restart epoch with new dataloader
 
                 # Train step
@@ -659,8 +676,8 @@ class Trainer:
                 self.global_step += 1
                 pbar.update(1)
 
-                # Logging
-                if self.global_step % log_interval == 0:
+                # Logging (rank 0 only)
+                if self.is_main and self.global_step % log_interval == 0:
                     loss_str = " | ".join(f"{k}: {v:.4f}" for k, v in losses.items())
                     pbar.set_postfix_str(loss_str)
                     if self.wandb:
@@ -669,15 +686,20 @@ class Trainer:
                             step=self.global_step,
                         )
 
-                # Checkpoint
+                # Checkpoint (rank 0 only, but all ranks wait)
                 if self.global_step % save_interval == 0:
                     self.save_checkpoint(f"step_{self.global_step}")
+                    if self.world_size > 1:
+                        dist.barrier()
 
             self.epoch += 1
 
         pbar.close()
         self.save_checkpoint("final")
-        print(f"\nTraining complete at step {self.global_step}")
+        if self.is_main:
+            print(f"\nTraining complete at step {self.global_step}")
+        if self.world_size > 1:
+            dist.destroy_process_group()
 
 
 # ---------------------------------------------------------------------------
@@ -691,13 +713,15 @@ def main():
     parser.add_argument("--resume_from", default=None)
     args = parser.parse_args()
 
+    rank, local_rank, world_size = setup_distributed()
+
     with open(args.config) as f:
         config = yaml.safe_load(f)
 
     if args.output_dir:
         config["output_dir"] = args.output_dir
 
-    trainer = Trainer(config)
+    trainer = Trainer(config, rank=rank, local_rank=local_rank, world_size=world_size)
     if args.resume_from:
         trainer.load_checkpoint(args.resume_from)
     trainer.train()

@@ -1,0 +1,11 @@
+{
+  "name": "backpack",
+  "n_points": 2857,
+  "trellis_time": 2.58,
+  "delta_scale": 1.0,
+  "decode_time": 0.04,
+  "total_time": 2.62,
+  "slat_delta_mean": 2.2691690921783447,
+  "slat_delta_max": 20.50386619567871,
+  "mesh": "259676 verts, 486681 faces"
+}

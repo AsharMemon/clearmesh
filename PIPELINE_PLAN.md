@@ -53,17 +53,25 @@ Input (image or FLUX.1-generated image)
 ### Stage 2 — TRELLIS.2 4B (Coarse Generation)
 - **Default:** on
 - Generates coarse 3D shape as structured latents (SLAT) from the conditioned image.
-- Outputs sparse voxel positions + 32-dim SLAT features + DINOv2 conditioning features.
+- Outputs sparse voxel positions (3-dim) + 32-dim SLAT features + DINOv2/v3 conditioning features (1024-dim per patch token, 257 tokens).
 - `guidance_strength=9.0` (sparse), `4.5` (shape).
+- **Note:** DINOv3 (`dinov3-vitl16`) is a gated HuggingFace model (mirror: `tao-hunter/dinov3-vitl16-pretrain-lvd1689m`). Outputs 1024-dim features same as DINOv2-ViT-L but trained on LVD-1.689M dataset.
 
 ### Stage 3 — Stage 2 DiT (SDF Refinement)
 - **Default:** on
 - **Flag:** `--no-refine`
-- Custom DiT backbone (12 blocks from TRELLIS.2's shape transformer, pretrained weights).
-- Takes coarse SLAT + positions + DINOv2 features, predicts refined SDF field.
-- `out_layer = nn.Linear(model_dim, 1)` — predicts scalar SDF, not SLAT.
-- FlexiCubes-in-the-loop loss during training (Chamfer + normal + edge regularization).
-- Progressive token schedule: 2048 → 4096 → 8192 (when data scale allows).
+- **Architecture:** 527.5M-param DiT backbone (12 blocks from TRELLIS.2's 30-block shape transformer, dim=1536, 12 heads).
+- Pretrained initialization from TRELLIS.2 weights — critical, model barely learns from scratch.
+- Takes coarse SLAT (32-dim) + positions (3-dim) + optional DINOv2/v3 features (1024-dim cross-attention), predicts refined SDF field.
+- **MLP output head:** `nn.Sequential(LayerNorm(1536), Linear(1536, 256), GELU(), Linear(256, 1))` — prevents weight collapse that occurs with single `nn.Linear`.
+- **Epsilon prediction:** Predicts noise, not x0 or velocity. Linear noise schedule `alpha(t) = 1 - t`.
+- **Differential LR:** 5e-5 for pretrained backbone, 2.5e-4 (5x) for fresh heads (sdf_proj, out_head).
+- **SDF scale:** Ground-truth SDF multiplied by 10.0 during loading to match noise magnitude.
+- **Inference modes:**
+  - `refine()` — DDIM sampling (50 steps) with x0 clipping (±5.0) to prevent high-t divergence.
+  - `predict_x0()` — Single-step direct prediction (faster, more stable, less diverse).
+- Progressive token schedule: 2048 → 4096 → 8192 (at steps 0 → 30K → 70K).
+- **Training status:** COMPLETE — 100K steps on 34,831 clean pairs (noise_mse=0.005 final, x0_corr=0.997 at t=0.1). Cup mesh e2e: 6,815 verts in 11.6s.
 
 ### Stage 4 — PartCrafter (Part Decomposition)
 - **Default:** off (on when `--decompose` or `--geo-upgrade` is set)
@@ -160,11 +168,17 @@ Input (image or FLUX.1-generated image)
 ### Phase 1 — Data Preparation (DONE)
 Download Objaverse, filter dataset, set up pair generation infrastructure.
 
-### Phase 2 — Pair Generation (IN PROGRESS)
-Generate coarse/fine mesh pairs with intermediate captures (SLAT, positions, DINOv2 features). Convert to SDF targets. Current: ~6,500 pairs, targeting 25K+ before serious training.
+### Phase 2 — Pair Generation (DONE — 34.8K clean pairs)
+Generated ~38K coarse/fine mesh pairs on RunPod A100. After outlier filtering (max_sdf_std=0.5, removes 8.4% poison pairs), 34,831 clean pairs available. Each pair contains `coarse_voxels.npy` (N,32), `positions.npy` (N,3), `fine_sdf.npy` (N,1). Most pairs lack DINOv2/v3 conditioning features — a gap for future data generation.
 
-### Phase 3 — Stage 2 Training (NEXT)
-Train RefinementDiT on pairs. Start with 2K-step pretrained-vs-scratch sanity check. Train 30K steps on current data, evaluate Chamfer improvement. Scale data before scaling steps.
+### Phase 3 — Stage 2 Training (COMPLETE — 100K steps, 11.4 hrs)
+Trained RefinementDiT (527.5M params) on 34.8K pairs on Vast.ai H100 SXM 80GB. Key results:
+- **Noise prediction**: x0_corr=0.997 at t=0.1 (near-perfect reconstruction)
+- **Loss curve**: 0.89 → 0.005 (stable, no overfitting)
+- **E2E cup mesh**: 6,815 verts, 14,092 faces, bounded SDF, 11.6s total
+- **DDIM unconditional**: Low GT correlation (0.034 avg) — expected since eval pairs lack DINOv2/v3 conditioning
+- **Key gap**: Most training pairs missing cond_features — future data gen must save these
+- See `TECHNICAL_LEARNINGS.md` for detailed failure mode analysis and all discoveries.
 
 ### Phase 4 — Pipeline Integration
 Wire trained Stage 2 into `pipeline.py`. Benchmark ClearMesh vs standalone TRELLIS.2. End-to-end testing of all optional stages.
@@ -241,7 +255,7 @@ python -m clearmesh.pipeline \
 | Component | Role | Source | Stage |
 |---|---|---|---|
 | TRELLIS.2 4B | Coarse generation | microsoft/TRELLIS.2 (MIT) | 2 |
-| Custom DiT | SDF refinement | Trained on pairs | 3 |
+| RefinementDiT (527.5M) | SDF refinement (dim=1536, MLP head) | Trained on 34.8K pairs | 3 |
 | PartCrafter | Part decomposition + classification | VAST-AI-Research/PartCrafter | 4 |
 | SuperCarver / CraftsMan3D | Geometry super-resolution | CraftsMan3D fallback | 5 |
 | NDC / FlexiCubes | Sharp-edge mesh extraction | czq142857/NDC, NVIDIA Kaolin | 6 |

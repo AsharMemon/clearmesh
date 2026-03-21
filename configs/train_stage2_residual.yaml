@@ -1,0 +1,61 @@
+# ClearMesh Stage 2 Training Configuration — Direct Residual Prediction
+#
+# Trains RefinementDiT to predict SLAT deltas (residuals) via single forward pass:
+#   refined_slat = coarse_slat + model(coarse_slat, cond_features)
+#   loss = L1(refined_slat, fine_slat)
+#
+# Frozen backbone: first 9 of 12 blocks frozen. Only last 3 blocks + out_head
+# are trainable (~87M of 528M params), preventing overfitting on small datasets.
+#
+# Fixed dummy timestep t=0 feeds the AdaLN modulation so pretrained weights
+# still contribute meaningful scale/shift/gate modulations.
+#
+# Usage:
+#   python -m clearmesh.stage2.train --config configs/train_stage2_residual.yaml
+
+# === Data ===
+data_dir: /workspace/data/slat_pairs
+
+# === Model (matched to TRELLIS.2 SLatFlowModel) ===
+voxel_dim: 32                    # TRELLIS.2 SLAT latent dim (32 channels)
+model_dim: 1536                  # TRELLIS.2 hidden dim
+num_heads: 12                    # TRELLIS.2 attention heads (head_dim=128)
+num_layers: 12                   # First 12 of TRELLIS.2's 30 blocks (~528M params)
+cond_dim: 1024                   # DINOv2-ViT-L output dim
+mlp_ratio: 5.3334                # TRELLIS.2 FFN ratio (hidden=8192)
+
+# === Backbone Freezing ===
+# Freeze first (num_layers - trainable_blocks) blocks.
+# With 12 blocks and trainable_blocks=3: freezes 0-8, trains 9-11 + out_head.
+# Each block ≈ 28.9M params → 3 blocks + out_head ≈ 87M trainable.
+trainable_blocks: 3
+
+# === Pretrained Backbone ===
+pretrained_checkpoint: /workspace/models/trellis2-4b/ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.safetensors
+use_checkpoint: true             # Gradient checkpointing (~60% VRAM savings)
+
+# === Training ===
+batch_size: 8                    # Default batch size (overridden by progressive_schedule)
+learning_rate: 0.0001            # 1e-4 — higher than diffusion since fewer trainable params
+weight_decay: 0.01               # AdamW weight decay
+total_steps: 10000               # 360 pairs × ~28 epochs. Will increase with more data.
+warmup_steps: 200                # Linear warmup steps
+max_grad_norm: 1.0               # Gradient clipping
+
+# === Dataloader ===
+num_workers: 4                   # DataLoader workers
+
+# === Progressive Training Schedule ===
+# Same ramp as before: fewer tokens early (faster iteration), more for detail.
+progressive_schedule:
+  - {step: 0,      num_tokens: 2048, batch_size: 16}  # ~25 GB — fast warmup
+  - {step: 2000,   num_tokens: 4096, batch_size: 8}   # ~40 GB — standard
+  - {step: 5000,   num_tokens: 8192, batch_size: 4}   # ~55 GB — full detail
+
+# === Checkpointing ===
+output_dir: /workspace/checkpoints/clearmesh_stage2_residual
+save_interval: 2000              # Save checkpoint every N steps
+log_interval: 25                 # Log losses every N steps
+
+# === Logging ===
+use_wandb: false                 # Set true after `wandb login`
