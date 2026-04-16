@@ -765,46 +765,84 @@ class Easy3EEditor:
             sampled = ve._dilate_sparse_mask_3d(sampled, voxel_xyz.long(), iterations=dilation)
 
         # --- Align source/edit coords before blending ---
-        # After the cascade, edit and source SLATs may have different voxel
-        # counts because each runs its own occupancy pruning. Blend at the
-        # intersection of their coord sets; voxels unique to one side keep
-        # that side's features unchanged.
+        # After the cascade, edit and source SLATs often have different
+        # voxel counts because each runs its own occupancy pruning. The
+        # edit-conditioned SLAT typically "hallucinates" extra voxels
+        # where the edit image has new content (wings, fur, etc.).
+        #
+        # The user's mask tells us where edits are allowed. For each voxel
+        # in the edit SLAT we decide:
+        #   - matched in source + mask>=0.5 : blend (edit in edit regions)
+        #   - matched in source + mask<0.5  : keep source (preserve)
+        #   - NOT matched in source + mask>=0.5 : keep edit (legit new
+        #     geometry like wings at the sides)
+        #   - NOT matched in source + mask<0.5 : DROP (unwanted edit growth
+        #     in a preserve region — this was the bug that caused a chaotic
+        #     middle when only the sides were supposed to be edited)
         edit_feats = edit_slat.feats
         src_feats = source_slat.feats
 
-        if edit_feats.shape[0] != src_feats.shape[0]:
+        edit_coords_int = (
+            edit_slat.coords[:, 1:] if edit_slat.coords.shape[-1] == 4 else edit_slat.coords
+        ).long()
+        src_coords_int = (
+            source_slat.coords[:, 1:] if source_slat.coords.shape[-1] == 4 else source_slat.coords
+        ).long()
+
+        src_map = {
+            (int(c[0]), int(c[1]), int(c[2])): i
+            for i, c in enumerate(src_coords_int.tolist())
+        }
+
+        # Build per-voxel decisions
+        N_edit = edit_feats.shape[0]
+        matched_src_idx = torch.full((N_edit,), -1, dtype=torch.long, device=edit_feats.device)
+        for i, c in enumerate(edit_coords_int.tolist()):
+            j = src_map.get((int(c[0]), int(c[1]), int(c[2])), -1)
+            matched_src_idx[i] = j
+        matched = matched_src_idx >= 0  # (N_edit,) bool
+        unmatched = ~matched
+
+        # Default-keep mask: voxels we want in the output
+        mask_bool = sampled >= 0.5
+        keep = matched | (unmatched & mask_bool)  # drop only "unmatched AND preserve"
+        n_matched = int(matched.sum().item())
+        n_unmatched_keep = int((unmatched & mask_bool).sum().item())
+        n_unmatched_drop = int((unmatched & ~mask_bool).sum().item())
+        if n_unmatched_drop > 0:
             import warnings
             warnings.warn(
-                f"[easy3e] blend: edit ({edit_feats.shape[0]}) and source "
-                f"({src_feats.shape[0]}) SLATs have different voxel counts. "
-                "Aligning by coord hash; unique voxels keep their own side."
+                f"[easy3e] blend: {n_matched} matched, {n_unmatched_keep} unmatched-kept (in edit region), "
+                f"{n_unmatched_drop} unmatched-dropped (in preserve region)."
             )
-            edit_coords_int = (
-                edit_slat.coords[:, 1:] if edit_slat.coords.shape[-1] == 4 else edit_slat.coords
-            ).long()
-            src_coords_int = (
-                source_slat.coords[:, 1:] if source_slat.coords.shape[-1] == 4 else source_slat.coords
-            ).long()
 
-            # Build coord -> src_index map (CPU dict; voxel counts ~15-30k so fast)
-            src_map = {
-                (int(c[0]), int(c[1]), int(c[2])): i
-                for i, c in enumerate(src_coords_int.tolist())
-            }
-            aligned_src = edit_feats.clone()  # default: keep edit features
-            aligned_mask = torch.zeros(edit_feats.shape[0], device=edit_feats.device)
-            for i, c in enumerate(edit_coords_int.tolist()):
-                key = (int(c[0]), int(c[1]), int(c[2]))
-                if key in src_map:
-                    aligned_src[i] = src_feats[src_map[key]]
-                    aligned_mask[i] = 1.0
-            # For voxels only in edit (not in source), force mask=1 (keep edit)
-            # since we have nothing to blend with.
-            sampled = sampled * aligned_mask + (1.0 - aligned_mask) * 1.0
-            src_feats = aligned_src
+        # Build aligned source features for matched voxels (for blending)
+        aligned_src = edit_feats.clone()
+        for i in torch.where(matched)[0].tolist():
+            aligned_src[i] = src_feats[int(matched_src_idx[i].item())]
 
-        mask_expanded = sampled.view(-1, 1).to(edit_feats.dtype)
-        blended_feats = mask_expanded * edit_feats + (1.0 - mask_expanded) * src_feats
+        # Per-voxel blend: matched voxels follow the sampled mask, unmatched
+        # voxels (that survive the drop) come straight from edit_feats.
+        blend_w = sampled.clone()
+        blend_w[unmatched] = 1.0  # kept unmatched → pure edit features
+        mask_expanded = blend_w.view(-1, 1).to(edit_feats.dtype)
+        blended_feats = mask_expanded * edit_feats + (1.0 - mask_expanded) * aligned_src
+
+        # --- Drop voxels marked as unwanted ---
+        if not bool(keep.all().item()):
+            keep_idx = torch.where(keep)[0]
+            blended_feats = blended_feats[keep_idx]
+            new_coords = edit_slat.coords[keep_idx]
+            # Build a new SparseTensor with the filtered coord layout
+            try:
+                return edit_slat.replace(feats=blended_feats, coords=new_coords)
+            except (AttributeError, TypeError):
+                try:
+                    return edit_slat.__class__(feats=blended_feats, coords=new_coords)
+                except Exception:
+                    edit_slat.feats = blended_feats
+                    edit_slat.coords = new_coords
+                    return edit_slat
 
         # --- Construct a new SparseTensor with the same coord layout ---
         # SparseTensor init varies between TRELLIS.2 versions; try __class__ replace
