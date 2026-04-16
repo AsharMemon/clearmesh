@@ -75,6 +75,20 @@ class EditOptions:
     enable_texture: bool = False  # Requires trained Ctrl-Adapter
     texture_guidance_scale: float = 7.5
 
+    # UltraShape refinement (optional, non-commercial license)
+    enable_ultrashape: bool = False
+    ultrashape_dir: str = "/workspace/UltraShape-1.0"
+    ultrashape_ckpt: str | None = None  # defaults to <ultrashape_dir>/checkpoints/ultrashape_v1.pt
+    ultrashape_config: str | None = None
+    ultrashape_steps: int = 50
+    ultrashape_octree_res: int = 1024
+
+    # Region-focused editing
+    # 2D binary mask image (path or PIL.Image); white/255=edit, black/0=preserve.
+    # If None, edit is applied globally.
+    region_mask: object = None  # str | Path | PIL.Image | None
+    mask_dilation: int = 1  # 3D morphological dilation passes
+
     # Text editing params (InstructPix2Pix)
     text_image_guidance: float = 1.5
     text_guidance_scale: float = 7.5
@@ -142,6 +156,15 @@ class Easy3EEditor:
         self._ctrl_adapter = None
         self._ctrl_adapter_checkpoint = ctrl_adapter_checkpoint
         self._image_editor = None
+        self._ultrashape_refiner = None
+
+    @property
+    def ultrashape_refiner(self):
+        """Lazy-load UltraShapeRefiner on first access."""
+        if self._ultrashape_refiner is None:
+            from clearmesh.editing.ultrashape_refine import UltraShapeRefiner
+            self._ultrashape_refiner = UltraShapeRefiner(device=self.device)
+        return self._ultrashape_refiner
 
     @property
     def pipeline(self):
@@ -477,6 +500,29 @@ class Easy3EEditor:
         timings["flow_edit"] = time.time() - t0
         print(f"  Edited SLAT at res={res}, feats={tuple(edited_shape_slat.feats.shape)}")
 
+        # --- Region-focused editing: if user provided a mask, blend with source SLAT ---
+        if options.region_mask is not None:
+            t0 = time.time()
+            source_shape_slat, _ = pipeline.sample_shape_slat_cascade(
+                src_cond_512, src_cond_1024,
+                pipeline.models["shape_slat_flow_model_512"],
+                pipeline.models["shape_slat_flow_model_1024"],
+                512, 1024,
+                src_coords,
+                {"steps": options.num_flow_steps, "guidance_strength": options.guidance_scale},
+                49152,
+            )
+            edited_shape_slat = self._blend_slat_by_mask(
+                edit_slat=edited_shape_slat,
+                source_slat=source_shape_slat,
+                region_mask=options.region_mask,
+                source_image=source_image,
+                edit_image=edit_image,
+                dilation=options.mask_dilation,
+            )
+            timings["region_blend"] = time.time() - t0
+            print(f"  Region-masked blend applied")
+
         # --- Texture SLAT (conditioned on edit image) for proper decoding ---
         t0 = time.time()
         try:
@@ -516,6 +562,49 @@ class Easy3EEditor:
             edited_mesh = decoded
         timings["decode"] = time.time() - t0
 
+        # --- Optional UltraShape refinement (non-commercial license) ---
+        if options.enable_ultrashape:
+            t0 = time.time()
+            try:
+                # Materialize edited_mesh to trimesh first (UltraShape's loader
+                # expects a file path or a Trimesh-compatible object)
+                if not hasattr(edited_mesh, "vertices"):
+                    raise TypeError("decoded mesh missing vertices — cannot refine")
+                import trimesh as _tm
+                if not isinstance(edited_mesh, _tm.Trimesh):
+                    import numpy as _np
+                    v = edited_mesh.vertices.detach().cpu().numpy() if hasattr(edited_mesh.vertices, "detach") else _np.asarray(edited_mesh.vertices)
+                    f = edited_mesh.faces.detach().cpu().numpy() if hasattr(edited_mesh.faces, "detach") else _np.asarray(edited_mesh.faces)
+                    pre_ultra_mesh = _tm.Trimesh(vertices=v, faces=f)
+                else:
+                    pre_ultra_mesh = edited_mesh
+
+                from clearmesh.editing.ultrashape_refine import UltraShapeConfig
+                us_cfg = UltraShapeConfig(
+                    num_inference_steps=options.ultrashape_steps,
+                    octree_res=options.ultrashape_octree_res,
+                )
+                refiner = self.ultrashape_refiner
+                if options.ultrashape_ckpt:
+                    refiner.ckpt_path = options.ultrashape_ckpt
+                if options.ultrashape_config:
+                    refiner.config_path = options.ultrashape_config
+                if options.ultrashape_dir:
+                    refiner.ultrashape_dir = Path(options.ultrashape_dir)
+
+                edited_mesh = refiner.refine(
+                    coarse_mesh=pre_ultra_mesh,
+                    reference_image=edit_image,
+                    config=us_cfg,
+                )
+                timings["ultrashape_refine"] = time.time() - t0
+                print(f"  UltraShape refined: "
+                      f"{edited_mesh.vertices.shape[0]:,} verts -> {edited_mesh.faces.shape[0]:,} faces")
+            except Exception as e:
+                import warnings
+                warnings.warn(f"[easy3e] UltraShape refinement failed ({e}); keeping TRELLIS.2 mesh")
+                timings["ultrashape_refine_failed"] = time.time() - t0
+
         # --- Convert to trimesh if needed ---
         if not hasattr(edited_mesh, "export"):
             import trimesh
@@ -550,6 +639,124 @@ class Easy3EEditor:
             edit_mask=None,
             timings=timings,
         )
+
+    def _blend_slat_by_mask(
+        self,
+        edit_slat,
+        source_slat,
+        region_mask,
+        source_image,
+        edit_image,
+        dilation: int = 1,
+    ):
+        """Blend two SLAT SparseTensors per-voxel using a 2D region mask.
+
+        The mask is projected from 2D image space to 3D voxel space via
+        TRELLIS.2's canonical camera (see ``clearmesh/editing/camera.py``).
+        Voxels whose projected pixel is marked "edit" (mask value > 0) take
+        features from ``edit_slat``; the rest take from ``source_slat``.
+
+        Args:
+            edit_slat: SparseTensor with edit-conditioned features (.feats).
+            source_slat: SparseTensor with source-conditioned features.
+                Must have the same coord layout as edit_slat.
+            region_mask: PIL.Image, Path, str, or numpy array. Binary
+                or grayscale mask; values > 0.5 mean "edit here".
+            source_image: Source view — used by fallback mask heuristic.
+            edit_image: Edit view — used by fallback mask heuristic.
+            dilation: 3D morphological dilation passes to apply.
+
+        Returns:
+            A new SparseTensor (same type as input) with blended features.
+        """
+        import numpy as np
+        from pathlib import Path as _Path
+        from PIL import Image as _Image
+        import torch as _torch
+
+        from clearmesh.editing.camera import CanonicalCamera, project_voxels_to_pixels
+        from clearmesh.editing.voxel_flowedit import VoxelFlowEdit
+
+        # --- Load mask ---
+        if isinstance(region_mask, (str, _Path)):
+            region_mask_img = _Image.open(str(region_mask)).convert("L")
+        elif isinstance(region_mask, _Image.Image):
+            region_mask_img = region_mask.convert("L")
+        elif isinstance(region_mask, np.ndarray):
+            # Convert numpy to PIL
+            arr = region_mask
+            if arr.dtype != np.uint8:
+                arr = (np.clip(arr, 0, 1) * 255).astype(np.uint8)
+            if arr.ndim == 3:
+                arr = arr.mean(axis=-1).astype(np.uint8)
+            region_mask_img = _Image.fromarray(arr, mode="L")
+        else:
+            raise TypeError(
+                f"region_mask must be path/PIL.Image/np.ndarray, got {type(region_mask).__name__}"
+            )
+
+        # --- Project voxels to pixels ---
+        # UltraShape and TRELLIS.2 both normalize meshes to fit [-0.5, 0.5]
+        # which corresponds to grid_size=(internal voxel resolution of the SS latent)
+        # We use the SLAT's coords to drive projection.
+        coords = edit_slat.coords  # (N, 4): batch col + (x, y, z)
+        if coords.shape[-1] == 4:
+            voxel_xyz = coords[:, 1:]
+        else:
+            voxel_xyz = coords
+        voxel_xyz = voxel_xyz.to(self.device)
+
+        # The SS latent grid size depends on the cascade output resolution.
+        # edit_slat here comes from sample_shape_slat_cascade(res=1024), so
+        # voxel indices are in [0, 64) roughly; but internal coords may be
+        # absolute world coords already. We detect from max value.
+        max_coord = int(voxel_xyz.max().item()) + 1
+        # Heuristic: align grid_size to nearest power-of-2 above max_coord,
+        # capped at 256 (TRELLIS.2 default)
+        grid_size = max(32, 1 << (max_coord - 1).bit_length())
+        grid_size = min(grid_size, 256)
+
+        camera = CanonicalCamera.trellis2_default(image_size=region_mask_img.width)
+        u, v, depth = project_voxels_to_pixels(voxel_xyz, camera, grid_size=grid_size)
+
+        # --- Sample mask at each voxel's projected pixel ---
+        W, H = region_mask_img.size
+        mask_arr = np.array(region_mask_img, dtype=np.float32) / 255.0
+        mask_t = _torch.from_numpy(mask_arr).to(self.device)
+
+        u_idx = u.round().long().clamp(0, W - 1)
+        v_idx = v.round().long().clamp(0, H - 1)
+        in_frame = (u >= 0) & (u < W) & (v >= 0) & (v < H)
+        in_front = depth > 0
+
+        sampled = mask_t[v_idx, u_idx]
+        sampled = sampled * in_frame.float() * in_front.float()
+
+        # --- Optional 3D dilation ---
+        if dilation > 0 and sampled.sum() > 0:
+            ve = VoxelFlowEdit.__new__(VoxelFlowEdit)
+            ve.device = str(self.device)
+            sampled = ve._dilate_sparse_mask_3d(sampled, voxel_xyz.long(), iterations=dilation)
+
+        # --- Blend SLAT feats: edit_slat where mask>0.5, source otherwise ---
+        edit_feats = edit_slat.feats
+        src_feats = source_slat.feats
+        mask_expanded = sampled.view(-1, 1).to(edit_feats.dtype)
+        blended_feats = mask_expanded * edit_feats + (1.0 - mask_expanded) * src_feats
+
+        # --- Construct a new SparseTensor with the same coord layout ---
+        # SparseTensor init varies between TRELLIS.2 versions; try __class__ replace
+        try:
+            # Most spconv-based SparseTensors expose `.replace(feats=...)`
+            return edit_slat.replace(feats=blended_feats)
+        except AttributeError:
+            pass
+        try:
+            return edit_slat.__class__(feats=blended_feats, coords=edit_slat.coords)
+        except Exception:
+            # Last-resort: mutate in place
+            edit_slat.feats = blended_feats
+            return edit_slat
 
     def _flow_edit_slat(
         self,
