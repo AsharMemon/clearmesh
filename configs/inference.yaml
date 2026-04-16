@@ -16,7 +16,9 @@ refinement_low_vram: false       # Enable for GPUs with <24GB VRAM
 
 # === Part Decomposition (optional, kitbashing) ===
 enable_decomposition: false
+part_decomposer: partcrafter    # partcrafter (image-in) | xpart (mesh-in, Hunyuan3D-Part)
 partcrafter_path: /mnt/data/PartCrafter
+xpart_path: /mnt/data/Hunyuan3D-Part/XPart
 
 # === Geometry Super-Resolution (optional) ===
 enable_super_resolution: false

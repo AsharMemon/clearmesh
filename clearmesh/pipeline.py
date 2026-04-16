@@ -58,9 +58,10 @@ class GenerationOptions:
     # Stage 1: Coarse generation
     resolution: int = 512  # 512 | 1024 | 1536
 
-    # Part decomposition (PartCrafter)
+    # Part decomposition (PartCrafter or X-Part)
     enable_part_decomposition: bool = False  # Kitbashing mode
-    num_parts: int | None = None  # Auto-detect if None
+    part_decomposer: str = "partcrafter"  # "partcrafter" | "xpart"
+    num_parts: int | None = None  # Auto-detect if None (PartCrafter only)
 
     # Stage 2: Refinement (UltraShape)
     enable_refinement: bool = True
@@ -126,6 +127,7 @@ class ClearMeshPipeline:
         self,
         ultrashape_dir: str = "/workspace/UltraShape-1.0",
         ultrashape_checkpoint: str = "/workspace/checkpoints/ultrashape_v1.pt",
+        xpart_dir: str = "/workspace/Hunyuan3D-Part/XPart",
         model_dir: str = "/mnt/data",
         device: str | None = None,
     ):
@@ -133,11 +135,13 @@ class ClearMeshPipeline:
         self.model_dir = model_dir
         self._ultrashape_dir = ultrashape_dir
         self._ultrashape_checkpoint = ultrashape_checkpoint
+        self._xpart_dir = xpart_dir
 
         # All models are lazy-loaded
         self._stage1 = None
         self._stage2 = None
         self._part_decomposer = None
+        self._part_decomposer_backend = None  # which backend is currently loaded
         self._super_resolver = None
         self._retopologizer = None
         self._rigger = None
@@ -174,14 +178,36 @@ class ClearMeshPipeline:
             )
         return self._stage2
 
-    @property
-    def part_decomposer(self):
-        """Lazy-load PartCrafter."""
-        if self._part_decomposer is None:
+    def _get_part_decomposer(self, backend: str):
+        """Lazy-load a part decomposer for the requested backend.
+
+        Supported backends:
+          - "partcrafter": image-conditioned, subprocess to run.py
+          - "xpart":       mesh-conditioned (Tencent Hunyuan3D-Part), subprocess to demo.py
+
+        Both return List[MeshPart] with the same contract, so the rest of
+        the pipeline is agnostic to which one ran.
+        """
+        if self._part_decomposer is not None and self._part_decomposer_backend == backend:
+            return self._part_decomposer
+
+        if backend == "partcrafter":
             from clearmesh.partcrafter.decompose import PartDecomposer
             self._part_decomposer = PartDecomposer(
                 partcrafter_dir=os.path.join(self.model_dir, "PartCrafter")
             )
+        elif backend == "xpart":
+            from clearmesh.xpart import XPartDecomposer
+            self._part_decomposer = XPartDecomposer(
+                xpart_dir=self._xpart_dir,
+                device=self.device,
+            )
+        else:
+            raise ValueError(
+                f"Unknown part_decomposer backend: {backend!r}. "
+                "Valid: 'partcrafter', 'xpart'."
+            )
+        self._part_decomposer_backend = backend
         return self._part_decomposer
 
     @property
@@ -261,15 +287,17 @@ class ClearMeshPipeline:
             from clearmesh.texture.pbr import PBRTextures
             pbr_textures = PBRTextures.from_pipeline_output(coarse_mesh_raw)
 
-        # === 3. Part decomposition (PartCrafter, optional) ===
+        # === 3. Part decomposition (PartCrafter or X-Part, optional) ===
         parts = None
         if options.enable_part_decomposition:
             t0 = time.time()
-            parts = self.part_decomposer.decompose_or_passthrough(
+            decomposer = self._get_part_decomposer(options.part_decomposer)
+            parts = decomposer.decompose_or_passthrough(
                 image, mesh, num_parts=options.num_parts
             )
             timings["part_decomposition"] = time.time() - t0
-            print(f"Decomposed into {len(parts)} parts: {[p.label for p in parts]}")
+            print(f"Decomposed into {len(parts)} parts ({options.part_decomposer}): "
+                  f"{[p.label for p in parts]}")
 
         # === 4. Stage 2 — Geometric refinement (UltraShape) ===
         if options.enable_refinement:
@@ -473,8 +501,17 @@ def main():
     parser.add_argument("--low-vram", action="store_true", help="Enable CPU offload for Stage 2")
 
     # Optional pipeline stages
-    parser.add_argument("--decompose", action="store_true", help="Enable PartCrafter decomposition")
-    parser.add_argument("--num-parts", type=int, default=None, help="Part count hint for PartCrafter")
+    parser.add_argument("--decompose", action="store_true", help="Enable part decomposition (kitbashing)")
+    parser.add_argument(
+        "--part-decomposer", type=str, default="partcrafter",
+        choices=["partcrafter", "xpart"],
+        help="Which part decomposer to use (partcrafter=image-in, xpart=mesh-in)",
+    )
+    parser.add_argument(
+        "--xpart-dir", type=str, default="/workspace/Hunyuan3D-Part/XPart",
+        help="Path to Hunyuan3D-Part/XPart checkout (only used with --part-decomposer xpart)",
+    )
+    parser.add_argument("--num-parts", type=int, default=None, help="Part count hint (PartCrafter only)")
     parser.add_argument("--super-res", action="store_true", help="Enable geometry super-resolution")
     parser.add_argument("--super-res-detail", type=str, default="medium", choices=["low", "medium", "high"])
     parser.add_argument("--retopo", action="store_true", help="Enable BPT retopology (digital/game-ready)")
@@ -491,11 +528,13 @@ def main():
     pipeline = ClearMeshPipeline(
         ultrashape_dir=args.ultrashape_dir,
         ultrashape_checkpoint=args.ultrashape_checkpoint,
+        xpart_dir=args.xpart_dir,
     )
 
     options = GenerationOptions(
         resolution=args.resolution,
         enable_part_decomposition=args.decompose,
+        part_decomposer=args.part_decomposer,
         num_parts=args.num_parts,
         enable_refinement=not args.no_refinement,
         refinement_steps=25 if args.fast else 50,
