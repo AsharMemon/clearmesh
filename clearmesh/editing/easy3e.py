@@ -84,10 +84,20 @@ class EditOptions:
     ultrashape_octree_res: int = 1024
 
     # Region-focused editing
-    # 2D binary mask image (path or PIL.Image); white/255=edit, black/0=preserve.
+    # 2D mask image (path or PIL.Image); white/255=edit, black/0=preserve.
     # If None, edit is applied globally.
     region_mask: object = None  # str | Path | PIL.Image | None
     mask_dilation: int = 1  # 3D morphological dilation passes
+    # Gaussian blur radius (in pixels) applied to the 2D mask before projection.
+    # Larger values produce a smoother transition between edit and preserve
+    # regions and avoid the ragged-edge artifacts from a hard 0/1 cutoff.
+    # Set to 0 to disable. Default 12 gives a ~25px transition zone at 512px.
+    mask_blur_radius: float = 12.0
+    # Only drop unmatched edit-only voxels when the soft mask at their
+    # projected pixel is below this threshold. Lower = keeps more edit
+    # geometry near mask boundaries; prevents "holes punched through surface"
+    # artifacts where the mask was narrow.
+    mask_drop_threshold: float = 0.1
 
     # Text editing params (InstructPix2Pix)
     text_image_guidance: float = 1.5
@@ -523,6 +533,8 @@ class Easy3EEditor:
                 source_image=source_image,
                 edit_image=edit_image,
                 dilation=options.mask_dilation,
+                blur_radius=options.mask_blur_radius,
+                drop_threshold=options.mask_drop_threshold,
             )
             timings["region_blend"] = time.time() - t0
             print(f"  Region-masked blend applied")
@@ -540,7 +552,12 @@ class Easy3EEditor:
             have_tex = True
         except Exception as e:
             import warnings
-            warnings.warn(f"[easy3e] texture SLAT sampling failed ({e}); decoding without texture")
+            import traceback
+            tb = traceback.format_exc()
+            warnings.warn(
+                f"[easy3e] texture SLAT sampling failed: {type(e).__name__}: {e}\n"
+                f"decoding without texture. Traceback (tail):\n{tb[-800:]}"
+            )
             edited_tex_slat = None
             have_tex = False
 
@@ -566,14 +583,50 @@ class Easy3EEditor:
             edited_mesh = decoded
         timings["decode"] = time.time() - t0
 
+        # --- Convert to trimesh if needed (before any CPU/GPU mesh ops) ---
+        if not hasattr(edited_mesh, "export"):
+            import trimesh
+            import numpy as np
+            v = edited_mesh.vertices.detach().cpu().numpy() if hasattr(edited_mesh.vertices, "detach") else np.asarray(edited_mesh.vertices)
+            f = edited_mesh.faces.detach().cpu().numpy() if hasattr(edited_mesh.faces, "detach") else np.asarray(edited_mesh.faces)
+            edited_mesh = trimesh.Trimesh(vertices=v, faces=f)
+
+        # --- PRE-UltraShape repair: clean up holes / ragged edges from
+        # the blend-drop step BEFORE handing to UltraShape. UltraShape's
+        # surface loader samples points from the input mesh and builds
+        # voxel conditioning; a ragged input produces a ragged refinement.
+        # Feeding it a watertight mesh yields noticeably cleaner output.
+        if options.enable_repair:
+            nv_pre = len(edited_mesh.vertices) if hasattr(edited_mesh, "vertices") else 0
+            t0 = time.time()
+            try:
+                if options.skip_repair_above_verts and nv_pre > options.skip_repair_above_verts:
+                    from clearmesh.mesh.repair import repair_mesh_cuda
+                    edited_mesh = repair_mesh_cuda(
+                        edited_mesh,
+                        fill_holes=True,
+                        remove_small_components=True,
+                        fix_normals=True,
+                        verbose=False,
+                    )
+                    timings["pre_ultra_repair_cuda"] = time.time() - t0
+                else:
+                    from clearmesh.mesh.repair import full_print_preparation
+                    edited_mesh = full_print_preparation(edited_mesh, orient=False, verbose=False)
+                    timings["pre_ultra_repair"] = time.time() - t0
+            except Exception as e:
+                import warnings
+                warnings.warn(
+                    f"[easy3e] Pre-UltraShape repair failed ({e}); continuing unrepaired."
+                )
+                timings["pre_ultra_repair_failed"] = time.time() - t0
+
         # --- Optional UltraShape refinement (non-commercial license) ---
+        # Runs AFTER pre-repair so UltraShape sees a clean input and produces
+        # a cleaner output.
         if options.enable_ultrashape:
             t0 = time.time()
             try:
-                # Materialize edited_mesh to trimesh first (UltraShape's loader
-                # expects a file path or a Trimesh-compatible object)
-                if not hasattr(edited_mesh, "vertices"):
-                    raise TypeError("decoded mesh missing vertices — cannot refine")
                 import trimesh as _tm
                 if not isinstance(edited_mesh, _tm.Trimesh):
                     import numpy as _np
@@ -609,46 +662,30 @@ class Easy3EEditor:
                 warnings.warn(f"[easy3e] UltraShape refinement failed ({e}); keeping TRELLIS.2 mesh")
                 timings["ultrashape_refine_failed"] = time.time() - t0
 
-        # --- Convert to trimesh if needed ---
-        if not hasattr(edited_mesh, "export"):
-            import trimesh
-            import numpy as np
-            v = edited_mesh.vertices.detach().cpu().numpy() if hasattr(edited_mesh.vertices, "detach") else np.asarray(edited_mesh.vertices)
-            f = edited_mesh.faces.detach().cpu().numpy() if hasattr(edited_mesh.faces, "detach") else np.asarray(edited_mesh.faces)
-            edited_mesh = trimesh.Trimesh(vertices=v, faces=f)
-
-        # --- Repair: prefer CUDA-accelerated cumesh for large meshes,
-        # fall back to PyMeshFix/full_print_preparation only on small ones.
-        # cumesh handles the common issues (degenerate/duplicate faces,
-        # non-manifold edges, holes) in seconds instead of minutes.
+        # --- POST-UltraShape repair: a final light pass (just degen/dup cleanup).
+        # UltraShape's MC surface should be clean already; we only run the
+        # cheap ops here and skip hole-fill (which can over-fill cavities
+        # that UltraShape intentionally carved). ---
         if options.enable_repair:
-            nv = len(edited_mesh.vertices) if hasattr(edited_mesh, "vertices") else 0
-            prefer_cuda = (
-                options.skip_repair_above_verts
-                and nv > options.skip_repair_above_verts
-            )
+            nv_post = len(edited_mesh.vertices) if hasattr(edited_mesh, "vertices") else 0
             t0 = time.time()
             try:
-                if prefer_cuda:
+                if options.skip_repair_above_verts and nv_post > options.skip_repair_above_verts:
                     from clearmesh.mesh.repair import repair_mesh_cuda
                     edited_mesh = repair_mesh_cuda(
                         edited_mesh,
-                        fill_holes=True,
+                        fill_holes=False,   # keep UltraShape's intended cavities
                         remove_small_components=True,
                         fix_normals=True,
                         verbose=False,
                     )
-                    timings["repair_cuda"] = time.time() - t0
-                else:
-                    from clearmesh.mesh.repair import full_print_preparation
-                    edited_mesh = full_print_preparation(edited_mesh, orient=False, verbose=False)
-                    timings["repair"] = time.time() - t0
+                    timings["post_repair_cuda"] = time.time() - t0
             except Exception as e:
                 import warnings
                 warnings.warn(
-                    f"[easy3e] Mesh repair failed ({e}); returning unrepaired mesh."
+                    f"[easy3e] Post repair failed ({e}); returning mesh as-is."
                 )
-                timings["repair_failed"] = time.time() - t0
+                timings["post_repair_failed"] = time.time() - t0
 
         # --- Export ---
         if output_path:
@@ -674,6 +711,8 @@ class Easy3EEditor:
         source_image,
         edit_image,
         dilation: int = 1,
+        blur_radius: float = 12.0,
+        drop_threshold: float = 0.1,
     ):
         """Blend two SLAT SparseTensors per-voxel using a 2D region mask.
 
@@ -748,6 +787,34 @@ class Easy3EEditor:
         # --- Sample mask at each voxel's projected pixel ---
         W, H = region_mask_img.size
         mask_arr = np.array(region_mask_img, dtype=np.float32) / 255.0
+
+        # --- Soft mask: Gaussian blur to produce a smooth transition zone ---
+        # Prevents ragged edges from hard 0/1 cutoff. Without this, voxels
+        # whose projected pixel is just inside vs just outside the mask get
+        # very different treatment, producing visible seams in the output.
+        if blur_radius > 0:
+            try:
+                from scipy.ndimage import gaussian_filter
+                mask_arr = gaussian_filter(mask_arr, sigma=float(blur_radius))
+                # After blur, renormalize so max=1 (otherwise a narrow mask
+                # ends up with very low peak values).
+                if mask_arr.max() > 1e-3:
+                    mask_arr = mask_arr / mask_arr.max()
+            except ImportError:
+                # scipy unavailable — fall back to a box blur via numpy
+                r = int(blur_radius)
+                k = 2 * r + 1
+                kernel = np.ones((k, k), dtype=np.float32) / (k * k)
+                # numpy 2D convolution (slow but always available)
+                pad = np.pad(mask_arr, r, mode="edge")
+                out = np.zeros_like(mask_arr)
+                for dy in range(k):
+                    for dx in range(k):
+                        out += pad[dy:dy + mask_arr.shape[0], dx:dx + mask_arr.shape[1]] * kernel[dy, dx]
+                mask_arr = out
+                if mask_arr.max() > 1e-3:
+                    mask_arr = mask_arr / mask_arr.max()
+
         mask_t = _torch.from_numpy(mask_arr).to(self.device)
 
         u_idx = u.round().long().clamp(0, W - 1)
@@ -803,12 +870,16 @@ class Easy3EEditor:
         matched = matched_src_idx >= 0  # (N_edit,) bool
         unmatched = ~matched
 
-        # Default-keep mask: voxels we want in the output
-        mask_bool = sampled >= 0.5
-        keep = matched | (unmatched & mask_bool)  # drop only "unmatched AND preserve"
+        # Default-keep mask: voxels we want in the output.
+        # With the soft mask, we only drop voxels that are CLEARLY in the
+        # preserve zone (sampled < drop_threshold) AND unmatched. Voxels
+        # near the boundary (threshold < sampled < 0.5) are kept with a
+        # partial blend weight instead of being cut.
+        strong_preserve = sampled < drop_threshold
+        keep = matched | (unmatched & ~strong_preserve)
         n_matched = int(matched.sum().item())
-        n_unmatched_keep = int((unmatched & mask_bool).sum().item())
-        n_unmatched_drop = int((unmatched & ~mask_bool).sum().item())
+        n_unmatched_keep = int((unmatched & ~strong_preserve).sum().item())
+        n_unmatched_drop = int((unmatched & strong_preserve).sum().item())
         if n_unmatched_drop > 0:
             import warnings
             warnings.warn(
@@ -833,16 +904,16 @@ class Easy3EEditor:
             keep_idx = torch.where(keep)[0]
             blended_feats = blended_feats[keep_idx]
             new_coords = edit_slat.coords[keep_idx]
-            # Build a new SparseTensor with the filtered coord layout
+            # Build a FRESH SparseTensor with no cached state. Using
+            # edit_slat.replace(...) would pass through a stale
+            # spatial_cache (the indice_dict of the convolutional
+            # neighborhood lookup) from the pre-drop layout, which then
+            # breaks downstream sparse-conv ops in the texture flow.
             try:
+                return edit_slat.__class__(feats=blended_feats, coords=new_coords)
+            except Exception:
+                # Last resort: use replace and hope for the best
                 return edit_slat.replace(feats=blended_feats, coords=new_coords)
-            except (AttributeError, TypeError):
-                try:
-                    return edit_slat.__class__(feats=blended_feats, coords=new_coords)
-                except Exception:
-                    edit_slat.feats = blended_feats
-                    edit_slat.coords = new_coords
-                    return edit_slat
 
         # --- Construct a new SparseTensor with the same coord layout ---
         # SparseTensor init varies between TRELLIS.2 versions; try __class__ replace
