@@ -437,62 +437,83 @@ class Easy3EEditor:
         elif isinstance(edit_image, (str, Path)):
             edit_image = Image.open(str(edit_image)).convert("RGB")
 
-        # --- Generate source SS latent + SLAT via TRELLIS.2 ---
-        # This matches generate_pairs.py:969-1027's factored approach.
+        # --- Generate source structure (coords only) via TRELLIS.2 ---
+        # We use the cascade path (512→1024) internally via sample_shape_slat_cascade
+        # to match what pipeline.run() does by default. Without this cascade, the
+        # output mesh has visible striations / wireframe artifacts because the
+        # 512 shape latent is coarser than the decoder expects.
         t0 = time.time()
         pipeline = self.pipeline
         src_proc = pipeline.preprocess_image(source_image)
-        src_cond = pipeline.get_cond([src_proc], 512)
+        src_cond_512 = pipeline.get_cond([src_proc], 512)
+        src_cond_1024 = pipeline.get_cond([src_proc], 1024)
 
-        # SS sampling — returns coords (B, 4) with batch col, or (B, 3)
+        # SS sampling — returns coords (B, 4) with batch col
         src_coords = pipeline.sample_sparse_structure(
-            src_cond, 32, 1,
+            src_cond_512, 32, 1,
             {"steps": options.num_flow_steps, "guidance_strength": options.guidance_scale},
         )
-        # SLAT sampling — returns SparseTensor
-        src_slat_st = pipeline.sample_shape_slat(
-            src_cond,
-            pipeline.models["shape_slat_flow_model_512"],
-            src_coords,
-            {"steps": options.num_repaint_steps, "guidance_strength": options.guidance_scale},
-        )
         timings["source_generation"] = time.time() - t0
-        print(f"  Source SLAT: coords={tuple(src_coords.shape)}, "
-              f"feats={tuple(src_slat_st.feats.shape) if hasattr(src_slat_st, 'feats') else '?'}")
+        print(f"  Source coords: {tuple(src_coords.shape)}")
 
         # --- Edit conditioning ---
         edit_proc = pipeline.preprocess_image(edit_image)
-        edit_cond = pipeline.get_cond([edit_proc], 512)
+        edit_cond_512 = pipeline.get_cond([edit_proc], 512)
+        edit_cond_1024 = pipeline.get_cond([edit_proc], 1024)
 
-        # --- Flow-edit the SS latent ---
-        # Build a sparse-structure tensor from coords (one-channel occupancy)
-        # Easy3E Voxel FlowEdit operates on this.
+        # --- Flow-edit: sample SLAT conditioned on the EDIT image but with
+        # source COORDS preserving structure. Run the 512→1024 cascade so the
+        # geometry is at the same quality as pipeline.run() produces. ---
         t0 = time.time()
-        edited_slat_st = self._flow_edit_slat(
-            src_slat_st=src_slat_st,
-            src_coords=src_coords,
-            src_cond=src_cond,
-            edit_cond=edit_cond,
-            edit_image=edit_image,
-            source_image=source_image,
-            options=options,
+        edited_shape_slat, res = pipeline.sample_shape_slat_cascade(
+            edit_cond_512, edit_cond_1024,
+            pipeline.models["shape_slat_flow_model_512"],
+            pipeline.models["shape_slat_flow_model_1024"],
+            512, 1024,
+            src_coords,  # structure from source
+            {"steps": options.num_flow_steps, "guidance_strength": options.guidance_scale},
+            49152,  # max_num_tokens — TRELLIS.2's default for 4B
         )
         timings["flow_edit"] = time.time() - t0
+        print(f"  Edited SLAT at res={res}, feats={tuple(edited_shape_slat.feats.shape)}")
 
-        # --- Decode ---
+        # --- Texture SLAT (conditioned on edit image) for proper decoding ---
         t0 = time.time()
         try:
-            decoded = pipeline.decode_shape_slat(edited_slat_st, 512)
-            if isinstance(decoded, tuple):
-                decoded = decoded[0]
-            if isinstance(decoded, list):
-                edited_mesh = decoded[0]
-            else:
-                edited_mesh = decoded
+            edited_tex_slat = pipeline.sample_tex_slat(
+                edit_cond_1024,
+                pipeline.models["tex_slat_flow_model_1024"],
+                edited_shape_slat,
+                {"steps": options.num_repaint_steps, "guidance_strength": options.guidance_scale},
+            )
+            timings["texture_slat"] = time.time() - t0
+            have_tex = True
         except Exception as e:
             import warnings
-            warnings.warn(f"[easy3e] decode failed: {e}; returning raw slat")
-            raise
+            warnings.warn(f"[easy3e] texture SLAT sampling failed ({e}); decoding without texture")
+            edited_tex_slat = None
+            have_tex = False
+
+        # --- Decode using the full decoder (shape + texture) ---
+        t0 = time.time()
+        import torch as _torch
+        _torch.cuda.empty_cache()
+        try:
+            if have_tex and hasattr(pipeline, "decode_latent"):
+                decoded = pipeline.decode_latent(edited_shape_slat, edited_tex_slat, res)
+            else:
+                decoded = pipeline.decode_shape_slat(edited_shape_slat, res)
+        except Exception as e:
+            import warnings
+            warnings.warn(f"[easy3e] full decode failed ({e}); falling back to decode_shape_slat")
+            decoded = pipeline.decode_shape_slat(edited_shape_slat, res)
+
+        if isinstance(decoded, tuple):
+            decoded = decoded[0]
+        if isinstance(decoded, list):
+            edited_mesh = decoded[0]
+        else:
+            edited_mesh = decoded
         timings["decode"] = time.time() - t0
 
         # --- Convert to trimesh if needed ---
