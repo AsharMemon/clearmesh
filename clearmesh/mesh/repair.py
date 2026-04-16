@@ -28,6 +28,8 @@ def repair_mesh_cuda(
     fill_holes: bool = True,
     max_hole_perimeter: float = 0.03,
     remove_small_components: bool = True,
+    small_component_min_area: float = 1e-4,
+    repair_non_manifold: bool = False,  # Disabled by default — crashes on >1M verts
     fix_normals: bool = True,
     verbose: bool = False,
 ) -> trimesh.Trimesh:
@@ -111,21 +113,29 @@ def repair_mesh_cuda(
     if verbose:
         print(f"[cumesh] remove_unreferenced_vertices: {time.time()-t0:.2f}s")
 
-    # 4. Non-manifold edges
-    t0 = time.time()
-    try:
-        cm.repair_non_manifold_edges()
-        if verbose:
-            print(f"[cumesh] repair_non_manifold_edges: {time.time()-t0:.2f}s")
-    except Exception as e:
-        if verbose:
-            print(f"[cumesh] repair_non_manifold_edges skipped: {e}")
+    # 4. Non-manifold edges — OPT-IN ONLY.
+    # cumesh's repair_non_manifold_edges triggers "illegal memory access" at
+    # clean_up.cu:728 on meshes >~1M verts (verified on 9.5M-vert UltraShape
+    # output). The CUDA context gets corrupted and downstream ops crash, so
+    # we disable it by default. Set repair_non_manifold=True only for meshes
+    # you've validated are small enough (<500k verts typically).
+    if repair_non_manifold:
+        t0 = time.time()
+        try:
+            cm.repair_non_manifold_edges()
+            if verbose:
+                print(f"[cumesh] repair_non_manifold_edges: {time.time()-t0:.2f}s")
+        except Exception as e:
+            if verbose:
+                print(f"[cumesh] repair_non_manifold_edges skipped: {e}")
 
     # 5. Small components
     if remove_small_components:
         t0 = time.time()
         try:
-            cm.remove_small_connected_components()
+            # min_area is required; default = 1e-4 is a sensible "tiny island"
+            # threshold for meshes normalized to unit cube.
+            cm.remove_small_connected_components(min_area=small_component_min_area)
             if verbose:
                 print(f"[cumesh] remove_small_connected_components: {time.time()-t0:.2f}s")
         except Exception as e:
