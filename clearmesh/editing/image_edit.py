@@ -192,54 +192,216 @@ class ImageEditor:
         # Edit with InstructPix2Pix
         return self.edit(source_render, instruction, **edit_kwargs)
 
+    # Shared view definitions — matches render_ctrl_adapter_data.py convention
+    _VIEW_CAMERAS = {
+        "front":  {"eye": (0, 0, 2),  "up": (0, 1, 0)},
+        "back":   {"eye": (0, 0, -2), "up": (0, 1, 0)},
+        "left":   {"eye": (-2, 0, 0), "up": (0, 1, 0)},
+        "right":  {"eye": (2, 0, 0),  "up": (0, 1, 0)},
+        "top":    {"eye": (0, 2, 0),  "up": (0, 0, -1)},
+        "bottom": {"eye": (0, -2, 0), "up": (0, 0, 1)},
+    }
+
     def _render_view(
         self,
         mesh_path: str | Path,
         view: str,
         image_size: int,
     ) -> Image.Image:
-        """Render a single view of a mesh.
+        """Render a single view of a mesh to a PIL Image.
+
+        Uses a fallback chain:
+          1. pyrender.OffscreenRenderer with PYOPENGL_PLATFORM=egl
+             (works on most headless CUDA pods).
+          2. nvdiffrast (available as a TRELLIS.2 CUDA dep).
+          3. trimesh Scene.save_image (pyglet-based, works on desktops only).
+
+        On headless Vast.ai / RunPod instances, option 1 usually succeeds.
+        Option 3 silently returns a grey image when it fails — the previous
+        implementation of this method always landed on that code path,
+        producing unusable InstructPix2Pix inputs.
 
         Args:
             mesh_path: Path to mesh file.
-            view: View name.
-            image_size: Output resolution.
+            view: View name in _VIEW_CAMERAS.
+            image_size: Output resolution (square).
 
         Returns:
-            Rendered PIL Image.
+            Rendered PIL Image (RGB, image_size x image_size).
         """
-        from io import BytesIO
-
         import numpy as np
         import trimesh
 
-        # View definitions matching render_ctrl_adapter_data.py
-        VIEW_CAMERAS = {
-            "front": {"eye": (0, 0, 2), "up": (0, 1, 0)},
-            "back": {"eye": (0, 0, -2), "up": (0, 1, 0)},
-            "left": {"eye": (-2, 0, 0), "up": (0, 1, 0)},
-            "right": {"eye": (2, 0, 0), "up": (0, 1, 0)},
-            "top": {"eye": (0, 2, 0), "up": (0, 0, -1)},
-            "bottom": {"eye": (0, -2, 0), "up": (0, 0, 1)},
-        }
-
+        # Load and normalize mesh to unit cube centered at origin.
+        # Centering is important for _VIEW_CAMERAS (camera placed at distance 2).
         mesh = trimesh.load(str(mesh_path), force="mesh")
         mesh.vertices -= mesh.centroid
         scale = mesh.extents.max()
         if scale > 0:
             mesh.vertices /= scale
 
-        cam = VIEW_CAMERAS.get(view, VIEW_CAMERAS["front"])
-        scene = trimesh.Scene(mesh)
-        camera_transform = trimesh.transformations.look_at(
+        cam = self._VIEW_CAMERAS.get(view, self._VIEW_CAMERAS["front"])
+
+        # Attempt 1: pyrender with EGL (preferred for headless GPU pods)
+        img = _render_with_pyrender(mesh, cam, image_size)
+        if img is not None:
+            return img
+
+        # Attempt 2: nvdiffrast (CUDA-only; fast, no X server needed)
+        img = _render_with_nvdiffrast(mesh, cam, image_size)
+        if img is not None:
+            return img
+
+        # Attempt 3: trimesh pyglet (desktop only, returns grey on headless)
+        try:
+            from io import BytesIO
+            scene = trimesh.Scene(mesh)
+            scene.camera_transform = trimesh.transformations.look_at(
+                np.array(cam["eye"]), np.array([0, 0, 0]), np.array(cam["up"])
+            )
+            png = scene.save_image(resolution=(image_size, image_size))
+            if png is not None:
+                rendered = Image.open(BytesIO(png)).convert("RGB")
+                # Detect the "silently greyed out" failure mode
+                arr = np.asarray(rendered)
+                if arr.std() > 1.0:
+                    return rendered
+        except Exception:
+            pass
+
+        # Every attempt failed — return grey with a warning so callers can detect.
+        import warnings
+        warnings.warn(
+            f"[image_edit] All renderers failed for view={view!r}; returning grey fallback. "
+            "Install pyrender + pyopengl (EGL) or nvdiffrast on the pod."
+        )
+        return Image.new("RGB", (image_size, image_size), (128, 128, 128))
+
+
+def _render_with_pyrender(mesh, cam, image_size):
+    """Render with pyrender OffscreenRenderer (PYOPENGL_PLATFORM=egl).
+
+    Returns PIL Image on success, None on any failure.
+    """
+    import os
+    # PYOPENGL_PLATFORM must be set BEFORE pyrender/OpenGL import.
+    # If the user has it set to something else, respect that; otherwise default to egl.
+    os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
+
+    try:
+        import numpy as np
+        import pyrender
+        import trimesh
+    except ImportError:
+        return None
+
+    try:
+        tri_mesh = pyrender.Mesh.from_trimesh(mesh, smooth=False)
+        scene = pyrender.Scene(
+            ambient_light=(0.3, 0.3, 0.3),
+            bg_color=(0, 0, 0, 0),
+        )
+        scene.add(tri_mesh)
+
+        # Camera: 45° fov, placed at eye, looking at origin
+        camera = pyrender.PerspectiveCamera(yfov=np.pi / 4.0, aspectRatio=1.0)
+        cam_pose = trimesh.transformations.look_at(
             np.array(cam["eye"]),
-            np.array([0, 0, 0]),
+            np.array([0.0, 0.0, 0.0]),
             np.array(cam["up"]),
         )
-        scene.camera_transform = camera_transform
+        scene.add(camera, pose=cam_pose)
 
+        # One directional light from camera direction
+        light = pyrender.DirectionalLight(color=np.ones(3), intensity=3.0)
+        scene.add(light, pose=cam_pose)
+
+        r = pyrender.OffscreenRenderer(image_size, image_size)
         try:
-            png = scene.save_image(resolution=(image_size, image_size))
-            return Image.open(BytesIO(png)).convert("RGB")
-        except Exception:
-            return Image.new("RGB", (image_size, image_size), (128, 128, 128))
+            color, _ = r.render(scene)
+        finally:
+            r.delete()
+
+        return Image.fromarray(color[..., :3])
+    except Exception:
+        return None
+
+
+def _render_with_nvdiffrast(mesh, cam, image_size):
+    """Render with nvdiffrast (differentiable rasterizer, CUDA-only).
+
+    Produces a simple shaded RGB image using face normals. Returns PIL Image
+    on success, None on any failure (missing CUDA, missing nvdiffrast, etc).
+    """
+    try:
+        import numpy as np
+        import torch
+        import trimesh
+        if not torch.cuda.is_available():
+            return None
+        import nvdiffrast.torch as dr
+    except ImportError:
+        return None
+
+    try:
+        device = "cuda"
+        vertices = torch.tensor(mesh.vertices, dtype=torch.float32, device=device)
+        faces = torch.tensor(mesh.faces, dtype=torch.int32, device=device)
+
+        # Build view-projection matrix
+        eye = np.array(cam["eye"], dtype=np.float32)
+        up = np.array(cam["up"], dtype=np.float32)
+        look = trimesh.transformations.look_at(eye, np.array([0.0, 0.0, 0.0]), up)
+        # trimesh look_at returns camera→world; we need world→camera
+        view = np.linalg.inv(look).astype(np.float32)
+
+        fov = np.pi / 4.0
+        f = 1.0 / np.tan(fov / 2.0)
+        near, far = 0.01, 100.0
+        proj = np.array(
+            [
+                [f, 0, 0, 0],
+                [0, f, 0, 0],
+                [0, 0, -(far + near) / (far - near), -2 * far * near / (far - near)],
+                [0, 0, -1, 0],
+            ],
+            dtype=np.float32,
+        )
+        mvp = torch.tensor(proj @ view, dtype=torch.float32, device=device)
+
+        verts_h = torch.cat(
+            [vertices, torch.ones(vertices.shape[0], 1, device=device)], dim=1
+        )
+        verts_clip = (verts_h @ mvp.T).unsqueeze(0)  # (1, V, 4)
+
+        glctx = dr.RasterizeCudaContext()
+        rast, _ = dr.rasterize(glctx, verts_clip, faces, resolution=(image_size, image_size))
+
+        # Simple face-normal shading
+        tri_verts = vertices[faces.long()]
+        face_normals = torch.cross(
+            tri_verts[:, 1] - tri_verts[:, 0],
+            tri_verts[:, 2] - tri_verts[:, 0],
+            dim=1,
+        )
+        face_normals = torch.nn.functional.normalize(face_normals, dim=1)
+        # Light from +Z in camera space; dot with world-space normal approximates
+        # camera-aligned shading (acceptable for preview, not publication-quality)
+        light_dir = torch.tensor(
+            [0.5, 0.5, 1.0], dtype=torch.float32, device=device
+        )
+        light_dir = torch.nn.functional.normalize(light_dir, dim=0)
+        shading = (face_normals * light_dir).sum(dim=1).clamp(0.0, 1.0)
+
+        # For each pixel: face index is rast[..., 3]-1 (0 = background)
+        tri_id = rast[0, ..., 3].long() - 1
+        bg_mask = tri_id < 0
+        tri_id = tri_id.clamp(min=0)
+        pixel_shade = shading[tri_id]
+        pixel_shade[bg_mask] = 0.0
+
+        img = (pixel_shade.unsqueeze(-1).repeat(1, 1, 3) * 255).clamp(0, 255)
+        img = img.cpu().numpy().astype(np.uint8)
+        return Image.fromarray(img)
+    except Exception:
+        return None
