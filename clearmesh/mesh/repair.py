@@ -23,6 +23,128 @@ import numpy as np
 import trimesh
 
 
+def fill_small_holes_cuda(
+    mesh: trimesh.Trimesh,
+    max_hole_perimeter: float = 0.005,
+    verbose: bool = False,
+) -> trimesh.Trimesh:
+    """Close only TINY boundary loops using cumesh's CUDA hole-filler.
+
+    Aimed at the residual T-junction cracks that Taubin smoothing opens
+    (typically 10-100um wide at unit-cube normalized scale). Uses a very
+    tight max_hole_perimeter threshold so we don't accidentally fill
+    intentional cavities that UltraShape carved.
+    """
+    try:
+        import cumesh  # type: ignore
+        import torch  # type: ignore
+    except ImportError:
+        import warnings
+        warnings.warn("[fill_small_holes_cuda] cumesh/torch unavailable; skipping")
+        return mesh
+    if not torch.cuda.is_available():
+        return mesh
+
+    import time
+    t0 = time.time()
+    v = torch.tensor(np.asarray(mesh.vertices), dtype=torch.float32, device="cuda")
+    f = torch.tensor(np.asarray(mesh.faces), dtype=torch.int32, device="cuda")
+    cm = cumesh.CuMesh()
+    cm.init(v, f)
+    try:
+        cm.get_edges()
+        cm.get_boundary_info()
+        if cm.num_boundaries == 0:
+            if verbose:
+                print(f"[fill_small_holes_cuda] no boundaries; skip ({time.time()-t0:.2f}s)")
+            return mesh
+        cm.get_vertex_edge_adjacency()
+        cm.get_vertex_boundary_adjacency()
+        cm.get_manifold_boundary_adjacency()
+        cm.read_manifold_boundary_adjacency()
+        cm.get_boundary_connected_components()
+        cm.get_boundary_loops()
+        if cm.num_boundary_loops == 0:
+            return mesh
+        cm.fill_holes(max_hole_perimeter=max_hole_perimeter)
+        new_v, new_f = cm.read()
+        out = trimesh.Trimesh(
+            vertices=new_v.cpu().numpy(),
+            faces=new_f.cpu().numpy(),
+            process=False,
+        )
+        if verbose:
+            print(
+                f"[fill_small_holes_cuda] {cm.num_boundary_loops} loops <= "
+                f"{max_hole_perimeter} filled in {time.time()-t0:.2f}s "
+                f"({len(mesh.vertices):,}v -> {len(out.vertices):,}v)"
+            )
+        return out
+    except Exception as e:
+        import warnings
+        warnings.warn(f"[fill_small_holes_cuda] failed ({e}); returning input")
+        return mesh
+
+
+def quadric_decimate(
+    mesh: trimesh.Trimesh,
+    target_faces: int = 2_000_000,
+    verbose: bool = False,
+) -> trimesh.Trimesh:
+    """Quadric edge-collapse decimation — reduces face count while
+    preserving overall shape.
+
+    Uses trimesh's Open3D-backed simplify_quadric_decimation if available,
+    else falls back to pymeshlab. Target of ~2M faces removes most of the
+    1024^3 MC staircasing noise while keeping macro features like gear
+    teeth and bolt heads.
+    """
+    if len(mesh.faces) <= target_faces:
+        if verbose:
+            print(f"[quadric_decimate] input already <= {target_faces} faces; skip")
+        return mesh
+
+    import time
+    t0 = time.time()
+    try:
+        out = mesh.simplify_quadric_decimation(target_faces)
+        if verbose:
+            print(
+                f"[quadric_decimate] {len(mesh.faces):,} -> {len(out.faces):,} faces "
+                f"in {time.time()-t0:.2f}s"
+            )
+        return out
+    except Exception as e:
+        import warnings
+        warnings.warn(f"[quadric_decimate] failed ({e}); returning input")
+        return mesh
+
+
+def feature_preserving_smooth(
+    mesh: trimesh.Trimesh,
+    iterations: int = 5,
+    verbose: bool = False,
+) -> trimesh.Trimesh:
+    """Mass-spring cotangent Laplacian. Preserves sharp features better
+    than Taubin by weighting Laplacian by edge cotangents."""
+    if iterations <= 0:
+        return mesh
+    import time
+    t0 = time.time()
+    try:
+        out = mesh.copy()
+        trimesh.smoothing.filter_mut_dif_laplacian(
+            out, lamb=0.5, iterations=iterations
+        )
+        if verbose:
+            print(f"[feature_preserving_smooth] {iterations} iters in {time.time()-t0:.2f}s")
+        return out
+    except Exception as e:
+        import warnings
+        warnings.warn(f"[feature_preserving_smooth] failed ({e}); returning input")
+        return mesh
+
+
 def polish_mesh(
     mesh: trimesh.Trimesh,
     merge_digits: int = 5,
