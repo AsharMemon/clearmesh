@@ -36,6 +36,11 @@ def _trellis2_importable() -> bool:
     trellis2_dir = os.environ.get("TRELLIS2_DIR", "/workspace/TRELLIS.2")
     if Path(trellis2_dir).exists() and trellis2_dir not in sys.path:
         sys.path.insert(0, trellis2_dir)
+    # Default to flash_attn_3 attention backend (matches what we install on
+    # Vast.ai pods); TRELLIS.2 tries to `import flash_attn` for the 2.x
+    # backend and will crash if only flash_attn_3 is installed.
+    os.environ.setdefault("ATTN_BACKEND", "flash_attn_3")
+    os.environ.setdefault("SPCONV_ALGO", "native")
     try:
         import trellis2  # noqa: F401
         return True

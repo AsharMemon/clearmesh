@@ -1,0 +1,263 @@
+
+######################################################################
+ TRELLIS.2 Introspection
+######################################################################
+  trellis2_dir: /workspace/TRELLIS.2
+  model_dir:    /workspace/models/trellis2-4b
+  output:       /workspace/trellis2_introspection.txt
+
+--- Environment ---
+  torch version: 2.6.0+cu124
+  cuda available: True
+  cuda device: NVIDIA H100 NVL
+  cuda mem (GB): 99.9
+[SPARSE] Conv backend: flex_gemm; Attention backend: flash_attn
+
+Loading Trellis2ImageTo3DPipeline from /workspace/models/trellis2  Pipeline loaded OK.
+
+======================================================================
+ 1. Pipeline top-level attributes
+======================================================================
+  public attrs: ['cpu', 'cuda', 'decode_latent', 'decode_shape_slat', 'decode_tex_slat', 'default_pipeline_type', 'device', 'from_pretrained', 'get_cond', 'image_cond_model', 'low_vram', 'model_names_to_load', 'models', 'pbr_attr_layout', 'preprocess_image', 'rembg_model', 'run', 'sample_shape_slat', 'sample_shape_slat_cascade', 'sample_sparse_structure', 'sample_tex_slat', 'shape_slat_normalization', 'shape_slat_sampler', 'shape_slat_sampler_params', 'sparse_structure_sampler', 'sparse_structure_sampler_params', 'tex_slat_normalization', 'tex_slat_sampler', 'tex_slat_sampler_params', 'to']
+  pipeline class: Trellis2ImageTo3DPipeline
+  pipeline module: trellis2.pipelines.trellis2_image_to_3d
+  pipeline source: /workspace/TRELLIS.2/trellis2/pipelines/trellis2_image_to_3d.py
+
+======================================================================
+ 2. pipeline.models — what flows do we have?
+======================================================================
+  model keys: ['shape_slat_decoder', 'shape_slat_flow_model_1024', 'shape_slat_flow_model_512', 'sparse_structure_decoder', 'sparse_structure_flow_model', 'tex_slat_decoder', 'tex_slat_flow_model_1024', 'tex_slat_flow_model_512']
+
+  models['shape_slat_decoder']:
+    class:  FlexiDualGridVaeDecoder
+    module: trellis2.models.sc_vaes.fdg_vae
+    source: /workspace/TRELLIS.2/trellis2/models/sc_vaes/fdg_vae.py
+  Pipeline loaded OK.
+
+======================================================================
+ 1. Pipeline top-level attributes
+======================================================================
+  public attrs: ['cpu', 'cuda', 'decode_latent', 'decode_shape_slat', 'decode_tex_slat', 'default_pipeline_type', 'device', 'from_pretrained', 'get_cond', 'image_cond_model', 'low_vram', 'model_names_to_load', 'models', 'pbr_attr_layout', 'preprocess_image', 'rembg_model', 'run', 'sample_shape_slat', 'sample_shape_slat_cascade', 'sample_sparse_structure', 'sample_tex_slat', 'shape_slat_normalization', 'shape_slat_sampler', 'shape_slat_sampler_params', 'sparse_structure_sampler', 'sparse_structure_sampler_params', 'tex_slat_normalization', 'tex_slat_sampler', 'tex_slat_sampler_params', 'to']
+  pipeline class: Trellis2ImageTo3DPipeline
+  pipeline module: trellis2.pipelines.trellis2_image_to_3d
+  pipeline source: /workspace/TRELLIS.2/trellis2/pipelines/trellis2_image_to_3d.py
+
+======================================================================
+ 2. pipeline.models — what flows do we have?
+======================================================================
+  model keys: ['shape_slat_decoder', 'shape_slat_flow_model_1024', 'shape_slat_flow_model_512', 'sparse_structure_decoder', 'sparse_structure_flow_model', 'tex_slat_decoder', 'tex_slat_flow_model_1024', 'tex_slat_flow_model_512']
+
+  models['shape_slat_decoder']:
+    class:  FlexiDualGridVaeDecoder
+    module: trellis2.models.sc_vaes.fdg_vae
+    source: /workspace/TRELLIS.2/trellis2/models/sc_vaes/fdg_vae.py
+    n_params: 474,231,463
+  forward(x: trellis2.modules.sparse.basic.SparseTensor, gt_intersected: trellis2.modules.sparse.basic.SparseTensor = None, **kwargs)
+
+  models['shape_slat_flow_model_1024']:
+    class:  SLatFlowModel
+    module: trellis2.models.structured_latent_flow
+    source: /workspace/TRELLIS.2/trellis2/models/structured_latent_flow.py
+    n_params: 1,292,253,728
+  forward(x: trellis2.modules.sparse.basic.SparseTensor, t: torch.Tensor, cond: Union[torch.Tensor, List[torch.Tensor]], concat_cond: Optional[trellis2.modules.sparse.basic.SparseTensor] = None, **kwargs) -> trellis2.modules.sparse.basic.SparseTensor
+
+  models['shape_slat_flow_model_512']:
+    class:  SLatFlowModel
+    module: trellis2.models.structured_latent_flow
+    source: /workspace/TRELLIS.2/trellis2/models/structured_latent_flow.py
+    n_params: 1,292,253,728
+  forward(x: trellis2.modules.sparse.basic.SparseTensor, t: torch.Tensor, cond: Union[torch.Tensor, List[torch.Tensor]], concat_cond: Optional[trellis2.modules.sparse.basic.SparseTensor] = None, **kwargs) -> trellis2.modules.sparse.basic.SparseTensor
+
+  models['sparse_structure_decoder']:
+    class:  SparseStructureDecoder
+    module: trellis2.models.sparse_structure_vae
+    source: /workspace/TRELLIS.2/trellis2/models/sparse_structure_vae.py
+    n_params: 73,671,201
+  forward(x: torch.Tensor) -> torch.Tensor
+
+  models['sparse_structure_flow_model']:
+    class:  SparseStructureFlowModel
+    module: trellis2.models.sparse_structure_flow
+    source: /workspace/TRELLIS.2/trellis2/models/sparse_structure_flow.py
+    n_params: 1,292,179,976
+  forward(x: torch.Tensor, t: torch.Tensor, cond: torch.Tensor) -> torch.Tensor
+
+  models['tex_slat_decoder']:
+    class:  SparseUnetVaeDecoder
+    module: trellis2.models.sc_vaes.sparse_unet_vae
+    source: /workspace/TRELLIS.2/trellis2/models/sc_vaes/sparse_unet_vae.py
+    n_params: 474,216,006
+  forward(x: trellis2.modules.sparse.basic.SparseTensor, guide_subs: Optional[List[trellis2.modules.sparse.basic.SparseTensor]] = None, return_subs: bool = False) -> trellis2.modules.sparse.basic.SparseTensor
+
+  models['tex_slat_flow_model_1024']:
+    class:  SLatFlowModel
+    module: trellis2.models.structured_latent_flow
+    source: /workspace/TRELLIS.2/trellis2/models/structured_latent_flow.py
+    n_params: 1,292,302,880
+  forward(x: trellis2.modules.sparse.basic.SparseTensor, t: torch.Tensor, cond: Union[torch.Tensor, List[torch.Tensor]], concat_cond: Optional[trellis2.modules.sparse.basic.SparseTensor] = None, **kwargs) -> trellis2.modules.sparse.basic.SparseTensor
+
+  models['tex_slat_flow_model_512']:
+    class:  SLatFlowModel
+    module: trellis2.models.structured_latent_flow
+    source: /workspace/TRELLIS.2/trellis2/models/structured_latent_flow.py
+    n_params: 1,292,302,880
+  forward(x: trellis2.modules.sparse.basic.SparseTensor, t: torch.Tensor, cond: Union[torch.Tensor, List[torch.Tensor]], concat_cond: Optional[trellis2.modules.sparse.basic.SparseTensor] = None, **kwargs) -> trellis2.modules.sparse.basic.SparseTensor
+
+======================================================================
+ 3. Pipeline API surface — methods Easy3E will invoke
+======================================================================
+  preprocess_image(input: PIL.Image.Image) -> PIL.Image.Image
+  get_cond(image: Union[torch.Tensor, list[PIL.Image.Image]], resolution: int, include_neg_cond: bool = True) -> dict
+  [no .get_cond_image attribute]
+  sample_sparse_structure(cond: dict, resolution: int, num_samples: int = 1, sampler_params: dict = {}) -> torch.Tensor
+  sample_shape_slat(cond: dict, flow_model, coords: torch.Tensor, sampler_params: dict = {}) -> trellis2.modules.sparse.basic.SparseTensor
+  sample_shape_slat_cascade(lr_cond: dict, cond: dict, flow_model_lr, flow_model, lr_resolution: int, resolution: int, coords: torch.Tensor, sampler_params: dict = {}, max_num_tokens: int = 49152) -> trellis2.modules.sparse.basic.SparseTensor
+  decode_shape_slat(slat: trellis2.modules.sparse.basic.SparseTensor, resolution: int) -> Tuple[List[trellis2.representations.mesh.base.Mesh], List[trellis2.modules.sparse.basic.SparseTensor]]
+  [no .decode attribute]
+  run(image: PIL.Image.Image, num_samples: int = 1, seed: int = 42, sparse_structure_sampler_params: dict = {}, shape_slat_sampler_params: dict = {}, tex_slat_sampler_params: dict = {}, preprocess_image: bool = True, return_latent: bool = False, pipeline_type: Optional[str] = None, max_num_tokens: int = 49152) -> List[trellis2.representations.mesh.base.MeshWithVoxel]
+
+======================================================================
+ 4. Mesh-to-latent ENCODER discovery (Phase 1 gate)
+======================================================================
+  Looking for any attribute/method containing 'encode' or 'encoder':
+
+======================================================================
+ 5. trellis2.data_toolkit — alternative encoder source
+====================================================     208 |         noise = torch.randn(num_samples, in_channels, reso, reso, reso).to(self.device)
+     209 |         sampler_params = {**self.sparse_structure_sampler_params, **sampler_params}
+     210 |         if self.low_vram:
+     211 |             flow_model.to(self.device)
+     212 |         z_s = self.sparse_structure_sampler.sample(
+     213 |             flow_model,
+     214 |             noise,
+     215 |             **cond,
+     216 |             **sampler_params,
+     217 |             verbose=True,
+     218 |             tqdm_desc="Sampling sparse structure",
+     219 |         ).samples
+     220 |         if self.low_vram:
+     221 |             flow_model.cpu()
+     222 | 
+     223 |         # Decode sparse structure latent
+     224 |         decoder = self.models['sparse_structure_decoder']
+     225 |         if self.low_vram:
+     226 |             decoder.to(self.device)
+     227 |         decoded = decoder(z_s)>0
+     228 |         if self.low_vram:
+     229 |             decoder.cpu()
+     230 |         if resolution != decoded.shape[2]:
+     231 |             ratio = decoded.shape[2] // resolution
+     232 |             decoded = torch.nn.functional.max_pool3d(decoded.float(), ratio, ratio, 0) > 0.5
+     233 |         coords = torch.argwhere(decoded)[:, [0, 2, 3, 4]].int()
+     234 | 
+     235 |         return coords
+  --- (truncated) ---
+  sample_shape_slat source: /workspace/TRELLIS.2/trellis2/pipelines/trellis2_image_to_3d.py:237
+  --- first 80 lines ---
+     237 |     def sample_shape_slat(
+     238 |         self,
+     239 |            208 |         noise = torch.randn(num_samples, in_channels, reso, reso, reso).to(self.device)
+     209 |         sampler_params = {**self.sparse_structure_sampler_params, **sampler_params}
+     210 |         if self.low_vram:
+     211 |             flow_model.to(self.device)
+     212 |         z_s = self.sparse_structure_sampler.sample(
+     213 |             flow_model,
+     214 |             noise,
+     215 |             **cond,
+     216 |             **sampler_params,
+     217 |             verbose=True,
+     218 |             tqdm_desc="Sampling sparse structure",
+     219 |         ).samples
+     220 |         if self.low_vram:
+     221 |             flow_model.cpu()
+     222 | 
+     223 |         # Decode sparse structure latent
+     224 |         decoder = self.models['sparse_structure_decoder']
+     225 |         if self.low_vram:
+     226 |             decoder.to(self.device)
+     227 |         decoded = decoder(z_s)>0
+     228 |         if self.low_vram:
+     229 |             decoder.cpu()
+     230 |         if resolution != decoded.shape[2]:
+     231 |             ratio = decoded.shape[2] // resolution
+     232 |             decoded = torch.nn.functional.max_pool3d(decoded.float(), ratio, ratio, 0) > 0.5
+     233 |         coords = torch.argwhere(decoded)[:, [0, 2, 3, 4]].int()
+     234 | 
+     235 |         return coords
+  --- (truncated) ---
+  sample_shape_slat source: /workspace/TRELLIS.2/trellis2/pipelines/trellis2_image_to_3d.py:237
+  --- first 80 lines ---
+     237 |     def sample_shape_slat(
+     238 |         self,
+     239 |         cond: dict,
+     240 |         flow_model,
+     241 |         coords: torch.Tensor,
+     242 |         sampler_params: dict = {},
+     243 |     ) -> SparseTensor:
+     244 |         """
+     245 |         Sample structured latent with the given conditioning.
+     246 | 
+     247 |         Args:
+     248 |             cond (dict): The conditioning information.
+     249 |             coords (torch.Tensor): The coordinates of the sparse structure.
+     250 |             sampler_params (dict): Additional parameters for the sampler.
+     251 |         """
+     252 |         # Sample structured latent
+     253 |         noise = SparseTensor(
+     254 |             feats=torch.randn(coords.shape[0], flow_model.in_channels).to(self.device),
+     255 |             coords=coords,
+     256 |         )
+     257 |         sampler_params = {**self.shape_slat_sampler_params, **sampler_params}
+     258 |         if self.low_vram:
+     259 |             flow_model.to(self.device)
+     260 |         slat = self.shape_slat_sampler.sample(
+     261 |             flow_model,
+     262 |             noise,
+     263 |             **cond,
+     264 |             **sampler_params,
+     265 |             verbose=True,
+     266 |             tqdm_desc="Sampling shape SLat",
+     267 |         ).samples
+     268 |         if self.low_vram:
+     269 |             flow_model.cpu()
+     270 | 
+     271 |         std = torch.tensor(self.shape_slat_normalization['std'])[None].to(slat.device)
+     272 |         mean = torch.tensor(self.shape_slat_normalization['mean'])[None].to(slat.device)
+     273 |         slat = slat * std + mean
+     274 | 
+     275 |         return slat
+  --- (truncated) ---
+
+======================================================================
+ 8. Dummy forward pass — shape dump
+======================================================================
+  Creating 512x512 dummy RGB image (red circle on grey)...
+  preprocess_image -> <Image>
+  [dummy forward failed: 'DINOv3ViTModel' object has no attribute 'layer']
+Traceback (most recent call last):
+  File "/workspace/clearmesh/scripts/setup/inspect_trellis2.py", line 276, in inspect_pipeline
+    cond = pipeline.get_cond([proc], 512)
+  File "/workspace/TRELLIS.2/trellis2/pipelines/trellis2_image_to_3d.py", line 177, in get_cond
+    cond = self.image_cond_model(image)
+  File "/opt/conda/envs/trellis2/lib/python3.10/site-packages/torch/utils/_contextlib.py", line 116, in decorate_context
+    return func(*args, **kwargs)
+  File "/workspace/TRELLIS.2/trellis2/modules/image_feature_extractor.py", line 117, in __call__
+    features = self.extract_features(image)
+  File "/workspace/TRELLIS.2/trellis2/modules/image_feature_extractor.py", line 86, in extract_features
+    for i, layer_module in enumerate(self.model.layer):
+  File "/opt/conda/envs/trellis2/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1928, in __getattr__
+    raise AttributeError(
+AttributeError: 'DINOv3ViTModel' object has no attribute 'layer'
+
+
+======================================================================
+ 9. o_voxel API surface
+======================================================================
+  o_voxel path: /opt/conda/envs/trellis2/lib/python3.10/site-packages/o_voxel/__init__.py
+  top-level: ['convert', 'io', 'postprocess', 'rasterize', 'serialize']
+  o_voxel.convert: ['blender_dump_to_volumetric_attr', 'flexible_dual_grid', 'flexible_dual_grid_to_mesh', 'mesh_to_flexible_dual_grid', 'textured_mesh_to_volumetric_attr', 'volumetic_attr']
+    mesh_to_flexible_dual_grid(vertices: torch.Tensor, faces: torch.Tensor, voxel_size: Union[float, list, tuple, numpy.ndarray, torch.Tensor] = None, grid_size: Union[int, list, tuple, numpy.ndarray, torch.Tensor] = None, aabb: Union[list, tuple, numpy.ndarray, torch.Tensor] = None, face_weight: float = 1.0, boundary_weight: float = 1.0, regularization_weight: float = 0.1, timing: bool = False) -> torch.Tensor
+
+======================================================================
+ DONE
+======================================================================

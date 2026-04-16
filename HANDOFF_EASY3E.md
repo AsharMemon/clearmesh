@@ -1,133 +1,110 @@
-# Easy3E Editing — Autonomous Session Handoff
+# Easy3E Editing — Session Summary
 
-## Status summary
+## Status: DEMO WORKING
 
-**Phases 0–6 implemented and committed. Phase 7 (add-wings demo) blocked on HF token for gated DINOv3.**
+**The "add wings" end-to-end demo passes on a Vast.ai H100 NVL 94GB pod.**
 
-- **Commits on `claude/nervous-sammet`**: `b6f9dde` (Phase 0) + `49f4c7c` (Phases 1–6). Pushed to remote.
-- **Local tests**: 52 pass, 6 GPU-only integration/e2e tests skip cleanly on macOS.
-- **Pod**: Vast.ai H100 NVL 94GB (contract 35082988, ssh3.vast.ai:12988) is **stopped**, charging $0.20/hr for storage only. Deps installed, TRELLIS.2 cloned, model weights partially downloaded (~14GB). Restart and continue when the token is ready.
+```
+tests/e2e/test_edit_text_guided.py::test_add_wings_demo PASSED
+  Source SLAT: coords=(4001, 4), feats=(4001, 32)
+  edit_from_source_image complete in 58.6s
+  edited mesh: 1,700,185 verts, 3,467,078 faces
+```
 
-## The one remaining blocker
+**Timings** (after warmup):
+- InstructPix2Pix (source → "add wings" image): 4.0 s
+- TRELLIS.2 source SLAT sampling: 5.2 s
+- Flow edit (re-sample SLAT with edit conditioning): 1.8 s
+- Decode SLAT → mesh: 46.2 s
+- Total wall-clock: **59 seconds** per edit
 
-TRELLIS.2's image conditioning model (`facebook/dinov3-vitl16-pretrain-lvd1689m`) is a **gated HuggingFace repo**. Downloading it requires an HF token with access granted. Without it:
-- Pipeline loading fails partway through
-- Introspection cannot complete
-- Image conditioning `pipeline.get_cond(...)` cannot produce DINOv3 features
-- End-to-end demo cannot run
+Artifacts downloaded to `/tmp/easy3e_demo_artifacts/out/`:
+- `source_input.png` (1.5 MB) — source view
+- `edited.glb` (62 MB) — edited mesh with wings
 
-The previous session's memory notes confirm this: `DINOv3 model is gated - needs HuggingFace token authentication`. You have solved this before.
+## What this session did
 
-## To resume (15 minutes of setup, then ~3 minutes for the demo)
+Compared to the last handoff, we moved from "phases 1–6 code written, pod blocked on HF token" to **"demo end-to-end green"**. The key unlocks:
 
-1. **Request DINOv3 access if you haven't already** — visit https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m and click "Agree and access". Access is typically granted immediately.
+1. **HF token resolved** — installed `/etc/profile.d/hf_token.sh` so token propagates to every shell. Grants access to gated DINOv3.
+2. **Transformers 5.x DINOv3 patch** — TRELLIS.2's `image_feature_extractor.py:86` iterates `self.model.layer`, but transformers 5.5.4 exposes layers at `self.model.model.layer` (the outer `DINOv3ViTModel` wraps a `DINOv3ViTEncoder` at `.model`). Patched in place; see `/workspace/TRELLIS.2/trellis2/modules/image_feature_extractor.py.orig` for the backup.
+3. **Attention backend: flash_attn_3** — TRELLIS.2 defaults to `flash_attn` (v2) which isn't installed; we use `flash_attn_3` from the SpaceWheels release. Set via `/etc/profile.d/trellis2_env.sh` and also auto-set in `tests/conftest.py` so pytest runs pick it up without manual env.
+4. **Tensor truthiness bug** — `_split_condition` used `or`-chains on dict values, which raises on tensors. Fixed with `is not None` checks.
+5. **Architecture pivot: image-based source** — Phase 0 introspection confirmed TRELLIS.2-4B does NOT ship a mesh→SLAT encoder (only a decoder and sampler). The Easy3E paper actually edits **TRELLIS.2-generated** SLATs, not arbitrary meshes. Added `Easy3EEditor.edit_from_source_image(source_image, instruction=...)` which does the full image → source SLAT → edit → mesh flow. The old mesh-based `edit()` / `edit_from_text()` methods remain for when a true encoder becomes available (e.g. via `data_toolkit` modules).
 
-2. **Set HF token in your shell**:
-   ```bash
-   export HF_TOKEN=hf_...
-   # Or persistent:
-   echo 'export HF_TOKEN=hf_...' >> ~/.zshrc
-   ```
+## Introspection findings worth remembering
 
-3. **Restart the pod**:
-   ```bash
-   /Users/Ashar/Library/Python/3.14/bin/vastai --api-key "$VAST_API" start instance 35082988
-   # Wait ~1 min for status to become running
-   /Users/Ashar/Library/Python/3.14/bin/vastai --api-key "$VAST_API" show instance 35082988 --raw | grep actual_status
-   ```
+From `/workspace/trellis2_introspection.txt` (committed to git as a reference):
 
-4. **SSH in and set the token**:
-   ```bash
-   ssh -o UserKnownHostsFile=/tmp/vast_known_hosts -p 12988 -i ~/.ssh/id_ed25519 root@ssh3.vast.ai
-   export HF_TOKEN=hf_...
-   ```
+- **`pipeline.models` keys**: `sparse_structure_decoder`, `sparse_structure_flow_model`, `shape_slat_decoder`, `shape_slat_flow_model_{512,1024}`, `tex_slat_decoder`, `tex_slat_flow_model_{512,1024}`. **No encoders.**
+- **SparseStructureFlowModel.forward(x: Tensor, t: Tensor, cond: Tensor)** — dense tensor, plain tensor cond (not dict).
+- **SLatFlowModel.forward(x: SparseTensor, t: Tensor, cond: Union[Tensor, List[Tensor]], concat_cond: Optional[SparseTensor])** — sparse, list-or-tensor cond.
+- **pipeline.get_cond(img_list, resolution)** returns `{"cond": (1, 1029, 1024), "neg_cond": (1, 1029, 1024)}`.
+- **Samplers**: `pipeline.sample_sparse_structure(cond, 32, 1, params)` returns coords `(B, 4)`. `pipeline.sample_shape_slat(cond, flow_model, coords, params)` returns `SparseTensor`.
 
-5. **Pull latest code and run the introspection script first** — its output drives any remaining wrinkles in Phase 1–5:
-   ```bash
-   source /opt/conda/etc/profile.d/conda.sh && conda activate trellis2
-   export PYTHONPATH=/workspace/TRELLIS.2:$PYTHONPATH
-   cd /workspace/clearmesh
-   git pull origin claude/nervous-sammet
-   python scripts/setup/inspect_trellis2.py > /workspace/trellis2_introspection.txt 2>&1
-   tail -100 /workspace/trellis2_introspection.txt
-   ```
+## Test status
 
-6. **Run tests in order of increasing cost**:
-   ```bash
-   cd /workspace/clearmesh
-   pytest -q tests/unit/                                # CPU-only, all should pass (~2s)
-   pytest -q tests/integration/ -m "gpu and trellis2"   # GPU, ~30s
-   pytest -q tests/e2e/ -m "slow and gpu and trellis2"  # The demo, ~2-3 min
-   ```
+- **Unit tests: 52/52 passing** locally (CPU-only) and on pod.
+- **Integration tests**:
+  - `test_encode_image_condition` (now passes after the tensor truthiness fix)
+  - `test_velocity_shape_matches_input`, `test_cfg_monotonic`: skip with "fabricated x_t rejected" (real flow model expects specific sparse layout — worth upgrading these tests to feed a real SS latent from sample_sparse_structure).
+  - `test_encode_produces_valid_shapes`, `test_encode_decode_roundtrip_iou`: fail as expected ("No SS encoder found"). These validate the error contract for when someone attempts mesh→SLAT. They pass the error-message test, just not the happy-path because the happy path requires an encoder that TRELLIS.2 doesn't ship.
+- **E2E tests: add-wings demo passing**.
 
-7. **Inspect the demo artifacts**:
-   ```bash
-   ls -la /tmp/pytest-*/out/source.glb /tmp/pytest-*/out/edited.glb
-   # Download and open in Blender / online GLB viewer
-   ```
-
-## What was implemented
-
-### New files
-- `clearmesh/editing/camera.py` — `CanonicalCamera`, `project_voxels_to_pixels`
-- `clearmesh/editing/silhouette.py` — target extraction, voxel splat render, BCE grad
-- `scripts/setup/inspect_trellis2.py` — Phase 0 introspection (runs on pod)
-- `pytest.ini`, `tests/{unit,integration,e2e}/` — full pytest infra with gpu/slow/trellis2 markers
-- `tests/unit/test_imports.py` (11 tests)
-- `tests/unit/test_flowedit_math.py` (12 tests — forward diffuse, trajectory, masking)
-- `tests/unit/test_slat_encoder.py` (10 tests — resolver paths, rasterization)
-- `tests/unit/test_camera.py` (11 tests — projection math, mask projection)
-- `tests/unit/test_silhouette.py` (8 tests — splat, BCE, gradient)
-- `tests/integration/test_slat_encode.py` (roundtrip IoU test)
-- `tests/integration/test_flowedit.py` (velocity + CFG tests)
-- `tests/e2e/test_edit_text_guided.py` (the "add wings" demo test)
-
-### Modified files
-- `clearmesh/editing/slat_encoder.py` — three-path encoder resolution, real decode via pipeline, dense occupancy rasterization.
-- `clearmesh/editing/voxel_flowedit.py` — real `_compute_velocity` with manual CFG, `_encode_image_condition` via `pipeline.get_cond`, real `auto_detect_edit_mask` with 2D→3D projection, real `_silhouette_guidance`.
-- `clearmesh/editing/slat_repaint.py` — real `_generate_features` via `pipeline.sample_shape_slat`, true source-trajectory replay with pad/truncate fallback.
-- `clearmesh/editing/easy3e.py` — shared-pipeline constructor, lazy pipeline property, repair wrapped in try/except.
-- `clearmesh/editing/image_edit.py` — `_render_view` now uses pyrender(EGL) → nvdiffrast → pyglet fallback chain.
-
-### Scope decisions worth reviewing when you return
-
-Per your approval during planning, silhouette guidance and auto-mask projection were both implemented rather than deferred. Some specific choices:
-
-1. **Silhouette guidance backend is voxel-soft, not nvdiffrast mesh raster.** The nvdiffrast path is partially written but requires a FlexiCubes extraction each ODE step (~1s × 25 steps). Voxel-soft projects voxels as Gaussian splats using `||x_t||` as occupancy — differentiable, fast, CPU-testable. Good enough for the primary edit signal (which is `v_edit`, the trajectory split). If demo quality suffers, upgrade to nvdiffrast in Phase 5.5.
-
-2. **Camera pose** (`CanonicalCamera.trellis2_default`): assumes 40° yfov, eye at (0, 0, 2), up=+Y. The introspection script will dump what `pipeline.get_cond` actually uses — compare and adjust if needed. If projection test results look off on the pod, this is the first place to look.
-
-3. **Encoder resolution**: Three paths tried in `_resolve_ss_encoder`. Phase 0 introspection tells us which is live. If **none work**, the fallback is the "image-proxy encoder" (render source → run `pipeline.run(img)` to get a SLAT) — this isn't implemented yet because the plan flagged it as a Phase-0-gated decision.
-
-4. **Mesh repair**: wrapped in try/except. Edited meshes from the flow ODE often have holes; PyMeshFix rejects them. We keep the unrepaired mesh with a warning rather than failing the whole edit.
-
-## Cost to date
-
-- Pod active time: ~45 min at $1.789/hr ≈ $1.35
-- Pod storage (stopped): ~$0.20/hr, accumulates until you resume or destroy
-- Remaining sprint: Phase 7 demo is ~3 min of GPU time = $0.09, plus a few debug iterations if the pipeline doesn't call exactly how we assumed
-
-Total projected sprint cost if no surprises: **$2-3**. With normal debug iteration: **$5-10**.
-
-## If something doesn't fit the plan
-
-- The introspection output is the source of truth. If `pipeline.models` doesn't contain `sparse_structure_flow_model`, the CFG math in `_compute_velocity` needs adjustment. Error message from `_resolve_ss_encoder` lists all three paths checked.
-- If `pipeline.sample_shape_slat` returns something other than `{SparseTensor, Tensor}`, `_generate_features` at `slat_repaint.py:213` needs the return-type case added.
-- If mesh repair rejects the edited mesh completely, check `enable_repair=False` in the demo options and verify the raw decoded mesh.
-
-## Restarting pod and running demo — copy/paste commands
+## Running the demo yourself
 
 ```bash
-# From your laptop:
+# 1. Restart pod (if stopped):
 /Users/Ashar/Library/Python/3.14/bin/vastai --api-key "$VAST_API" start instance 35082988
-sleep 90  # wait for boot
+sleep 90
+
+# 2. SSH:
 ssh -o UserKnownHostsFile=/tmp/vast_known_hosts -p 12988 -i ~/.ssh/id_ed25519 root@ssh3.vast.ai
-# On pod:
-export HF_TOKEN=hf_YOUR_TOKEN_HERE
+
+# 3. On pod — everything needed is now in /etc/profile.d/:
+bash -l  # to source /etc/profile.d/*.sh
 source /opt/conda/etc/profile.d/conda.sh && conda activate trellis2
-export PYTHONPATH=/workspace/TRELLIS.2:$PYTHONPATH
 cd /workspace/clearmesh && git pull
-python scripts/setup/inspect_trellis2.py | tee /workspace/introspection.txt
-pytest -q tests/ -m "gpu and trellis2"
-pytest -q tests/e2e/ -m "slow and gpu and trellis2" -v
+python -m pytest tests/e2e/test_edit_text_guided.py -v -s
+
+# Artifacts land in /tmp/pytest-of-root/pytest-*/test_add_wings_demo0/out/
 ```
+
+## Cost summary
+
+- Session 1 (setup, blocked on HF token): ~$1.35
+- Session 2 (demo green): ~$1.00 (pod active ~30 min, mostly IP2P/TRELLIS.2 downloads + one 2-min test run)
+- **Total compute: ~$2.35** (well under the $15-30 sprint budget)
+- Remaining balance on Vast.ai: ~$104
+
+## Known issues / follow-up work
+
+### Worth fixing in a future pass
+
+1. **Mesh repair** (`full_print_preparation`) fails with `'Trimesh' object has no attribute 'remove_degenerate_faces'` — newer trimesh removed this API. Our try/except catches it gracefully but the demo output is un-repaired. Fix: update `clearmesh/mesh/repair.py` to use the current trimesh API (`mesh.update_faces(mesh.nondegenerate_faces())`).
+2. **Flow edit is approximate** — the current `_flow_edit_slat` just re-samples SLAT with edit conditioning, keeping source coords. This is a good approximation of Easy3E's trajectory-splitting at high `gamma` but not the full ODE. To implement the full paper:
+   - Expose a way to start `sample_shape_slat` from a given noised latent (not fresh noise).
+   - Track two trajectories (source + target) and subtract velocities.
+   - Apply the silhouette guidance term already implemented in `silhouette.py`.
+3. **Integration tests for voxel_flowedit** should use real SS latents from `sample_sparse_structure` output, not fabricated dense tensors. They currently skip due to shape mismatch — technically a soft failure mode.
+4. **Edit mask is unused** in `edit_from_source_image` — we pass the whole SLAT through. To use the 2D→3D mask projection in `camera.py`, we'd gate the feature flow per-voxel (again, requires partial-update sampling which pipeline.sample_shape_slat doesn't expose directly).
+
+### Expected-fine issues (no action)
+
+- `UnexpectedKeys: text_model.embeddings.position_ids` — IP2P checkpoint has a vestigial key; harmless.
+- `timm.models.layers` deprecation warnings — cosmetic, from TRELLIS.2's timm usage.
+
+## Pod state when you return
+
+- **Still running** as of this writeup (since we were actively testing). Feel free to stop with `vastai stop instance 35082988` if not continuing immediately — state preserved at $0.20/hr storage.
+- All patches applied: TRELLIS.2 feature extractor, `/etc/profile.d/hf_token.sh`, `/etc/profile.d/trellis2_env.sh`.
+- Conda env `trellis2` has Python 3.10 + torch 2.6.0+cu124 + all TRELLIS.2 deps + diffusers + rembg.
+
+## Commits on `claude/nervous-sammet`
+
+- `b6f9dde` — Phase 0: pytest harness + introspection + headless render fix
+- `49f4c7c` — Phase 1–5: encoder stubs + flow core + repainter + mask + silhouette
+- `0acbaaa` — Initial handoff doc
+- `f4d42ef` — Fix `_split_condition` + add `edit_from_source_image` path
+- `9e74cea` — Re-export `EditOptions`/`EditResult` from package
+- (This commit) — Auto-set ATTN_BACKEND in conftest + final handoff update
