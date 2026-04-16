@@ -93,8 +93,35 @@ def polish_mesh(
     if taubin_iterations > 0:
         t0 = time.time()
         try:
-            # trimesh.smoothing.filter_taubin modifies in place and returns None
+            # Pre-Taubin cleanup: Taubin errors with "float division by
+            # zero" on zero-area faces or orphan vertices (vertices not
+            # referenced by any face). Drop both before smoothing.
             out = out.copy()
+            # Zero-area faces (vertex indices collinear or degenerate)
+            tri_v = out.vertices[out.faces]
+            cross = np.cross(tri_v[:, 1] - tri_v[:, 0], tri_v[:, 2] - tri_v[:, 0])
+            area2 = (cross ** 2).sum(axis=1)
+            good = area2 > 1e-20
+            if not good.all():
+                out = trimesh.Trimesh(
+                    vertices=out.vertices, faces=out.faces[good], process=False
+                )
+                if verbose:
+                    print(f"[polish] dropped {(~good).sum():,} zero-area faces pre-Taubin")
+            # Orphan vertices
+            referenced = np.zeros(len(out.vertices), dtype=bool)
+            referenced[out.faces.ravel()] = True
+            if not referenced.all():
+                remap = np.cumsum(referenced) - 1
+                out = trimesh.Trimesh(
+                    vertices=out.vertices[referenced],
+                    faces=remap[out.faces],
+                    process=False,
+                )
+                if verbose:
+                    print(f"[polish] dropped {(~referenced).sum():,} orphan verts pre-Taubin")
+
+            # trimesh.smoothing.filter_taubin modifies in place
             trimesh.smoothing.filter_taubin(
                 out,
                 lamb=taubin_lamb,
