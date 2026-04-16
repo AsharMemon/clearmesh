@@ -116,15 +116,27 @@ class Easy3EEditor:
         model_dir: str = "/workspace/models/trellis2-4b",
         ctrl_adapter_checkpoint: str | None = None,
         device: str | None = None,
+        pipeline=None,
     ):
+        """
+        Args:
+            trellis2_dir: Root of the TRELLIS.2 git checkout.
+            model_dir: Path to TRELLIS.2-4B weights (or HF cache).
+            ctrl_adapter_checkpoint: Optional trained Ctrl-Adapter for
+                texture re-generation. Leave None to skip.
+            device: Compute device.
+            pipeline: Optional pre-loaded ``Trellis2ImageTo3DPipeline``. If
+                provided, shared across all editing sub-components so we
+                don't load the 4B parameters three times. If None, a new
+                pipeline is lazily loaded on first use of the editor.
+        """
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.trellis2_dir = trellis2_dir
+        self.model_dir = model_dir
+        self._pipeline = pipeline
 
-        # Lazy-loaded components
-        self._slat_encoder = SLATEncoder(
-            trellis2_dir=trellis2_dir,
-            model_dir=model_dir,
-            device=self.device,
-        )
+        # Sub-components (lazy — sharing the pipeline instance)
+        self._slat_encoder: SLATEncoder | None = None
         self._voxel_flowedit: VoxelFlowEdit | None = None
         self._slat_repainter: SLATRepainter | None = None
         self._ctrl_adapter = None
@@ -132,23 +144,54 @@ class Easy3EEditor:
         self._image_editor = None
 
     @property
-    def voxel_flowedit(self) -> VoxelFlowEdit:
-        """Lazy-load VoxelFlowEdit."""
-        if self._voxel_flowedit is None:
-            # TODO: Load TRELLIS.2's flow model and pass to VoxelFlowEdit
-            self._voxel_flowedit = VoxelFlowEdit(
-                flow_model=None,  # Will be loaded from TRELLIS.2
+    def pipeline(self):
+        """Return the shared TRELLIS.2 pipeline; lazy-load on first access.
+
+        Loading the pipeline triggers DINOv3 download and model weights
+        (~20GB + gated repo access). Only pay that cost when first needed.
+        """
+        if self._pipeline is None:
+            import sys
+            from pathlib import Path
+            if Path(self.trellis2_dir).exists() and str(self.trellis2_dir) not in sys.path:
+                sys.path.insert(0, str(self.trellis2_dir))
+            from trellis2.pipelines import Trellis2ImageTo3DPipeline
+            from pathlib import Path as _P
+            if _P(self.model_dir).exists():
+                self._pipeline = Trellis2ImageTo3DPipeline.from_pretrained(self.model_dir)
+            else:
+                self._pipeline = Trellis2ImageTo3DPipeline.from_pretrained("microsoft/TRELLIS.2-4B")
+            self._pipeline.to(self.device)
+        return self._pipeline
+
+    @property
+    def slat_encoder(self) -> SLATEncoder:
+        if self._slat_encoder is None:
+            self._slat_encoder = SLATEncoder(
+                trellis2_dir=self.trellis2_dir,
+                model_dir=self.model_dir,
                 device=self.device,
+                pipeline=self.pipeline,
+            )
+        return self._slat_encoder
+
+    @property
+    def voxel_flowedit(self) -> VoxelFlowEdit:
+        """Lazy-load VoxelFlowEdit sharing the parent pipeline."""
+        if self._voxel_flowedit is None:
+            self._voxel_flowedit = VoxelFlowEdit(
+                device=self.device,
+                pipeline=self.pipeline,
             )
         return self._voxel_flowedit
 
     @property
     def slat_repainter(self) -> SLATRepainter:
-        """Lazy-load SLATRepainter."""
+        """Lazy-load SLATRepainter sharing the parent pipeline."""
         if self._slat_repainter is None:
             self._slat_repainter = SLATRepainter(
-                feature_flow_model=None,  # Will be loaded from TRELLIS.2
                 device=self.device,
+                pipeline=self.pipeline,
             )
         return self._slat_repainter
 
@@ -227,7 +270,7 @@ class Easy3EEditor:
                 source_mesh.export(f.name)
                 mesh_path = f.name
 
-        slat = self._slat_encoder.encode(mesh_path, grid_size=options.grid_size)
+        slat = self.slat_encoder.encode(mesh_path, grid_size=options.grid_size)
         timings["encode"] = time.time() - t0
         print(f"  SLAT encoded: {slat.ss_latent.shape}")
 
@@ -286,7 +329,7 @@ class Easy3EEditor:
             intersected=slat.intersected,
             grid_size=slat.grid_size,
         )
-        edited_mesh = self._slat_encoder.decode(edited_slat)
+        edited_mesh = self.slat_encoder.decode(edited_slat)
         timings["decode"] = time.time() - t0
 
         # === Step 7: Optional texture via Ctrl-Adapter ===
@@ -296,11 +339,21 @@ class Easy3EEditor:
             timings["texture"] = time.time() - t0
 
         # === Step 8: Repair ===
+        # Edited meshes from the flow ODE can have holes or non-manifold
+        # regions that PyMeshFix rejects. We try to repair; if it fails
+        # (e.g. watertight check fails outright), we keep the unrepaired
+        # mesh with a warning rather than failing the whole edit.
         if options.enable_repair:
             t0 = time.time()
-            from clearmesh.mesh.repair import full_print_preparation
-
-            edited_mesh = full_print_preparation(edited_mesh, orient=False, verbose=False)
+            try:
+                from clearmesh.mesh.repair import full_print_preparation
+                edited_mesh = full_print_preparation(edited_mesh, orient=False, verbose=False)
+            except Exception as e:
+                import warnings
+                warnings.warn(
+                    f"[easy3e] Mesh repair failed ({e}); returning unrepaired mesh. "
+                    "You may want to run repair/fix manually."
+                )
             timings["repair"] = time.time() - t0
 
         # === Step 9: Export ===

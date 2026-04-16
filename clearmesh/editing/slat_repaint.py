@@ -58,17 +58,31 @@ class SLATRepainter:
         feature_flow_model: torch.nn.Module | None = None,
         device: str = "cuda",
         config: RepaintConfig | None = None,
+        pipeline=None,
     ):
         """Initialize SLATRepainter.
 
         Args:
-            feature_flow_model: TRELLIS.2's SLAT feature flow model.
+            feature_flow_model: TRELLIS.2's SLAT feature flow model
+                (``shape_slat_flow_model_512`` under ``pipeline.models``).
+                If None and ``pipeline`` is provided, resolved from
+                the pipeline automatically.
             device: Compute device.
             config: Repainting configuration.
+            pipeline: Optional ``Trellis2ImageTo3DPipeline`` for image
+                conditioning and for resolving the flow model.
         """
         self.feature_flow_model = feature_flow_model
         self.device = device
         self.config = config or RepaintConfig()
+        self._pipeline = pipeline
+
+        if self.feature_flow_model is None and pipeline is not None:
+            models = getattr(pipeline, "models", {})
+            for key in ("shape_slat_flow_model_512", "shape_slat_flow_model", "slat_flow_model"):
+                if key in models:
+                    self.feature_flow_model = models[key]
+                    break
 
     def repaint(
         self,
@@ -190,28 +204,92 @@ class SLATRepainter:
         target_image: Image.Image,
         num_steps: int,
         guidance_scale: float,
+        coords: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Generate per-voxel features conditioned on target image.
+        """Generate per-voxel features via the feature flow ODE.
 
-        Runs the feature flow model from noise to clean features,
-        conditioned on the edited structure and target image.
+        Matches the pattern used by ``Trellis2ImageTo3DPipeline.sample_shape_slat``
+        (seen at [generate_pairs.py:985-997](scripts/data/generate_pairs.py:985)):
+
+            cond = pipeline.get_cond([img], 512)
+            slat = pipeline.sample_shape_slat(
+                cond,
+                pipeline.models["shape_slat_flow_model_512"],
+                coords,  # from edited SS latent, in (B, N, 3) or (B, N, 4) format
+                params,  # {"steps": ..., "guidance_strength": ...}
+            )
+
+        We delegate to the pipeline's sampler because CFG + guidance-interval
+        scheduling is baked in there. Trying to reproduce it by calling the
+        flow model manually would require mirroring `FlowEulerGuidanceIntervalSampler`.
 
         Args:
             ss_latent: Edited sparse structure latent (B, N, D_ss).
             target_image: Target image for conditioning.
             num_steps: ODE integration steps.
-            guidance_scale: CFG scale.
+            guidance_scale: CFG scale (``guidance_strength`` in TRELLIS.2 terms).
+            coords: Optional (B, N, 3) voxel coords. If None, derived from
+                ``ss_latent`` geometry (caller is responsible for ensuring
+                the SS latent has an associated coord layout).
 
         Returns:
-            Generated features (B, N, D_feat).
+            Generated features (B, N, D_feat). D_feat is 32 for the default
+            TRELLIS.2-4B config.
         """
-        # TODO: Implement feature generation using TRELLIS.2's flow model
-        # 1. Encode target_image with DINOv2
-        # 2. Start from noise z_0 ~ N(0, I)
-        # 3. Integrate flow ODE: dz/dt = v(z_t, t, cond, ss_latent)
-        # 4. Return z_1 (clean features)
-        raise NotImplementedError(
-            "Feature generation requires TRELLIS.2's SLAT feature flow model."
+        if self.feature_flow_model is None:
+            raise RuntimeError(
+                "feature_flow_model not set. Pass feature_flow_model=... "
+                "to SLATRepainter(...) or pass a pipeline."
+            )
+        if self._pipeline is None:
+            raise RuntimeError(
+                "SLATRepainter requires a pipeline for image conditioning. "
+                "Pass pipeline=... in the constructor."
+            )
+
+        pipe = self._pipeline
+        processed = pipe.preprocess_image(target_image) if hasattr(pipe, "preprocess_image") else target_image
+        cond = pipe.get_cond([processed], 512)
+
+        if coords is None:
+            coords = self._derive_coords_from_ss_latent(ss_latent)
+
+        sampler_params = {"steps": num_steps, "guidance_strength": guidance_scale}
+
+        # sample_shape_slat's exact signature (per generate_pairs.py:985):
+        #   pipeline.sample_shape_slat(cond, flow_model, coords, params)
+        slat = pipe.sample_shape_slat(
+            cond,
+            self.feature_flow_model,
+            coords,
+            sampler_params,
+        )
+
+        # Sampler returns either a SparseTensor (with .feats) or a tensor
+        if hasattr(slat, "feats"):
+            feats = slat.feats
+            if feats.dim() == 2:  # (N, D) → (B, N, D)
+                feats = feats.unsqueeze(0)
+            return feats
+        if isinstance(slat, torch.Tensor):
+            return slat.unsqueeze(0) if slat.dim() == 2 else slat
+        raise TypeError(f"Unexpected sample_shape_slat return type: {type(slat).__name__}")
+
+    @staticmethod
+    def _derive_coords_from_ss_latent(ss_latent):
+        """Extract voxel coords from a SparseTensor SS latent or return
+        a best-effort placeholder for dense tensors.
+
+        The feature flow model needs to know which voxels are occupied;
+        for a SparseTensor input that's already in .coords. For a dense
+        tensor we can't recover this cheaply — the caller should pass
+        coords explicitly.
+        """
+        if hasattr(ss_latent, "coords"):
+            return ss_latent.coords
+        raise ValueError(
+            "Could not derive coords from ss_latent. Pass coords= explicitly "
+            "to _generate_features when ss_latent is a dense tensor."
         )
 
     def _replay_source_trajectory(
@@ -222,39 +300,69 @@ class SLATRepainter:
         edit_mask: torch.Tensor,
         num_steps: int,
     ) -> torch.Tensor:
-        """Replay source trajectory for unedited voxels.
+        """Replay the source flow trajectory for the post-edit voxel set.
 
-        For identity preservation: unedited voxels follow their
-        original flow trajectory to maintain consistent features.
+        Two cases:
+          A. The structure didn't change (N_new == N_old): return source
+             features directly. No replay needed.
+          B. The structure changed (voxels added/removed): the new voxel
+             set has no direct correspondence to the source features.
+             We regenerate features for the new structure using the
+             **source** image as conditioning (not the target), so the
+             unedited regions end up with features consistent with the
+             source identity rather than the target.
+
+        This is the key insight in Easy3E §3.3: unedited voxels get
+        "replayed" features, meaning they re-run the same flow ODE that
+        originally produced them — conditioned on the source image —
+        so the final per-voxel features are consistent with the source.
+
+        When ``source_image`` is None we fall back to the pad-or-truncate
+        heuristic (the behavior from the old stub) with a warning.
 
         Args:
-            ss_latent: Current structure latent.
-            source_features: Original per-voxel features.
-            source_image: Original source image.
-            edit_mask: Binary mask (1=edited).
-            num_steps: ODE steps.
+            ss_latent: Current (edited) structure latent.
+            source_features: Original per-voxel features (B, N_old, D).
+            source_image: Original source image for conditioning. If None,
+                falls back to pad/truncate.
+            edit_mask: Binary mask (1=edited). Unused in replay but
+                available for callers that want to debug the blend.
+            num_steps: ODE steps for the replay.
 
         Returns:
-            Replayed features (B, N, D_feat).
+            Replayed features (B, N_new, D_feat).
         """
-        # TODO: Implement source trajectory replay
-        # For now, just return source features (identity)
-        # The full implementation would:
-        # 1. Forward-diffuse source features to t_start
-        # 2. Integrate reverse ODE with source conditioning
-        # 3. This ensures consistent denoising path
+        B = source_features.shape[0] if source_features.dim() == 3 else 1
+        N_new = ss_latent.shape[1] if ss_latent.dim() >= 2 else ss_latent.shape[0]
+        N_old = source_features.shape[1] if source_features.dim() == 3 else source_features.shape[0]
+        D_feat = source_features.shape[-1]
 
-        # Pad or truncate source features to match new structure size
-        B, N_new, _ = ss_latent.shape
-        N_old, D_feat = source_features.shape[1], source_features.shape[2]
-
+        # Case A: structure unchanged — identity is cheapest and best
         if N_new == N_old:
             return source_features
-        elif N_new < N_old:
-            return source_features[:, :N_new, :]
-        else:
-            # Pad with zeros for new voxels
-            padding = torch.zeros(
-                B, N_new - N_old, D_feat, device=ss_latent.device
+
+        # Case B: structure changed — need a true replay
+        if source_image is None or self._pipeline is None:
+            import warnings
+            warnings.warn(
+                f"[slat_repaint] No source_image/pipeline for replay "
+                f"(N_old={N_old}, N_new={N_new}); falling back to pad/truncate. "
+                f"Edits at the structure boundary may show seams."
             )
+            if N_new < N_old:
+                return source_features[:, :N_new, :] if source_features.dim() == 3 else source_features[:N_new]
+            # Pad with zeros (neutral features)
+            padding = torch.zeros(B, N_new - N_old, D_feat, device=source_features.device, dtype=source_features.dtype)
+            if source_features.dim() == 2:
+                source_features = source_features.unsqueeze(0)
             return torch.cat([source_features, padding], dim=1)
+
+        # True replay: regenerate features for the new structure, conditioned on source image
+        coords = self._derive_coords_from_ss_latent(ss_latent) if hasattr(ss_latent, 'coords') else None
+        return self._generate_features(
+            ss_latent=ss_latent,
+            target_image=source_image,  # source, not target — this is the "replay" bit
+            num_steps=num_steps,
+            guidance_scale=self.config.guidance_scale,
+            coords=coords,
+        )
