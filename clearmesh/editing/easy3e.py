@@ -97,6 +97,10 @@ class EditOptions:
     # Mesh processing
     grid_size: int = 256  # O-Voxel resolution
     enable_repair: bool = True  # Post-edit mesh repair
+    # PyMeshFix is O(n²)-ish and becomes unusably slow on large meshes.
+    # If the decoded mesh has more verts than this, repair is auto-skipped
+    # with a warning (and marked "skipped" in timings). 0 disables the cap.
+    skip_repair_above_verts: int = 500_000
 
     # Export
     export_format: str = "glb"
@@ -613,16 +617,28 @@ class Easy3EEditor:
             f = edited_mesh.faces.detach().cpu().numpy() if hasattr(edited_mesh.faces, "detach") else np.asarray(edited_mesh.faces)
             edited_mesh = trimesh.Trimesh(vertices=v, faces=f)
 
-        # --- Repair (tolerant) ---
+        # --- Repair (tolerant; auto-skip on large meshes) ---
+        # PyMeshFix is O(n^2)-ish and takes ~14 minutes on a 6M-vert mesh.
+        # We skip repair past the configured threshold.
         if options.enable_repair:
-            t0 = time.time()
-            try:
-                from clearmesh.mesh.repair import full_print_preparation
-                edited_mesh = full_print_preparation(edited_mesh, orient=False, verbose=False)
-            except Exception as e:
+            nv = len(edited_mesh.vertices) if hasattr(edited_mesh, "vertices") else 0
+            if options.skip_repair_above_verts and nv > options.skip_repair_above_verts:
                 import warnings
-                warnings.warn(f"[easy3e] Mesh repair failed ({e}); returning unrepaired mesh.")
-            timings["repair"] = time.time() - t0
+                warnings.warn(
+                    f"[easy3e] Mesh has {nv:,} verts > "
+                    f"skip_repair_above_verts={options.skip_repair_above_verts:,}; "
+                    "skipping PyMeshFix repair."
+                )
+                timings["repair_skipped_large"] = 0.0
+            else:
+                t0 = time.time()
+                try:
+                    from clearmesh.mesh.repair import full_print_preparation
+                    edited_mesh = full_print_preparation(edited_mesh, orient=False, verbose=False)
+                except Exception as e:
+                    import warnings
+                    warnings.warn(f"[easy3e] Mesh repair failed ({e}); returning unrepaired mesh.")
+                timings["repair"] = time.time() - t0
 
         # --- Export ---
         if output_path:

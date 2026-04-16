@@ -148,6 +148,16 @@ class UltraShapeRefiner:
     ) -> trimesh.Trimesh:
         """Refine a coarse mesh using the reference image.
 
+        Runs UltraShape in a **subprocess** to avoid the cuBVH double-
+        registration conflict: TRELLIS.2's ``cumesh`` wheel bundles a
+        pybind11 class named ``cuBVH``, and UltraShape's standalone
+        ``cubvh`` registers the same symbol, causing the second import
+        in the parent process to fail. Running in a fresh subprocess
+        means only one ``cuBVH`` gets registered per process.
+
+        Subprocess overhead: ~5s for imports, plus the actual refinement
+        time (~20-40s for 50 steps at octree_res=1024).
+
         Args:
             coarse_mesh: Coarse mesh from TRELLIS.2 (or any source). Can be
                 a Trimesh object or a path to a GLB/OBJ.
@@ -158,73 +168,92 @@ class UltraShapeRefiner:
 
         Returns:
             Refined trimesh.Trimesh.
+
+        Raises:
+            RuntimeError: if the subprocess exits non-zero (error message
+                from subprocess stderr included).
+            FileNotFoundError: if checkpoint, config, or subprocess script
+                is missing.
         """
         cfg = config or UltraShapeConfig()
 
-        # Lazy load
-        pipeline = self.pipeline
+        # Locate the subprocess script (scripts/run_ultrashape_subprocess.py)
+        # relative to the clearmesh package root.
+        import clearmesh
+        pkg_root = Path(clearmesh.__file__).resolve().parent.parent
+        subprocess_script = pkg_root / "scripts" / "run_ultrashape_subprocess.py"
+        if not subprocess_script.exists():
+            raise FileNotFoundError(
+                f"UltraShape subprocess script not found at {subprocess_script}. "
+                "Ensure the full clearmesh repo is on the pod, not just the package."
+            )
 
-        # --- Prepare image ---
-        if isinstance(reference_image, (str, Path)):
-            reference_image = Image.open(str(reference_image))
-        if cfg.remove_bg or reference_image.mode != "RGBA":
-            from ultrashape.rembg import BackgroundRemover  # type: ignore
-            if self._rembg is None:
-                self._rembg = BackgroundRemover()
-            reference_image = self._rembg(reference_image)
+        # --- Prepare workspace in a temp dir (inputs + outputs on disk) ---
+        import tempfile
+        import subprocess as _subprocess
 
-        # --- Prepare mesh ---
-        # SharpEdgeSurfaceLoader accepts a path — if caller passed a trimesh,
-        # write to a temp file first.
-        if isinstance(coarse_mesh, (str, Path)):
-            mesh_path = str(coarse_mesh)
-            cleanup_path = None
-        else:
-            import tempfile
-            tf = tempfile.NamedTemporaryFile(suffix=".glb", delete=False)
-            coarse_mesh.export(tf.name)
-            mesh_path = tf.name
-            cleanup_path = tf.name
-
+        tmp_root = Path(tempfile.mkdtemp(prefix="ultrashape_"))
         try:
-            surface = self._loader(mesh_path, normalize_scale=cfg.scale).to(
-                self.device, dtype=torch.float16
-            )
-            pc = surface[:, :, :3]  # (B, N, 3)
+            coarse_mesh_path = tmp_root / "coarse.glb"
+            image_path = tmp_root / "reference.png"
+            output_path = tmp_root / "refined.glb"
 
-            from ultrashape.utils import voxelize_from_point
-            _, voxel_idx = voxelize_from_point(
-                pc, cfg.num_latents, resolution=self._voxel_res
+            # Serialize inputs
+            if isinstance(coarse_mesh, (str, Path)):
+                import shutil
+                shutil.copy(coarse_mesh, coarse_mesh_path)
+            else:
+                coarse_mesh.export(coarse_mesh_path)
+
+            if isinstance(reference_image, (str, Path)):
+                Image.open(str(reference_image)).save(image_path)
+            else:
+                # Coerce to RGB before saving so PIL doesn't drop alpha info
+                reference_image.save(image_path)
+
+            # --- Run subprocess ---
+            cmd = [
+                sys.executable,
+                str(subprocess_script),
+                "--coarse-mesh", str(coarse_mesh_path),
+                "--image", str(image_path),
+                "--output", str(output_path),
+                "--ckpt", str(self.ckpt_path),
+                "--config", str(self.config_path),
+                "--ultrashape-dir", str(self.ultrashape_dir),
+                "--steps", str(cfg.num_inference_steps),
+                "--octree-res", str(cfg.octree_res),
+                "--seed", str(cfg.seed),
+                "--num-latents", str(cfg.num_latents),
+                "--chunk-size", str(cfg.chunk_size),
+                "--scale", str(cfg.scale),
+            ]
+            if cfg.remove_bg:
+                cmd.append("--remove-bg")
+
+            print(f"[ultrashape] Launching subprocess: {' '.join(cmd[:3])} ...")
+            result = _subprocess.run(
+                cmd, capture_output=True, text=True, check=False,
             )
 
-            generator = torch.Generator(self.device).manual_seed(cfg.seed)
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                mesh_list, _ = pipeline(
-                    image=reference_image,
-                    voxel_cond=voxel_idx,
-                    generator=generator,
-                    box_v=1.0,
-                    mc_level=0.0,
-                    octree_resolution=cfg.octree_res,
-                    num_inference_steps=cfg.num_inference_steps,
-                    num_chunks=cfg.chunk_size,
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"UltraShape subprocess failed (exit {result.returncode}). "
+                    f"stderr:\n{result.stderr[-2000:]}"
                 )
 
-            mesh_out = mesh_list[0]
-            # Ensure it's a trimesh.Trimesh (UltraShape returns a compatible type)
-            if not isinstance(mesh_out, trimesh.Trimesh):
-                import numpy as np
-                v = np.asarray(mesh_out.vertices)
-                f = np.asarray(mesh_out.faces)
-                mesh_out = trimesh.Trimesh(vertices=v, faces=f)
-            return mesh_out
+            # --- Load refined mesh ---
+            if not output_path.exists():
+                raise RuntimeError(
+                    f"UltraShape subprocess returned 0 but no output at {output_path}. "
+                    f"stdout: {result.stdout[-500:]}"
+                )
+
+            return trimesh.load(str(output_path), force="mesh")
 
         finally:
-            if cleanup_path and os.path.exists(cleanup_path):
-                try:
-                    os.unlink(cleanup_path)
-                except OSError:
-                    pass
+            import shutil
+            shutil.rmtree(tmp_root, ignore_errors=True)
 
     def unload(self):
         """Free VRAM by dropping the pipeline. Useful for sprint-after-demo."""
