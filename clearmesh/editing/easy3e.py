@@ -764,9 +764,45 @@ class Easy3EEditor:
             ve.device = str(self.device)
             sampled = ve._dilate_sparse_mask_3d(sampled, voxel_xyz.long(), iterations=dilation)
 
-        # --- Blend SLAT feats: edit_slat where mask>0.5, source otherwise ---
+        # --- Align source/edit coords before blending ---
+        # After the cascade, edit and source SLATs may have different voxel
+        # counts because each runs its own occupancy pruning. Blend at the
+        # intersection of their coord sets; voxels unique to one side keep
+        # that side's features unchanged.
         edit_feats = edit_slat.feats
         src_feats = source_slat.feats
+
+        if edit_feats.shape[0] != src_feats.shape[0]:
+            import warnings
+            warnings.warn(
+                f"[easy3e] blend: edit ({edit_feats.shape[0]}) and source "
+                f"({src_feats.shape[0]}) SLATs have different voxel counts. "
+                "Aligning by coord hash; unique voxels keep their own side."
+            )
+            edit_coords_int = (
+                edit_slat.coords[:, 1:] if edit_slat.coords.shape[-1] == 4 else edit_slat.coords
+            ).long()
+            src_coords_int = (
+                source_slat.coords[:, 1:] if source_slat.coords.shape[-1] == 4 else source_slat.coords
+            ).long()
+
+            # Build coord -> src_index map (CPU dict; voxel counts ~15-30k so fast)
+            src_map = {
+                (int(c[0]), int(c[1]), int(c[2])): i
+                for i, c in enumerate(src_coords_int.tolist())
+            }
+            aligned_src = edit_feats.clone()  # default: keep edit features
+            aligned_mask = torch.zeros(edit_feats.shape[0], device=edit_feats.device)
+            for i, c in enumerate(edit_coords_int.tolist()):
+                key = (int(c[0]), int(c[1]), int(c[2]))
+                if key in src_map:
+                    aligned_src[i] = src_feats[src_map[key]]
+                    aligned_mask[i] = 1.0
+            # For voxels only in edit (not in source), force mask=1 (keep edit)
+            # since we have nothing to blend with.
+            sampled = sampled * aligned_mask + (1.0 - aligned_mask) * 1.0
+            src_feats = aligned_src
+
         mask_expanded = sampled.view(-1, 1).to(edit_feats.dtype)
         blended_feats = mask_expanded * edit_feats + (1.0 - mask_expanded) * src_feats
 
