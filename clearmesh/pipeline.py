@@ -5,7 +5,7 @@ Full pipeline stages:
   1. Background removal (rembg)
   2. Stage 1: Coarse generation (TRELLIS.2 4B, pre-trained)
   3. Part decomposition (PartCrafter, optional — kitbashing mode)
-  4. Stage 2: Geometric refinement (custom DiT, trained)
+  4. Stage 2: Geometric refinement (UltraShape 1.0, pre-trained — arxiv:2512.21185)
   5. Isosurface extraction (NDC/FlexiCubes — sharp edges, per-part selective)
   6. Geometry super-resolution (SuperCarver / CraftsMan3D, optional)
   7. Retopology (BPT, optional — for digital/game-ready output)
@@ -19,7 +19,8 @@ Usage:
     from clearmesh.pipeline import ClearMeshPipeline
 
     pipeline = ClearMeshPipeline(
-        stage2_checkpoint='/mnt/data/checkpoints/clearmesh_stage2/checkpoint_final.pt',
+        ultrashape_dir='/workspace/UltraShape-1.0',
+        ultrashape_checkpoint='/workspace/checkpoints/ultrashape_v1.pt',
     )
 
     result = pipeline.generate('photo.png', options={
@@ -61,9 +62,12 @@ class GenerationOptions:
     enable_part_decomposition: bool = False  # Kitbashing mode
     num_parts: int | None = None  # Auto-detect if None
 
-    # Stage 2: Refinement
+    # Stage 2: Refinement (UltraShape)
     enable_refinement: bool = True
-    refinement_steps: int = 50  # 50=quality, 12=fast
+    refinement_steps: int = 50  # 50=quality, 25=fast
+    refinement_octree_res: int = 512  # 512 (fast) | 1024 (max detail)
+    refinement_seed: int = 42
+    refinement_low_vram: bool = False  # Enable for GPUs with <24GB VRAM
 
     # Geometry super-resolution (SuperCarver / CraftsMan3D)
     enable_super_resolution: bool = False
@@ -120,17 +124,19 @@ class ClearMeshPipeline:
 
     def __init__(
         self,
-        stage2_checkpoint: str | None = None,
+        ultrashape_dir: str = "/workspace/UltraShape-1.0",
+        ultrashape_checkpoint: str = "/workspace/checkpoints/ultrashape_v1.pt",
         model_dir: str = "/mnt/data",
         device: str | None = None,
     ):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.model_dir = model_dir
+        self._ultrashape_dir = ultrashape_dir
+        self._ultrashape_checkpoint = ultrashape_checkpoint
 
         # All models are lazy-loaded
         self._stage1 = None
         self._stage2 = None
-        self._stage2_checkpoint = stage2_checkpoint
         self._part_decomposer = None
         self._super_resolver = None
         self._retopologizer = None
@@ -157,17 +163,15 @@ class ClearMeshPipeline:
 
     @property
     def stage2(self):
-        """Lazy-load Stage 2 refinement model."""
-        if self._stage2 is None and self._stage2_checkpoint:
-            print("Loading Stage 2 refinement model...")
-            from clearmesh.stage2.model import RefinementDiT
+        """Lazy-load Stage 2 refiner (UltraShape 1.0)."""
+        if self._stage2 is None:
+            from clearmesh.stage2.ultrashape_refiner import UltraShapeRefiner
 
-            self._stage2 = RefinementDiT()
-            ckpt = torch.load(self._stage2_checkpoint, map_location=self.device, weights_only=False)
-            self._stage2.load_state_dict(ckpt["model"])
-            self._stage2.to(self.device)
-            self._stage2.eval()
-            print("Stage 2 loaded.")
+            self._stage2 = UltraShapeRefiner(
+                ultrashape_dir=self._ultrashape_dir,
+                checkpoint=self._ultrashape_checkpoint,
+                device=self.device,
+            )
         return self._stage2
 
     @property
@@ -267,25 +271,30 @@ class ClearMeshPipeline:
             timings["part_decomposition"] = time.time() - t0
             print(f"Decomposed into {len(parts)} parts: {[p.label for p in parts]}")
 
-        # === 4. Stage 2 — Geometric refinement ===
-        if options.enable_refinement and self.stage2 is not None:
+        # === 4. Stage 2 — Geometric refinement (UltraShape) ===
+        if options.enable_refinement:
             t0 = time.time()
             if parts:
                 for part in parts:
-                    part.mesh = self._run_stage2(part.mesh, options)
+                    part.mesh = self._run_stage2(part.mesh, image, options)
             else:
-                mesh = self._run_stage2(mesh, options)
+                mesh = self._run_stage2(mesh, image, options)
             timings["stage2_refinement"] = time.time() - t0
 
         # === 5. Isosurface extraction (NDC/FlexiCubes — per-part selective) ===
-        t0 = time.time()
-        if parts:
-            for part in parts:
-                if part.category == "hard":
-                    part.mesh = self._sharpen_edges(part.mesh)
-        else:
-            mesh = self._sharpen_edges(mesh)
-        timings["edge_sharpening"] = time.time() - t0
+        # UltraShape output is already high-detail marching cubes; re-voxelizing
+        # at a lower resolution would destroy detail. Only run edge sharpening
+        # when refinement is disabled (coarse mesh needs help) or explicitly
+        # requested for hard-surface parts.
+        if not options.enable_refinement:
+            t0 = time.time()
+            if parts:
+                for part in parts:
+                    if part.category == "hard":
+                        part.mesh = self._sharpen_edges(part.mesh)
+            else:
+                mesh = self._sharpen_edges(mesh)
+            timings["edge_sharpening"] = time.time() - t0
 
         # === 6. Geometry super-resolution (optional) ===
         if options.enable_super_resolution and self.super_resolver.is_available():
@@ -396,37 +405,37 @@ class ClearMeshPipeline:
 
     # --- Internal helpers ---
 
-    def _run_stage2(self, mesh: trimesh.Trimesh, options: GenerationOptions) -> trimesh.Trimesh:
-        """Run Stage 2 refinement on a mesh."""
-        R = 128
-        voxel_grid = mesh.voxelized(pitch=2.0 / R)
-        matrix = torch.from_numpy(voxel_grid.matrix.astype(np.float32))
+    def _run_stage2(
+        self,
+        mesh: trimesh.Trimesh,
+        image: Image.Image,
+        options: GenerationOptions,
+    ) -> trimesh.Trimesh:
+        """Run Stage 2 refinement on a mesh using UltraShape.
 
-        positions = matrix.nonzero(as_tuple=False).float()
-        positions = positions / R * 2 - 1
+        Args:
+            mesh: Coarse mesh from TRELLIS.2.
+            image: Reference image (RGBA, background already removed).
+            options: Generation options.
 
-        N = positions.shape[0]
-        coarse_features = matrix.view(-1).unsqueeze(0).unsqueeze(-1).expand(1, -1, 32)
-        if coarse_features.shape[1] > N:
-            idx = torch.randperm(coarse_features.shape[1])[:N]
-            coarse_features = coarse_features[:, idx]
+        Returns:
+            Refined trimesh with significantly more detail (~14% more verts typical).
+        """
+        # Ensure image is RGBA (background should already be removed upstream)
+        if image.mode != "RGBA":
+            image = image.convert("RGBA")
 
-        coarse_features = coarse_features.to(self.device)
-        positions = positions.unsqueeze(0).to(self.device)
+        # UltraShape's refiner handles its own VRAM mode
+        if options.refinement_low_vram and not self.stage2.low_vram:
+            self.stage2.low_vram = True
 
-        with torch.no_grad():
-            refined_sdf = self.stage2.refine(
-                coarse_features, positions, num_steps=options.refinement_steps,
-            )
-
-        sdf_grid = torch.zeros(R, R, R, device=self.device)
-        occupied = (positions[0] * R / 2 + R / 2).long().clamp(0, R - 1)
-        for i in range(occupied.shape[0]):
-            x, y, z = occupied[i]
-            sdf_grid[x, y, z] = refined_sdf[0, i, 0]
-
-        from clearmesh.mesh.extraction import extract_marching_cubes
-        return extract_marching_cubes(sdf_grid.cpu().numpy())
+        return self.stage2.refine(
+            coarse_mesh=mesh,
+            reference_image=image,
+            num_steps=options.refinement_steps,
+            octree_resolution=options.refinement_octree_res,
+            seed=options.refinement_seed,
+        )
 
     def _sharpen_edges(self, mesh: trimesh.Trimesh) -> trimesh.Trimesh:
         """Post-process with NDC for sharper edges (if available)."""
@@ -447,8 +456,21 @@ def main():
     parser.add_argument("--format", type=str, default="glb", choices=["stl", "glb", "obj", "fbx"])
     parser.add_argument("--resolution", type=int, default=512, choices=[512, 1024, 1536])
     parser.add_argument("--scale", type=str, default=None, choices=["28mm", "32mm", "54mm", "75mm"])
-    parser.add_argument("--stage2-checkpoint", type=str, default=None)
+    parser.add_argument(
+        "--ultrashape-dir",
+        type=str,
+        default="/workspace/UltraShape-1.0",
+        help="Path to cloned UltraShape-1.0 repo",
+    )
+    parser.add_argument(
+        "--ultrashape-checkpoint",
+        type=str,
+        default="/workspace/checkpoints/ultrashape_v1.pt",
+        help="Path to ultrashape_v1.pt checkpoint",
+    )
     parser.add_argument("--no-refinement", action="store_true")
+    parser.add_argument("--octree-res", type=int, default=512, choices=[512, 1024])
+    parser.add_argument("--low-vram", action="store_true", help="Enable CPU offload for Stage 2")
 
     # Optional pipeline stages
     parser.add_argument("--decompose", action="store_true", help="Enable PartCrafter decomposition")
@@ -466,14 +488,19 @@ def main():
     parser.add_argument("--fast", action="store_true", help="Fast mode (12 diffusion steps)")
     args = parser.parse_args()
 
-    pipeline = ClearMeshPipeline(stage2_checkpoint=args.stage2_checkpoint)
+    pipeline = ClearMeshPipeline(
+        ultrashape_dir=args.ultrashape_dir,
+        ultrashape_checkpoint=args.ultrashape_checkpoint,
+    )
 
     options = GenerationOptions(
         resolution=args.resolution,
         enable_part_decomposition=args.decompose,
         num_parts=args.num_parts,
         enable_refinement=not args.no_refinement,
-        refinement_steps=12 if args.fast else 50,
+        refinement_steps=25 if args.fast else 50,
+        refinement_octree_res=args.octree_res,
+        refinement_low_vram=args.low_vram,
         enable_super_resolution=args.super_res,
         super_resolution_detail=args.super_res_detail,
         enable_retopology=args.retopo,
