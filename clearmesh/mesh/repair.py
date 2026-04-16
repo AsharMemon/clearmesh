@@ -45,27 +45,34 @@ def repair_mesh(
         print(f"  Watertight: {mesh.is_watertight}")
         print(f"  Volume: {mesh.is_volume}")
 
-    # Step 1: PyMeshFix repair
+    # Step 1: PyMeshFix repair.
+    # Split import and construction: pymeshfix.MeshFix() does a lazy pyvista
+    # import on construct, so an ImportError *inside* MeshFix() is a pyvista
+    # issue (not pymeshfix itself). Distinguish them for clearer diagnostics.
     try:
         import pymeshfix
-
-        fixer = pymeshfix.MeshFix(vertices, faces)
-        fixer.repair(verbose=verbose)
-        vertices = np.array(fixer.v, dtype=np.float64)
-        faces = np.array(fixer.f, dtype=np.int32)
     except ImportError:
         if verbose:
             print("pymeshfix not available, using trimesh-only repair")
-    except Exception as e:
-        if verbose:
-            print(f"PyMeshFix failed: {e}, continuing with trimesh repair")
+    else:
+        try:
+            fixer = pymeshfix.MeshFix(vertices, faces)
+            fixer.repair(verbose=verbose)
+            vertices = np.array(fixer.v, dtype=np.float64)
+            faces = np.array(fixer.f, dtype=np.int32)
+        except Exception as e:
+            if verbose:
+                print(f"PyMeshFix failed ({type(e).__name__}: {e}), "
+                      "continuing with trimesh-only repair")
 
     # Step 2: Rebuild mesh and clean
     repaired = trimesh.Trimesh(vertices=vertices, faces=faces, process=True)
 
     if remove_degenerate:
-        # Remove zero-area faces
-        repaired.remove_degenerate_faces()
+        # Remove zero-area faces (trimesh 4.x: use mask via update_faces).
+        # nondegenerate_faces() returns the indices of faces with non-zero area;
+        # the older remove_degenerate_faces() was removed in 4.x.
+        repaired.update_faces(repaired.nondegenerate_faces())
         # Remove unreferenced vertices
         repaired.remove_unreferenced_vertices()
         # Merge duplicate vertices
