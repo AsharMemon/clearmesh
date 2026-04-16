@@ -617,28 +617,38 @@ class Easy3EEditor:
             f = edited_mesh.faces.detach().cpu().numpy() if hasattr(edited_mesh.faces, "detach") else np.asarray(edited_mesh.faces)
             edited_mesh = trimesh.Trimesh(vertices=v, faces=f)
 
-        # --- Repair (tolerant; auto-skip on large meshes) ---
-        # PyMeshFix is O(n^2)-ish and takes ~14 minutes on a 6M-vert mesh.
-        # We skip repair past the configured threshold.
+        # --- Repair: prefer CUDA-accelerated cumesh for large meshes,
+        # fall back to PyMeshFix/full_print_preparation only on small ones.
+        # cumesh handles the common issues (degenerate/duplicate faces,
+        # non-manifold edges, holes) in seconds instead of minutes.
         if options.enable_repair:
             nv = len(edited_mesh.vertices) if hasattr(edited_mesh, "vertices") else 0
-            if options.skip_repair_above_verts and nv > options.skip_repair_above_verts:
-                import warnings
-                warnings.warn(
-                    f"[easy3e] Mesh has {nv:,} verts > "
-                    f"skip_repair_above_verts={options.skip_repair_above_verts:,}; "
-                    "skipping PyMeshFix repair."
-                )
-                timings["repair_skipped_large"] = 0.0
-            else:
-                t0 = time.time()
-                try:
+            prefer_cuda = (
+                options.skip_repair_above_verts
+                and nv > options.skip_repair_above_verts
+            )
+            t0 = time.time()
+            try:
+                if prefer_cuda:
+                    from clearmesh.mesh.repair import repair_mesh_cuda
+                    edited_mesh = repair_mesh_cuda(
+                        edited_mesh,
+                        fill_holes=True,
+                        remove_small_components=True,
+                        fix_normals=True,
+                        verbose=False,
+                    )
+                    timings["repair_cuda"] = time.time() - t0
+                else:
                     from clearmesh.mesh.repair import full_print_preparation
                     edited_mesh = full_print_preparation(edited_mesh, orient=False, verbose=False)
-                except Exception as e:
-                    import warnings
-                    warnings.warn(f"[easy3e] Mesh repair failed ({e}); returning unrepaired mesh.")
-                timings["repair"] = time.time() - t0
+                    timings["repair"] = time.time() - t0
+            except Exception as e:
+                import warnings
+                warnings.warn(
+                    f"[easy3e] Mesh repair failed ({e}); returning unrepaired mesh."
+                )
+                timings["repair_failed"] = time.time() - t0
 
         # --- Export ---
         if output_path:
