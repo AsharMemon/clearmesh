@@ -83,6 +83,14 @@ class EditOptions:
     ultrashape_steps: int = 50
     ultrashape_octree_res: int = 1024
 
+    # TripoSF (SparseFlex) watertight pass (optional, MIT license).
+    # Runs AFTER UltraShape. Takes the refined mesh and produces a
+    # watertight 1024^3 reconstruction. Addresses the "holes" and
+    # non-smooth surface artifacts that UltraShape's octree-MC leaves.
+    enable_triposf: bool = False
+    triposf_dir: str = "/workspace/TripoSF"
+    triposf_config: str | None = None  # defaults to <triposf_dir>/configs/TripoSFVAE_1024.yaml
+
     # Region-focused editing
     # 2D mask image (path or PIL.Image); white/255=edit, black/0=preserve.
     # If None, edit is applied globally.
@@ -171,6 +179,7 @@ class Easy3EEditor:
         self._ctrl_adapter_checkpoint = ctrl_adapter_checkpoint
         self._image_editor = None
         self._ultrashape_refiner = None
+        self._triposf_refiner = None
 
     @property
     def ultrashape_refiner(self):
@@ -179,6 +188,19 @@ class Easy3EEditor:
             from clearmesh.editing.ultrashape_refine import UltraShapeRefiner
             self._ultrashape_refiner = UltraShapeRefiner(device=self.device)
         return self._ultrashape_refiner
+
+    @property
+    def triposf_refiner(self):
+        """Lazy-load TripoSF watertight refiner on first access.
+
+        TripoSF runs in a subprocess (see clearmesh/editing/triposf_refine.py
+        and scripts/run_triposf_subprocess.py), so instance state is just
+        the repo + config paths.
+        """
+        if self._triposf_refiner is None:
+            from clearmesh.editing.triposf_refine import TripoSFRefiner
+            self._triposf_refiner = TripoSFRefiner()
+        return self._triposf_refiner
 
     @property
     def pipeline(self):
@@ -661,6 +683,39 @@ class Easy3EEditor:
                 import warnings
                 warnings.warn(f"[easy3e] UltraShape refinement failed ({e}); keeping TRELLIS.2 mesh")
                 timings["ultrashape_refine_failed"] = time.time() - t0
+
+        # --- Optional TripoSF (SparseFlex) watertight pass (MIT license) ---
+        # Runs AFTER UltraShape. TripoSF's Sparcubes-style VAE converts any
+        # input mesh (open or closed) into a watertight 1024^3 reconstruction.
+        # Specifically targets the "holes + rough surfaces" artifacts that
+        # UltraShape's octree-MC can leave behind.
+        if options.enable_triposf:
+            t0 = time.time()
+            try:
+                from clearmesh.editing.triposf_refine import TripoSFRefiner, TripoSFConfig
+                refiner = self.triposf_refiner
+                if options.triposf_dir:
+                    refiner.triposf_dir = Path(options.triposf_dir)
+                if options.triposf_config:
+                    refiner.config_path = options.triposf_config
+
+                edited_mesh = refiner.refine(
+                    coarse_mesh=edited_mesh,
+                    config=TripoSFConfig(),
+                )
+                timings["triposf_watertight"] = time.time() - t0
+                is_wt = bool(edited_mesh.is_watertight) if hasattr(edited_mesh, "is_watertight") else "?"
+                print(
+                    f"  TripoSF watertight: "
+                    f"{edited_mesh.vertices.shape[0]:,} verts -> {edited_mesh.faces.shape[0]:,} faces "
+                    f"(watertight={is_wt})"
+                )
+            except Exception as e:
+                import warnings
+                warnings.warn(
+                    f"[easy3e] TripoSF refinement failed ({e}); keeping UltraShape mesh"
+                )
+                timings["triposf_failed"] = time.time() - t0
 
         # --- POST-UltraShape repair: a final light pass (just degen/dup cleanup).
         # UltraShape's MC surface should be clean already; we only run the
