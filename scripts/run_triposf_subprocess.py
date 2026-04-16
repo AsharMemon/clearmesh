@@ -40,17 +40,25 @@ def main() -> int:
         import trimesh
         from omegaconf import OmegaConf
 
-        # TripoSF's inference helpers
-        from inference import (
-            normalize_mesh,
-            load_quantized_mesh_original,
+        # TripoSF defines TripoSFVAEInference INLINE inside inference.py
+        # (not in a submodule). Import by running the module as a script-less
+        # import via importlib.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "triposf_inference", Path(args.triposf_dir) / "inference.py"
         )
+        tsf_inf = importlib.util.module_from_spec(spec)
+        sys.modules["triposf_inference"] = tsf_inf
+        # Prevent the module from running main() when loaded
+        saved_name = __name__
+        try:
+            spec.loader.exec_module(tsf_inf)
+        except SystemExit:
+            pass  # in case the module's __main__ block calls sys.exit
 
-        # TripoSF VAE
-        # The import path depends on how the repo is structured; inference.py
-        # does `from triposf.models.triposf_vae.inference import TripoSFVAEInference`
-        # so we follow that convention.
-        from triposf.models.triposf_vae.inference import TripoSFVAEInference
+        normalize_mesh = tsf_inf.normalize_mesh
+        load_quantized_mesh_original = tsf_inf.load_quantized_mesh_original
+        TripoSFVAEInference = tsf_inf.TripoSFVAEInference
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"[triposf-subproc] device={device}", flush=True)
