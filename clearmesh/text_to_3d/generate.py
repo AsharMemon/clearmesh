@@ -73,7 +73,8 @@ class TextTo3D:
     def __init__(
         self,
         flux_model_id: str = "black-forest-labs/FLUX.1-schnell",
-        stage2_checkpoint: str | None = None,
+        ultrashape_dir: str = "/workspace/UltraShape-1.0",
+        ultrashape_checkpoint: str = "/workspace/checkpoints/ultrashape_v1.pt",
         model_dir: str = "/workspace/models",
         device: str | None = None,
         dtype: torch.dtype = torch.bfloat16,
@@ -82,13 +83,15 @@ class TextTo3D:
 
         Args:
             flux_model_id: HuggingFace model ID for FLUX.1-schnell.
-            stage2_checkpoint: Path to Stage 2 RefinementDiT checkpoint.
+            ultrashape_dir: Path to cloned UltraShape-1.0 repo (Stage 2 refiner).
+            ultrashape_checkpoint: Path to ultrashape_v1.pt checkpoint.
             model_dir: Directory with model weights.
             device: Compute device.
             dtype: Model dtype (bfloat16 for FLUX).
         """
         self.flux_model_id = flux_model_id
-        self.stage2_checkpoint = stage2_checkpoint
+        self.ultrashape_dir = ultrashape_dir
+        self.ultrashape_checkpoint = ultrashape_checkpoint
         self.model_dir = model_dir
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.dtype = dtype
@@ -126,7 +129,8 @@ class TextTo3D:
             from clearmesh.pipeline import ClearMeshPipeline
 
             self._clearmesh_pipeline = ClearMeshPipeline(
-                stage2_checkpoint=self.stage2_checkpoint,
+                ultrashape_dir=self.ultrashape_dir,
+                ultrashape_checkpoint=self.ultrashape_checkpoint,
                 model_dir=self.model_dir,
                 device=self.device,
             )
@@ -308,11 +312,21 @@ def main():
     parser.add_argument("--scale", type=str, default=None, choices=["28mm", "32mm", "54mm", "75mm"])
     parser.add_argument("--image-steps", type=int, default=4, help="FLUX inference steps")
     parser.add_argument("--seed", type=int, default=None, help="Random seed")
-    parser.add_argument("--stage2-checkpoint", type=str, default=None)
+    parser.add_argument(
+        "--ultrashape-dir", type=str, default="/workspace/UltraShape-1.0",
+        help="Path to cloned UltraShape-1.0 repo",
+    )
+    parser.add_argument(
+        "--ultrashape-checkpoint", type=str, default="/workspace/checkpoints/ultrashape_v1.pt",
+        help="Path to ultrashape_v1.pt checkpoint",
+    )
     parser.add_argument("--save-image", type=str, default=None, help="Save reference image")
     args = parser.parse_args()
 
-    gen = TextTo3D(stage2_checkpoint=args.stage2_checkpoint)
+    gen = TextTo3D(
+        ultrashape_dir=args.ultrashape_dir,
+        ultrashape_checkpoint=args.ultrashape_checkpoint,
+    )
 
     output = args.output or f"text_to_3d_output.{args.format}"
 

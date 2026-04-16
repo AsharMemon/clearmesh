@@ -6,10 +6,13 @@
 # === Stage 1 (TRELLIS.2) ===
 resolution: 512                  # 512 (3s) | 1024 (17s) | 1536 (60s) on A100
 
-# === Stage 2 (Refinement) ===
+# === Stage 2 (Refinement — UltraShape 1.0, pre-trained) ===
 enable_refinement: true
-stage2_checkpoint: /mnt/data/checkpoints/clearmesh_stage2/checkpoint_final.pt
-refinement_steps: 50             # 50 = quality, 12 = fast
+ultrashape_dir: /workspace/UltraShape-1.0
+ultrashape_checkpoint: /workspace/checkpoints/ultrashape_v1.pt
+refinement_steps: 50             # 50 = quality, 25 = fast
+refinement_octree_res: 512       # 512 (fast) | 1024 (max detail)
+refinement_low_vram: false       # Enable for GPUs with <24GB VRAM
 
 # === Part Decomposition (optional, kitbashing) ===
 enable_decomposition: false
