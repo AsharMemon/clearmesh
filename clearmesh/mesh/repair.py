@@ -23,6 +23,96 @@ import numpy as np
 import trimesh
 
 
+def polish_mesh(
+    mesh: trimesh.Trimesh,
+    merge_digits: int = 5,
+    taubin_iterations: int = 3,
+    taubin_lamb: float = 0.5,
+    taubin_nu: float = -0.53,
+    verbose: bool = False,
+) -> trimesh.Trimesh:
+    """Cheap surface polish that addresses the two most common UltraShape
+    output artifacts:
+
+      1. Near-duplicate vertices from the octree marching cubes that
+         render as visible T-junction cracks in GLB viewers (even though
+         the mesh is topologically fine). Fix: merge vertices whose
+         rounded coordinates collide.
+      2. Minor surface stepping on curved geometry from the 1024^3 voxel
+         grid. Fix: Taubin filter — a pair of Laplacian passes (one
+         positive, one negative) that approximates a low-pass filter
+         while preserving volume and sharp features better than plain
+         Laplacian smoothing. A few iterations is enough; too many flatten
+         gear teeth.
+
+    Args:
+        mesh: Input trimesh.Trimesh.
+        merge_digits: Vertex coordinate precision for dedup. 5 catches
+            FP-noise-level duplicates without smashing close-but-distinct
+            geometry. Set to 0 to disable merging.
+        taubin_iterations: Number of Taubin filter iterations. 0 disables.
+        taubin_lamb: Positive-pass smoothing strength (0 < lamb < 1).
+        taubin_nu: Negative-pass strength. Must satisfy nu < -lamb for
+            stability (Taubin 1995). Default -0.53 is the commonly cited
+            "volume preserving" choice for lamb=0.5.
+        verbose: Print step timings.
+
+    Returns:
+        Polished trimesh.Trimesh (vertex/face counts may shrink slightly
+        due to dedup).
+    """
+    import time
+    out = mesh
+
+    if merge_digits > 0:
+        t0 = time.time()
+        # Round vertices to merge_digits decimals, then dedup. trimesh's
+        # merge_vertices does this internally when given digits_vertex,
+        # but newer versions of trimesh (>4.x) renamed the kwarg, so we
+        # do it by hand for robustness.
+        v = np.round(out.vertices, decimals=merge_digits)
+        # Build an index map: each vertex to its unique-vertex id.
+        _, inverse = np.unique(v, axis=0, return_inverse=True)
+        new_faces = inverse[out.faces]
+        # Drop faces that became degenerate after the merge (vertex collapse)
+        valid = (
+            (new_faces[:, 0] != new_faces[:, 1])
+            & (new_faces[:, 1] != new_faces[:, 2])
+            & (new_faces[:, 0] != new_faces[:, 2])
+        )
+        new_v = np.unique(v, axis=0)
+        out = trimesh.Trimesh(vertices=new_v, faces=new_faces[valid], process=False)
+        if verbose:
+            print(
+                f"[polish] merge_vertices(digits={merge_digits}): "
+                f"{len(mesh.vertices):,}v/{len(mesh.faces):,}f -> "
+                f"{len(out.vertices):,}v/{len(out.faces):,}f "
+                f"in {time.time() - t0:.2f}s"
+            )
+
+    if taubin_iterations > 0:
+        t0 = time.time()
+        try:
+            # trimesh.smoothing.filter_taubin modifies in place and returns None
+            out = out.copy()
+            trimesh.smoothing.filter_taubin(
+                out,
+                lamb=taubin_lamb,
+                nu=taubin_nu,
+                iterations=taubin_iterations,
+            )
+            if verbose:
+                print(
+                    f"[polish] taubin(iter={taubin_iterations}, "
+                    f"lamb={taubin_lamb}, nu={taubin_nu}) in {time.time() - t0:.2f}s"
+                )
+        except Exception as e:
+            import warnings
+            warnings.warn(f"[polish] Taubin smoothing failed ({e}); returning unsmoothed mesh")
+
+    return out
+
+
 def repair_mesh_cuda(
     mesh: trimesh.Trimesh,
     fill_holes: bool = True,

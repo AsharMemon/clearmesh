@@ -84,12 +84,31 @@ class EditOptions:
     ultrashape_octree_res: int = 1024
 
     # TripoSF (SparseFlex) watertight pass (optional, MIT license).
-    # Runs AFTER UltraShape. Takes the refined mesh and produces a
-    # watertight 1024^3 reconstruction. Addresses the "holes" and
-    # non-smooth surface artifacts that UltraShape's octree-MC leaves.
+    # Runs AFTER UltraShape. NOTE: empirically REDUCED mesh quality in
+    # our testing (0 -> 12k boundary edges when applied after UltraShape).
+    # Keeping the integration available for edge cases but OFF by default.
+    # See scripts/demo_triposf_A_noEdit.py for evidence.
     enable_triposf: bool = False
     triposf_dir: str = "/workspace/TripoSF"
     triposf_config: str | None = None  # defaults to <triposf_dir>/configs/TripoSFVAE_1024.yaml
+
+    # --- Cheap polish (runs after UltraShape, before final repair) ---
+
+    # Collapse near-duplicate vertices so T-junction "holes" that viewers
+    # render as visible cracks get merged. Rounds vertex coords to N
+    # significant digits before dedup. 5 is a good default — enough to
+    # catch floating-point near-dups from the MC, not so loose that
+    # it smashes adjacent-but-distinct geometry.
+    enable_vertex_merge: bool = True
+    vertex_merge_digits: int = 5
+
+    # Taubin filter: Laplacian smoothing pair (one positive, one negative)
+    # that preserves volume and sharp features better than plain Laplacian.
+    # Set iterations=0 to disable. ~1-2s on an H100 for a 6M-vert mesh.
+    enable_taubin_smooth: bool = True
+    taubin_iterations: int = 3         # 2-5 is a good range
+    taubin_lamb: float = 0.5           # smoothing strength
+    taubin_nu: float = -0.53           # -lamb adjusted for inverse pass; must be < -lamb
 
     # Region-focused editing
     # 2D mask image (path or PIL.Image); white/255=edit, black/0=preserve.
@@ -683,6 +702,34 @@ class Easy3EEditor:
                 import warnings
                 warnings.warn(f"[easy3e] UltraShape refinement failed ({e}); keeping TRELLIS.2 mesh")
                 timings["ultrashape_refine_failed"] = time.time() - t0
+
+        # --- Cheap polish pass (vertex dedup + Taubin smoothing) ---
+        # Runs after UltraShape, before TripoSF (if ever enabled) or final
+        # repair. Addresses the two main UltraShape output artifacts:
+        #   - Near-duplicate vertices rendering as visible T-junction cracks
+        #   - Minor surface stepping on curved geometry from 1024^3 MC
+        if options.enable_vertex_merge or options.enable_taubin_smooth:
+            t0 = time.time()
+            try:
+                from clearmesh.mesh.repair import polish_mesh
+                edited_mesh = polish_mesh(
+                    edited_mesh,
+                    merge_digits=options.vertex_merge_digits if options.enable_vertex_merge else 0,
+                    taubin_iterations=options.taubin_iterations if options.enable_taubin_smooth else 0,
+                    taubin_lamb=options.taubin_lamb,
+                    taubin_nu=options.taubin_nu,
+                    verbose=False,
+                )
+                timings["polish"] = time.time() - t0
+                print(
+                    f"  Polished: {len(edited_mesh.vertices):,} verts "
+                    f"(dedup={options.enable_vertex_merge}, "
+                    f"taubin={options.taubin_iterations if options.enable_taubin_smooth else 0})"
+                )
+            except Exception as e:
+                import warnings
+                warnings.warn(f"[easy3e] polish failed ({e}); continuing unpolished")
+                timings["polish_failed"] = time.time() - t0
 
         # --- Optional TripoSF (SparseFlex) watertight pass (MIT license) ---
         # Runs AFTER UltraShape. TripoSF's Sparcubes-style VAE converts any
