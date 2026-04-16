@@ -21,6 +21,6 @@ Usage:
     )
 """
 
-from clearmesh.editing.easy3e import Easy3EEditor
+from clearmesh.editing.easy3e import Easy3EEditor, EditOptions, EditResult
 
-__all__ = ["Easy3EEditor"]
+__all__ = ["Easy3EEditor", "EditOptions", "EditResult"]
