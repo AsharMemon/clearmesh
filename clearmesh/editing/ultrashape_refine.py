@@ -80,7 +80,7 @@ class UltraShapeRefiner:
     ):
         self.ultrashape_dir = Path(ultrashape_dir)
         self.ckpt_path = ckpt_path or str(self.ultrashape_dir / "checkpoints" / "ultrashape_v1.pt")
-        self.config_path = config_path or str(self.ultrashape_dir / "configs" / "infer_dit2.yaml")
+        self.config_path = config_path or str(self.ultrashape_dir / "configs" / "infer_dit_refine.yaml")
         self.device = device
 
         self._pipeline = None
