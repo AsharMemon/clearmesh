@@ -133,6 +133,28 @@ def polish_mesh(
                     f"[polish] taubin(iter={taubin_iterations}, "
                     f"lamb={taubin_lamb}, nu={taubin_nu}) in {time.time() - t0:.2f}s"
                 )
+
+            # Re-merge at a slightly looser tolerance — Taubin can
+            # displace verts by up to a few lambdas of grid spacing,
+            # which can pull apart near-duplicates that were
+            # co-located before. Re-snap them.
+            if merge_digits > 0:
+                t_m2 = time.time()
+                v2 = np.round(out.vertices, decimals=max(merge_digits - 1, 3))
+                _, inv2 = np.unique(v2, axis=0, return_inverse=True)
+                faces2 = inv2[out.faces]
+                v2_unique = np.unique(v2, axis=0)
+                valid2 = (
+                    (faces2[:, 0] != faces2[:, 1])
+                    & (faces2[:, 1] != faces2[:, 2])
+                    & (faces2[:, 0] != faces2[:, 2])
+                )
+                out = trimesh.Trimesh(vertices=v2_unique, faces=faces2[valid2], process=False)
+                if verbose:
+                    print(
+                        f"[polish] post-Taubin re-merge: {len(out.vertices):,}v/"
+                        f"{len(out.faces):,}f in {time.time() - t_m2:.2f}s"
+                    )
         except Exception as e:
             import warnings
             warnings.warn(f"[polish] Taubin smoothing failed ({e}); returning unsmoothed mesh")
