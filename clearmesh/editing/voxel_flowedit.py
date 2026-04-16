@@ -278,8 +278,18 @@ class VoxelFlowEdit:
         if condition is None:
             return None, None
         if isinstance(condition, dict):
-            pos = condition.get("cond") or condition.get("image_cond") or condition.get("pos")
-            neg = condition.get("neg_cond") or condition.get("uncond") or condition.get("neg")
+            # Must use explicit `is not None` checks — tensor truthiness raises
+            # "Boolean value of Tensor with more than one value is ambiguous".
+            pos = None
+            for key in ("cond", "image_cond", "pos"):
+                if key in condition and condition[key] is not None:
+                    pos = condition[key]
+                    break
+            neg = None
+            for key in ("neg_cond", "uncond", "neg"):
+                if key in condition and condition[key] is not None:
+                    neg = condition[key]
+                    break
             return pos, neg
         if isinstance(condition, (tuple, list)):
             if len(condition) == 2:
