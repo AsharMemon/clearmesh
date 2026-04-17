@@ -248,6 +248,9 @@ def main():
         lambda_f=args.lambda_f,
         lambda_ss=args.lambda_ss,
         epsilon=args.epsilon,
+        # Match the lattice tolerance used by split_candidates (1e-3)
+        # so the edge-graph actually collides rounded vertices.
+        edge_merge_tol=3,
         verbose=True,
     )
     print(f"[demo] select in {time.time()-t0:.1f}s")

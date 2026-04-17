@@ -347,18 +347,37 @@ def split_candidates(
     if verbose:
         print(f"[triangle_split] {len(pairs)} AABB-overlapping candidate pairs")
 
-    planes_for: List[List[Tuple[np.ndarray, np.ndarray]]] = [[] for _ in range(n)]
-    # Pre-compute each candidate's own plane
+    # Build the GLOBAL set of planes. Every candidate gets cut by every
+    # OTHER candidate's best-fit plane that it AABB-overlaps with. The
+    # critical improvement over per-pair cutting with ad-hoc planes:
+    # if candidates i and j are both cut by plane P_k (the plane of some
+    # third candidate k), their cut endpoints both lie on plane P_k
+    # (up to numerical drift from the sub-triangulation snap). The
+    # downstream lattice snap can then collide them onto shared grid
+    # points. Without the global plane set, i was cut on plane P_j and
+    # j on plane P_i — two DIFFERENT planes — so no collisions ever.
     best_planes: List[Optional[Tuple[np.ndarray, np.ndarray]]] = [
         _best_plane(c) for c in candidates
     ]
-
+    adjacency: List[set[int]] = [set() for _ in range(n)]
     for i, j in pairs:
-        pi, pj = best_planes[i], best_planes[j]
-        if pi is not None:
-            planes_for[j].append(pi)
-        if pj is not None:
-            planes_for[i].append(pj)
+        adjacency[i].add(j)
+        adjacency[j].add(i)
+
+    planes_for: List[List[Tuple[np.ndarray, np.ndarray]]] = [[] for _ in range(n)]
+    for i in range(n):
+        # Collect planes from candidate i itself PLUS every AABB-
+        # overlapping neighbour. Cutting i by its own plane is a no-op
+        # for perfectly-planar candidates but adds useful seams for
+        # curved ones. Cutting by neighbours' planes is what creates
+        # the potentially-shared intersection lines.
+        own = best_planes[i]
+        if own is not None:
+            planes_for[i].append(own)
+        for j in adjacency[i]:
+            p = best_planes[j]
+            if p is not None:
+                planes_for[i].append(p)
 
     out: List[trimesh.Trimesh] = []
     for idx, (cand, planes) in enumerate(zip(candidates, planes_for)):

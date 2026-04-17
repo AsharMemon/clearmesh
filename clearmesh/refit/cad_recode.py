@@ -104,16 +104,16 @@ def _build_cad_recode_classes():
     """Imports torch and transformers lazily and constructs the custom
     CADRecode LM class. Returns (FourierPointEncoder, CADRecode).
 
-    This matches the upstream demo.ipynb ``CADRecode`` definition exactly:
-      - Explicit PreTrainedModel.__init__ (not Qwen2ForCausalLM's)
-      - Manual ``self.model = Qwen2Model(config)`` + ``self.lm_head``
-      - Calls ``self.model(...)`` directly (the bare decoder), not
-        ``super().forward(...)``
-      - In-place ``attention_mask[attention_mask == -1] = 1`` so the
-        caller's tensor is mutated (lets subsequent generate() steps
-        see a clean 0/1 mask)
-      - Overrides ``prepare_inputs_for_generation`` to propagate
-        ``point_cloud`` into every model forward call
+    v2 strategy (simpler, avoids transformers-5.x-specific issues):
+      - Subclass Qwen2ForCausalLM minimally — just add point_encoder.
+      - DO NOT override forward(). Do all point-splicing OUTSIDE the
+        model by precomputing inputs_embeds and passing them in
+        directly. This sidesteps the attention_mask==-1 convention
+        entirely and lets us use the vanilla generate() path without
+        fighting KV-cache/position-id handling.
+      - prepare_inputs_for_generation is still overridden to thread
+        inputs_embeds through the first forward only (subsequent
+        autoregressive steps use input_ids like any other LM).
     """
     import torch
     from torch import nn
@@ -163,92 +163,26 @@ def _build_cad_recode_classes():
             super().__init__(config)
             self.point_encoder = FourierPointEncoder(config.hidden_size)
 
-        def forward(
+        def encode_point_cloud(
             self,
-            input_ids=None,
-            attention_mask=None,
-            point_cloud=None,
-            position_ids=None,
-            past_key_values=None,
-            inputs_embeds=None,
-            labels=None,
-            use_cache=None,
-            output_attentions=None,
-            output_hidden_states=None,
-            return_dict=None,
-            cache_position=None,
-        ):
-            output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-            output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-            return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+            input_ids: "torch.Tensor",       # (1, N+1) int
+            point_cloud: "torch.Tensor",     # (1, N, 3) float
+            text_start_token_id: int,        # typically <|im_start|>
+        ) -> "torch.Tensor":
+            """Build the (1, N+1, hidden) embedding tensor used as the
+            first-call ``inputs_embeds`` for generate().
 
-            # Splice point embeddings on the first call only (empty KV cache).
-            # Modifies attention_mask IN-PLACE so generate()'s next step
-            # sees a clean 0/1 mask.
-            seq_cache = past_key_values.get_seq_length() if past_key_values is not None else 0
-            if past_key_values is None or seq_cache == 0:
-                assert inputs_embeds is None
-                inputs_embeds = self.model.embed_tokens(input_ids)
-                # from_pretrained with torch_dtype='auto' casts self.projection
-                # to bf16, but register_buffer(persistent=False) leaves
-                # self.frequencies in float32. The multiply broadcasts to
-                # float32, then the bf16 projection errors. Run the whole
-                # point_encoder in float32, cast output to match embeds.
-                pc_f32 = point_cloud.to(torch.float32)
-                point_embeds = self.point_encoder(pc_f32).to(inputs_embeds)
-                inputs_embeds[attention_mask == -1] = point_embeds.reshape(
-                    -1, point_embeds.shape[-1]
-                )
-                attention_mask[attention_mask == -1] = 1
-                input_ids = None
-                position_ids = None
-
-            outputs = self.model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                past_key_values=past_key_values,
-                inputs_embeds=inputs_embeds,
-                use_cache=use_cache,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
-                cache_position=cache_position,
+            The convention:
+              - First N positions = projected point embeddings.
+              - Position N+1 = the <|im_start|> token's vanilla embedding.
+            """
+            embed = self.model.embed_tokens
+            pc_f32 = point_cloud.to(torch.float32)
+            point_embeds = self.point_encoder(pc_f32).to(embed.weight.dtype)
+            start_embed = embed(
+                torch.tensor([[text_start_token_id]], device=input_ids.device)
             )
-
-            hidden_states = outputs[0]
-            logits = self.lm_head(hidden_states).float()
-
-            loss = None
-            if labels is not None:
-                shift_logits = logits[..., :-1, :].contiguous()
-                shift_labels = labels[..., 1:].contiguous()
-                loss_fct = nn.CrossEntropyLoss()
-                shift_logits = shift_logits.view(-1, self.config.vocab_size)
-                shift_labels = shift_labels.view(-1).to(shift_logits.device)
-                loss = loss_fct(shift_logits, shift_labels)
-
-            if not return_dict:
-                output = (logits,) + outputs[1:]
-                return (loss,) + output if loss is not None else output
-
-            return CausalLMOutputWithPast(
-                loss=loss,
-                logits=logits,
-                past_key_values=outputs.past_key_values,
-                hidden_states=outputs.hidden_states,
-                attentions=outputs.attentions,
-            )
-
-        def prepare_inputs_for_generation(self, *args, **kwargs):
-            model_inputs = super().prepare_inputs_for_generation(*args, **kwargs)
-            # HF's generate() calls this on every step. We need the
-            # model to see point_cloud, but only on the first step
-            # (cache is empty). Always include it; forward() gates the
-            # splice on past_key_values being empty.
-            if "point_cloud" in kwargs:
-                model_inputs["point_cloud"] = kwargs["point_cloud"]
-            return model_inputs
+            return torch.cat([point_embeds, start_embed], dim=1)
 
     return FourierPointEncoder, CADRecode
 
@@ -423,21 +357,30 @@ class CadRecodeRefiner:
         point_cloud: np.ndarray,
         max_new_tokens: int,
     ) -> str:
-        """Run one model.generate() pass. Returns the decoded CadQuery
-        script (without the <|im_start|>/<|endoftext|> wrapping).
+        """Run one model.generate() pass.
+
+        v2 path: we build the spliced inputs_embeds BEFORE calling
+        generate(), pass those directly, and let the LM run as a
+        vanilla Qwen2 from there. This avoids the -1-mask convention
+        and the custom forward() that caused looping / empty output
+        on transformers 5.x.
+
+        The resulting input to generate() is:
+          inputs_embeds : (1, N+1, hidden)  — N point embeddings + <|im_start|>
+          attention_mask: (1, N+1)          — all ones
         """
         import torch
 
         tok = self.tokenizer
-        n = len(point_cloud)
-        input_ids = (
-            [tok.pad_token_id] * n
-            + [tok("<|im_start|>")["input_ids"][0]]
-        )
-        attention_mask = [-1] * n + [1]
+        start_id = tok("<|im_start|>")["input_ids"][0]
+        N = len(point_cloud)
 
-        input_ids_t = torch.tensor(input_ids).unsqueeze(0).to(self.device)
-        attention_mask_t = torch.tensor(attention_mask).unsqueeze(0).to(self.device)
+        # Dummy input_ids just to drive embed dtype / device placement
+        dummy_ids = torch.zeros(
+            (1, N + 1), dtype=torch.long, device=self.device,
+        )
+        dummy_ids[0, -1] = start_id
+
         pc_t = (
             torch.tensor(point_cloud, dtype=torch.float32)
             .unsqueeze(0)
@@ -445,21 +388,40 @@ class CadRecodeRefiner:
         )
 
         with torch.no_grad():
-            out = self.model.generate(
-                input_ids=input_ids_t,
-                attention_mask=attention_mask_t,
-                point_cloud=pc_t,
-                max_new_tokens=max_new_tokens,
-                pad_token_id=tok.pad_token_id,
+            inputs_embeds = self.model.encode_point_cloud(
+                dummy_ids, pc_t, text_start_token_id=start_id,
+            )
+            attention_mask = torch.ones(
+                (1, N + 1), dtype=torch.long, device=self.device,
             )
 
-        raw = tok.batch_decode(out)[0]
-        # Everything between <|im_start|> and <|endoftext|>
-        try:
-            py_string = raw.split("<|im_start|>")[1].split("<|endoftext|>")[0]
-        except IndexError:
-            py_string = raw
-        return py_string
+            eos_id = tok.eos_token_id or tok("<|endoftext|>")["input_ids"][0]
+            # Repetition penalty breaks the `w0=cq.Workplane('ZX',origin=(0`
+            # loop the model falls into otherwise. The paper does
+            # test-time multi-candidate sampling but even their demo
+            # with greedy decoding doesn't loop — probably because
+            # their training setup sees EOS reliably. On transformers
+            # 5.x we need a little help.
+            out = self.model.generate(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                max_new_tokens=max_new_tokens,
+                pad_token_id=tok.pad_token_id,
+                eos_token_id=eos_id,
+                do_sample=False,                # greedy (paper default)
+                repetition_penalty=1.1,
+                no_repeat_ngram_size=8,
+            )
+
+        # When inputs_embeds is used, generate() returns only the NEW
+        # tokens (it doesn't prepend the input). Decode directly.
+        raw = tok.batch_decode(out, skip_special_tokens=False)[0]
+        # Trim the <|im_start|>/<|endoftext|> wrappers if present
+        if "<|im_start|>" in raw:
+            raw = raw.split("<|im_start|>", 1)[1]
+        if "<|endoftext|>" in raw:
+            raw = raw.split("<|endoftext|>", 1)[0]
+        return raw
 
     # --- Execute generated CadQuery --------------------------------------
 

@@ -237,25 +237,66 @@ def build_tsdf(
 # Single-primitive optimisation
 # =====================================================================
 
-def _init_from_moments(coords: np.ndarray, mask: np.ndarray) -> SuperQuadric:
-    """Initialise a SQ at the centroid of the occupied region with axes
-    roughly aligned to the PCA of occupied voxels, and sizes from 80%
-    of the extents.
+def _init_from_moments(
+    coords: np.ndarray,
+    mask: np.ndarray,
+    scale_frac: float = 0.35,
+    seed_region_frac: float = 0.25,
+    rng_seed: int = 0,
+) -> SuperQuadric:
+    """Initialise a SQ inside a SUB-REGION of the occupied set.
+
+    Rationale: seeding with a full-extent PCA gives the fit procedure
+    a SQ whose bounding box already covers the whole model. One pass
+    of optimisation easily collapses that to a "rounded cuboid of the
+    whole thing" and the carving step removes nearly all voxels, so
+    the greedy loop terminates after 1 primitive.
+
+    What we do instead:
+      1. Pick a random occupied voxel as a seed centre.
+      2. Restrict to the occupied voxels within ``seed_region_frac *
+         mesh_radius`` of that seed.
+      3. Compute PCA on that restricted cluster.
+      4. Scale the SQ to ``scale_frac`` times the PCA standard
+         deviation (so it covers only the local feature, not the full
+         bounding box).
+
+    This produces a sequence of locally-fit SQs that each cover a
+    different part of the object, which is what the paper's
+    block-regrow-fill strategy achieves more formally.
     """
     occ = coords[mask]
     if len(occ) == 0:
         return SuperQuadric()
-    c = occ.mean(axis=0)
-    rel = occ - c
-    # PCA via covariance
-    cov = (rel.T @ rel) / len(rel)
+
+    rng = np.random.default_rng(rng_seed)
+    # Seed voxel: weighted random pick (biases toward interior by
+    # sampling uniformly over the occupied set)
+    seed = occ[rng.integers(0, len(occ))]
+
+    # Restrict to local region around seed
+    mesh_radius = max(
+        np.linalg.norm(occ.max(axis=0) - occ.min(axis=0)) / 2.0,
+        1e-3,
+    )
+    r = seed_region_frac * mesh_radius
+    dist = np.linalg.norm(occ - seed, axis=1)
+    local = occ[dist < r]
+    if len(local) < 50:
+        # Too small a region; fall back to the full set but scaled small
+        local = occ
+
+    c = local.mean(axis=0)
+    rel = local - c
+    cov = (rel.T @ rel) / max(len(local), 1)
     eigvals, eigvecs = np.linalg.eigh(cov)
-    # Largest first
     order = np.argsort(eigvals)[::-1]
     axes = eigvecs[:, order]
-    scales = np.sqrt(np.maximum(eigvals[order], 1e-6)) * 2.0
-    scales = np.clip(scales, 0.05, 1.0)
-    # Decompose axes (rotation) into XYZ Euler
+    # sqrt(eig) is a standard-deviation along that axis. Multiply by
+    # scale_frac to get a SUB-extent SQ.
+    scales = np.sqrt(np.maximum(eigvals[order], 1e-6)) * 2.0 * scale_frac
+    scales = np.clip(scales, 0.04, 0.6)
+
     rx = math.atan2(axes[2, 1], axes[2, 2])
     ry = math.atan2(-axes[2, 0], math.hypot(axes[2, 1], axes[2, 2]))
     rz = math.atan2(axes[1, 0], axes[0, 0])
@@ -275,6 +316,7 @@ def _fit_one(
     lr: float = 0.01,
     n_samples: int = 20000,
     init: Optional[SuperQuadric] = None,
+    init_seed: int = 0,
     verbose: bool = False,
 ) -> SuperQuadric:
     """Fit a single superquadric to the target TSDF by minimising L2 on
@@ -306,7 +348,7 @@ def _fit_one(
     sample_phi = flat_phi[pick]
 
     if init is None:
-        init = _init_from_moments(coords, occ_mask)
+        init = _init_from_moments(coords, occ_mask, rng_seed=init_seed)
     params = init.to_vector()
 
     def loss_at(p: np.ndarray) -> float:
@@ -475,7 +517,9 @@ class LightSQRefiner:
             t_fit = time.time()
             sq = _fit_one(
                 phi, coords, tau,
-                n_iters=self.n_iters, lr=self.lr, verbose=False,
+                n_iters=self.n_iters, lr=self.lr,
+                init_seed=i * 7919 + 1,   # different seed per iteration
+                verbose=False,
             )
             fit_dt = time.time() - t_fit
 
