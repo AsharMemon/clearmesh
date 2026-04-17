@@ -110,6 +110,24 @@ class EditOptions:
     taubin_lamb: float = 0.5           # smoothing strength
     taubin_nu: float = -0.53           # -lamb adjusted for inverse pass; must be < -lamb
 
+    # --- R2 polish additions: run AFTER the merge + Taubin pass above ---
+
+    # A) Small-hole fill (cumesh): closes the tiny crack loops that Taubin
+    # smoothing opens when it displaces verts at shared edges. Only fills
+    # loops below ``hole_fill_max_perimeter`` so we don't close
+    # intentional cavities. Reduces boundary-edge count from ~2600 to <100
+    # in our measurements.
+    enable_hole_fill: bool = True
+    hole_fill_max_perimeter: float = 0.005
+
+    # C) Quadric edge-collapse decimation: resamples the surface to a
+    # uniform triangulation. Eliminates marching-cubes staircasing and
+    # shrinks GLB files ~7x (250MB -> 36MB at 2M faces). Produces the
+    # cleanest visible surfaces and smallest files. Set target=0 to
+    # disable.
+    enable_decimate: bool = True
+    decimate_target_faces: int = 2_000_000
+
     # Region-focused editing
     # 2D mask image (path or PIL.Image); white/255=edit, black/0=preserve.
     # If None, edit is applied globally.
@@ -703,11 +721,16 @@ class Easy3EEditor:
                 warnings.warn(f"[easy3e] UltraShape refinement failed ({e}); keeping TRELLIS.2 mesh")
                 timings["ultrashape_refine_failed"] = time.time() - t0
 
-        # --- Cheap polish pass (vertex dedup + Taubin smoothing) ---
-        # Runs after UltraShape, before TripoSF (if ever enabled) or final
-        # repair. Addresses the two main UltraShape output artifacts:
-        #   - Near-duplicate vertices rendering as visible T-junction cracks
-        #   - Minor surface stepping on curved geometry from 1024^3 MC
+        # --- R2 polish chain: (B) merge + Taubin, (A) fill small holes,
+        # (C) quadric decimation. See scripts/demo_triposf_A_noEdit.py and
+        # /tmp/polish_combo_matrix.py for the empirical evaluation that
+        # landed on this order. Each step is independently disableable.
+        # Runs AFTER UltraShape, BEFORE TripoSF (if ever enabled) and the
+        # final repair.
+
+        # B) merge + Taubin smoothing. Closes near-duplicate verts and
+        # smooths MC staircasing. Opens ~2.5k tiny boundary loops as a
+        # side effect (each ~10um at unit-cube scale) — A closes these.
         if options.enable_vertex_merge or options.enable_taubin_smooth:
             t0 = time.time()
             try:
@@ -720,16 +743,59 @@ class Easy3EEditor:
                     taubin_nu=options.taubin_nu,
                     verbose=False,
                 )
-                timings["polish"] = time.time() - t0
+                timings["polish_B"] = time.time() - t0
                 print(
-                    f"  Polished: {len(edited_mesh.vertices):,} verts "
+                    f"  Polish B: {len(edited_mesh.vertices):,} verts "
                     f"(dedup={options.enable_vertex_merge}, "
                     f"taubin={options.taubin_iterations if options.enable_taubin_smooth else 0})"
                 )
             except Exception as e:
                 import warnings
-                warnings.warn(f"[easy3e] polish failed ({e}); continuing unpolished")
-                timings["polish_failed"] = time.time() - t0
+                warnings.warn(f"[easy3e] polish B failed ({e}); continuing unpolished")
+                timings["polish_B_failed"] = time.time() - t0
+
+        # A) fill small holes. Closes the tiny boundary loops Taubin
+        # opens. max_hole_perimeter=0.005 is small enough to miss
+        # intentional cavities. Effectively instant (<1s even on 7M verts).
+        if options.enable_hole_fill:
+            t0 = time.time()
+            try:
+                from clearmesh.mesh.repair import fill_small_holes_cuda
+                edited_mesh = fill_small_holes_cuda(
+                    edited_mesh,
+                    max_hole_perimeter=options.hole_fill_max_perimeter,
+                    verbose=False,
+                )
+                timings["polish_A_hole_fill"] = time.time() - t0
+                print(f"  Polish A: hole-fill done in {time.time()-t0:.1f}s")
+            except Exception as e:
+                import warnings
+                warnings.warn(f"[easy3e] polish A (hole fill) failed ({e}); skipping")
+                timings["polish_A_failed"] = time.time() - t0
+
+        # C) quadric edge-collapse decimation. Resamples to a uniform
+        # triangulation at target_faces. Removes MC staircasing and
+        # dramatically shrinks output size. Skipped if mesh is already
+        # smaller than target.
+        if options.enable_decimate and options.decimate_target_faces > 0:
+            if len(edited_mesh.faces) > options.decimate_target_faces:
+                t0 = time.time()
+                try:
+                    from clearmesh.mesh.repair import quadric_decimate
+                    edited_mesh = quadric_decimate(
+                        edited_mesh,
+                        target_faces=options.decimate_target_faces,
+                        verbose=False,
+                    )
+                    timings["polish_C_decimate"] = time.time() - t0
+                    print(
+                        f"  Polish C: decimated to {len(edited_mesh.faces):,} faces "
+                        f"in {time.time()-t0:.1f}s"
+                    )
+                except Exception as e:
+                    import warnings
+                    warnings.warn(f"[easy3e] polish C (decimate) failed ({e}); skipping")
+                    timings["polish_C_failed"] = time.time() - t0
 
         # --- Optional TripoSF (SparseFlex) watertight pass (MIT license) ---
         # Runs AFTER UltraShape. TripoSF's Sparcubes-style VAE converts any
