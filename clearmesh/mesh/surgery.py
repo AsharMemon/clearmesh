@@ -254,6 +254,95 @@ def remove_by_spike_detection(
 # Hole filling
 # ---------------------------------------------------------------------------
 
+def remove_by_bounding_box(
+    mesh: trimesh.Trimesh,
+    bbox_min,
+    bbox_max,
+    coords: str = "normalized",
+    fill_holes: bool = True,
+    smooth_iterations: int = 3,
+    verbose: bool = False,
+) -> trimesh.Trimesh:
+    """Delete all faces whose centroid falls inside a world-space AABB.
+
+    This is the "surgical cube" — the cleanest and most predictable
+    artifact-removal primitive. You specify a 3D box in world space,
+    every face fully inside gets deleted, and the resulting hole gets
+    filled. No raycasting, no projection ambiguity, no grazing-angle
+    artifacts on the surrounding mesh.
+
+    Args:
+        mesh: Input trimesh.Trimesh.
+        bbox_min, bbox_max: (x, y, z) tuples or length-3 arrays defining
+            the axis-aligned box.
+        coords: Coordinate frame for the bbox:
+          - "normalized" (default): bbox is in the unit-centered frame
+            used by all our canonical rendering / Easy3E logic. Mesh
+            is temporarily re-centered and rescaled for filtering.
+          - "world": bbox is in the input mesh's raw world coordinates.
+        fill_holes: Whether to fill the resulting hole.
+        smooth_iterations: Patch-only Taubin iterations for hole fill.
+        verbose: Print stats.
+
+    Returns:
+        Repaired trimesh.Trimesh with faces inside the bbox removed.
+    """
+    import time
+
+    bbox_min = np.asarray(bbox_min, dtype=np.float32)
+    bbox_max = np.asarray(bbox_max, dtype=np.float32)
+
+    # Compute face centroids in the chosen coordinate frame
+    if coords == "normalized":
+        # Replicate the normalization used in our canonical renders:
+        #   vertices -> vertices - centroid, then divide by max extent.
+        centered = mesh.vertices - mesh.centroid
+        ext = mesh.extents.max()
+        if ext > 0:
+            centered = centered / ext
+        face_centroids = centered[mesh.faces].mean(axis=1)
+    elif coords == "world":
+        face_centroids = mesh.triangles.mean(axis=1)
+    else:
+        raise ValueError(f"bad coords mode: {coords}")
+
+    # Faces to delete
+    in_box = np.all(
+        (face_centroids >= bbox_min) & (face_centroids <= bbox_max),
+        axis=1,
+    )
+    if verbose:
+        print(
+            f"[bbox_surgery] bbox({coords})={bbox_min.tolist()} -> "
+            f"{bbox_max.tolist()}; {in_box.sum():,} / {len(in_box):,} faces inside "
+            f"({in_box.mean()*100:.2f}%)"
+        )
+
+    if in_box.sum() == 0:
+        if verbose:
+            print("[bbox_surgery] bbox contains no faces; returning input")
+        return mesh
+
+    keep_face_idx = np.where(~in_box)[0]
+    cut_mesh = _safe_submesh(mesh, keep_face_idx)
+    if cut_mesh is None:
+        if verbose:
+            print("[bbox_surgery] bbox would delete all faces; returning input")
+        return mesh
+
+    if fill_holes:
+        t0 = time.time()
+        cut_mesh = fill_hole_smooth(
+            cut_mesh,
+            smooth_iterations=smooth_iterations,
+            verbose=verbose,
+        )
+        if verbose:
+            print(f"[bbox_surgery] hole-fill in {time.time()-t0:.2f}s")
+
+    return cut_mesh
+
+
 def fill_hole_smooth(
     mesh: trimesh.Trimesh,
     smooth_iterations: int = 3,
