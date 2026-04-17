@@ -567,7 +567,11 @@ def fill_hole_smooth(
     # toward that plane. Eliminates "slight spikes" from non-coplanar
     # rim vertices that Laplacian relaxation alone can't resolve.
     flat_cap: bool = True,
-    flat_cap_rim_pull: float = 0.5,  # 0 = rim stays put, 1 = fully coplanar
+    # 1.0 = rim verts snapped fully onto the plane. Fine because: (a) rim
+    # verts already lie within ~0.003 of the plane (tight cut-edge co-
+    # planarity), and (b) their non-patch neighbors are below the cut
+    # plane, so snapping them doesn't distort visible surrounding geometry.
+    flat_cap_rim_pull: float = 1.0,
     verbose: bool = False,
 ) -> trimesh.Trimesh:
     """Fill boundary holes with a cascade and lightly smooth the patches.
@@ -702,31 +706,34 @@ def fill_hole_smooth(
                 import warnings
                 warnings.warn(f"[surgery] subdivide failed ({e}); skipping")
 
-        # Find patch-only verts (referenced ONLY by patch faces) and rim
-        # verts (referenced by both patch and non-patch faces). Rim verts
-        # get light relaxation; non-patch-only verts are hard-fixed.
-        all_face_mask = np.zeros(len(mesh.faces), dtype=bool)
-        all_face_mask[patch_face_idx] = True
+        # Vectorized vert-role classification:
+        # - interior patch vert = referenced ONLY by patch faces
+        # - rim vert = referenced by both patch and non-patch faces
+        # - surrounding vert = referenced only by non-patch faces (ignored)
+        #
+        # CRITICAL: rim verts must be hard Dirichlet boundary conditions
+        # during Laplacian relaxation — they are shared with the
+        # surrounding mesh and moving them drifts the whole cut edge.
+        # Previous bug: including rim in the relaxation set caused them
+        # to drift several multiples of the original rim-planarity
+        # residual (0.003 → 0.02+ visible spikes).
+        is_patch_face = np.zeros(len(mesh.faces), dtype=bool)
+        is_patch_face[patch_face_idx] = True
+        # Per-vert reference counts
         patch_vert_refs = np.zeros(len(mesh.vertices), dtype=np.int32)
         non_patch_vert_refs = np.zeros(len(mesh.vertices), dtype=np.int32)
-        for fi, is_patch in enumerate(all_face_mask):
-            for v in mesh.faces[fi]:
-                if is_patch:
-                    patch_vert_refs[v] += 1
-                else:
-                    non_patch_vert_refs[v] += 1
-        # A vert is "free to move" if it is patch-only (no non-patch ref)
-        # OR on the rim (both refs; allow movement but will be pulled by
-        # its non-patch neighbors back toward surrounding surface).
-        free_vert_mask = patch_vert_refs > 0
-        rim_vert_mask = free_vert_mask & (non_patch_vert_refs > 0)
-        interior_patch_mask = free_vert_mask & (non_patch_vert_refs == 0)
+        np.add.at(patch_vert_refs, mesh.faces[is_patch_face].ravel(), 1)
+        np.add.at(non_patch_vert_refs, mesh.faces[~is_patch_face].ravel(), 1)
 
-        relax_idx = np.where(free_vert_mask)[0]
+        interior_patch_mask = (patch_vert_refs > 0) & (non_patch_vert_refs == 0)
+        rim_vert_mask = (patch_vert_refs > 0) & (non_patch_vert_refs > 0)
+
+        # Only interior patch verts are free to move. Rim verts stay fixed.
+        relax_idx = np.where(interior_patch_mask)[0]
         if verbose:
             print(
-                f"[surgery] patch ownership: {interior_patch_mask.sum():,} interior, "
-                f"{rim_vert_mask.sum():,} rim, {free_vert_mask.sum():,} total relaxable"
+                f"[surgery] patch ownership: {interior_patch_mask.sum():,} interior "
+                f"(free), {rim_vert_mask.sum():,} rim (fixed)"
             )
 
         if patch_relax_iterations > 0 and len(relax_idx) > 0:
