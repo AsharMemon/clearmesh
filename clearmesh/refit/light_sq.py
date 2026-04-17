@@ -358,6 +358,11 @@ def _fit_one(
             return 1e9
         if min(sq.ax, sq.ay, sq.az) < 1e-3:
             return 1e9
+        # Keep the translation inside the normalised cube; SQs that
+        # escape (t outside [-1, 1]) are fitting to residual noise
+        # OUTSIDE the mesh and degrade the final tessellation.
+        if max(abs(sq.tx), abs(sq.ty), abs(sq.tz)) > 0.98:
+            return 1e9
         phi_pred = _sq_phi(sample_coords, sq)
         phi_pred_t = np.clip(phi_pred, -tau, +tau)
         return float(np.mean((phi_pred_t - sample_phi) ** 2))
