@@ -46,6 +46,9 @@ def main():
     ap.add_argument("--compile-res", type=int, default=96)
     ap.add_argument("--decimate-input", type=int, default=200_000,
                     help="Decimate input mesh to this face count before TSDF (faster)")
+    ap.add_argument("--regrow", action="store_true",
+                    help="Use block-regrow-fill (paper §3.3.2) instead of greedy")
+    ap.add_argument("--regrow-rounds", type=int, default=1)
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -74,7 +77,12 @@ def main():
     )
 
     t0 = time.time()
-    result = refiner.fit(mesh, verbose=True)
+    if args.regrow:
+        result = refiner.fit_with_regrow(
+            mesh, regrow_rounds=args.regrow_rounds, verbose=True,
+        )
+    else:
+        result = refiner.fit(mesh, verbose=True)
     dt = time.time() - t0
     print(f"\n[light_sq] fit in {dt:.1f}s, "
           f"{len(result.primitives)} primitives, "

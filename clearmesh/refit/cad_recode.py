@@ -16,6 +16,29 @@ space and spliced into the token sequence at positions where
 CadQuery Python script that, when ``exec()``'d, builds a ``cq.Workplane``
 solid stored in a global named ``r``.
 
+STATUS (April 2026): the wrapper loads weights and generates real
+CAD-Recode vocabulary (``cq.Workplane``, ``.sketch()``, ``.segment()``,
+``.arc()``, ``.cylinder()``, ``.extrude()``, ``.union()`` all seen in
+output), but the greedy-decode loop repeatedly drops an ``<|im_start|>``
+token mid-sequence and never emits a clean stop. The upstream demo
+runs on ``transformers==4.47.1``; our environment has 5.5.4 and
+Qwen2ForCausalLM's forward/generate path changed between those
+versions (cache handling, position_id auto-compute, attention mask
+broadcast). Possible fixes, any of which likely works:
+
+  1. Pin ``transformers==4.47.1`` in a dedicated env; run CAD-Recode
+     via a subprocess wrapper similar to ``scripts/run_ultrashape_subprocess.py``.
+  2. Override ``prepare_inputs_for_generation`` to carry our own
+     position_ids through the generate loop.
+  3. Provide a different ``generate``-free decode path: manually
+     drive the logits loop, apply a repetition-penalty + banned
+     ``<|im_start|>`` token-id filter each step.
+
+Option (1) is the cleanest and matches the UltraShape subprocess
+pattern already in the repo. Option (2) is the nicest, but the
+transformers 5.x internals that auto-compute ``position_ids`` from
+``attention_mask`` make the surface area for the fix large.
+
 Input spec (non-negotiable):
   - shape        (1, 256, 3)
   - dtype        float32
@@ -163,26 +186,71 @@ def _build_cad_recode_classes():
             super().__init__(config)
             self.point_encoder = FourierPointEncoder(config.hidden_size)
 
-        def encode_point_cloud(
+        def forward(
             self,
-            input_ids: "torch.Tensor",       # (1, N+1) int
-            point_cloud: "torch.Tensor",     # (1, N, 3) float
-            text_start_token_id: int,        # typically <|im_start|>
-        ) -> "torch.Tensor":
-            """Build the (1, N+1, hidden) embedding tensor used as the
-            first-call ``inputs_embeds`` for generate().
+            input_ids=None,
+            attention_mask=None,
+            point_cloud=None,
+            position_ids=None,
+            past_key_values=None,
+            inputs_embeds=None,
+            labels=None,
+            use_cache=None,
+            output_attentions=None,
+            output_hidden_states=None,
+            return_dict=None,
+            cache_position=None,
+        ):
+            """Match upstream demo.ipynb exactly, but keep super().__init__
+            so lm_head tying works on transformers 5.x.
 
-            The convention:
-              - First N positions = projected point embeddings.
-              - Position N+1 = the <|im_start|> token's vanilla embedding.
+            On the FIRST call (empty KV cache): splice point embeddings
+            into inputs_embeds at the positions where attention_mask==-1,
+            then flip those -1s to 1 IN PLACE so subsequent generate()
+            steps see a clean 0/1 mask. Set position_ids=None so
+            transformers recomputes them from the sanitised mask.
             """
-            embed = self.model.embed_tokens
-            pc_f32 = point_cloud.to(torch.float32)
-            point_embeds = self.point_encoder(pc_f32).to(embed.weight.dtype)
-            start_embed = embed(
-                torch.tensor([[text_start_token_id]], device=input_ids.device)
+            seq_cache = (
+                past_key_values.get_seq_length()
+                if (past_key_values is not None and hasattr(past_key_values, "get_seq_length"))
+                else 0
             )
-            return torch.cat([point_embeds, start_embed], dim=1)
+            if (past_key_values is None or seq_cache == 0) and point_cloud is not None:
+                assert inputs_embeds is None
+                inputs_embeds = self.model.embed_tokens(input_ids)
+                pc_f32 = point_cloud.to(torch.float32)
+                point_embeds = self.point_encoder(pc_f32).to(inputs_embeds)
+                inputs_embeds[attention_mask == -1] = point_embeds.reshape(
+                    -1, point_embeds.shape[-1]
+                )
+                attention_mask[attention_mask == -1] = 1
+                input_ids = None
+                position_ids = None
+
+            # Defer to Qwen2ForCausalLM.forward() so weight tying / lm_head
+            # handling stay on the supported path.
+            return Qwen2ForCausalLM.forward(
+                self,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                inputs_embeds=inputs_embeds,
+                labels=labels,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+                cache_position=cache_position,
+            )
+
+        def prepare_inputs_for_generation(self, *args, **kwargs):
+            model_inputs = super().prepare_inputs_for_generation(*args, **kwargs)
+            # Thread point_cloud into every forward call. Our forward()
+            # gates the splice on "empty KV cache" so it only runs once.
+            if "point_cloud" in kwargs and kwargs["point_cloud"] is not None:
+                model_inputs["point_cloud"] = kwargs["point_cloud"]
+            return model_inputs
 
     return FourierPointEncoder, CADRecode
 
@@ -359,15 +427,11 @@ class CadRecodeRefiner:
     ) -> str:
         """Run one model.generate() pass.
 
-        v2 path: we build the spliced inputs_embeds BEFORE calling
-        generate(), pass those directly, and let the LM run as a
-        vanilla Qwen2 from there. This avoids the -1-mask convention
-        and the custom forward() that caused looping / empty output
-        on transformers 5.x.
-
-        The resulting input to generate() is:
-          inputs_embeds : (1, N+1, hidden)  — N point embeddings + <|im_start|>
-          attention_mask: (1, N+1)          — all ones
+        Upstream-compatible path: input_ids is N pad tokens + <|im_start|>,
+        attention_mask is N -1s followed by a 1. Our custom forward
+        detects the -1 flag on the first forward pass, splices point
+        embeddings into those positions, and mutates the mask to all 1s
+        for subsequent autoregressive steps.
         """
         import torch
 
@@ -375,12 +439,11 @@ class CadRecodeRefiner:
         start_id = tok("<|im_start|>")["input_ids"][0]
         N = len(point_cloud)
 
-        # Dummy input_ids just to drive embed dtype / device placement
-        dummy_ids = torch.zeros(
-            (1, N + 1), dtype=torch.long, device=self.device,
-        )
-        dummy_ids[0, -1] = start_id
+        input_ids = [tok.pad_token_id] * N + [start_id]
+        attention_mask = [-1] * N + [1]
 
+        input_ids_t = torch.tensor(input_ids).unsqueeze(0).to(self.device)
+        attention_mask_t = torch.tensor(attention_mask).unsqueeze(0).to(self.device)
         pc_t = (
             torch.tensor(point_cloud, dtype=torch.float32)
             .unsqueeze(0)
@@ -388,37 +451,35 @@ class CadRecodeRefiner:
         )
 
         with torch.no_grad():
-            inputs_embeds = self.model.encode_point_cloud(
-                dummy_ids, pc_t, text_start_token_id=start_id,
-            )
-            attention_mask = torch.ones(
-                (1, N + 1), dtype=torch.long, device=self.device,
-            )
+            # Accept multiple stop tokens: the model was trained on Qwen2
+            # chat format where im_end / endoftext / im_start can all
+            # mark sequence boundaries. Without all three as eos, greedy
+            # decode keeps re-seeding with <|im_start|>import cadquery...
+            # every time it would have stopped.
+            eos_ids = []
+            for name in ("<|endoftext|>", "<|im_end|>", "<|im_start|>"):
+                try:
+                    eos_ids.append(tok(name)["input_ids"][0])
+                except Exception:
+                    pass
+            if tok.eos_token_id is not None:
+                eos_ids.append(tok.eos_token_id)
+            eos_ids = list(dict.fromkeys(eos_ids))  # dedup, preserve order
 
-            eos_id = tok.eos_token_id or tok("<|endoftext|>")["input_ids"][0]
-            # Repetition penalty breaks the `w0=cq.Workplane('ZX',origin=(0`
-            # loop the model falls into otherwise. The paper does
-            # test-time multi-candidate sampling but even their demo
-            # with greedy decoding doesn't loop — probably because
-            # their training setup sees EOS reliably. On transformers
-            # 5.x we need a little help.
             out = self.model.generate(
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
+                input_ids=input_ids_t,
+                attention_mask=attention_mask_t,
+                point_cloud=pc_t,
                 max_new_tokens=max_new_tokens,
                 pad_token_id=tok.pad_token_id,
-                eos_token_id=eos_id,
-                do_sample=False,                # greedy (paper default)
-                repetition_penalty=1.1,
-                no_repeat_ngram_size=8,
+                eos_token_id=eos_ids if len(eos_ids) > 1 else eos_ids[0],
+                do_sample=False,
             )
 
-        # When inputs_embeds is used, generate() returns only the NEW
-        # tokens (it doesn't prepend the input). Decode directly.
-        raw = tok.batch_decode(out, skip_special_tokens=False)[0]
-        # Trim the <|im_start|>/<|endoftext|> wrappers if present
-        if "<|im_start|>" in raw:
-            raw = raw.split("<|im_start|>", 1)[1]
+        # generate() prepends input_ids in the output. Slice off the
+        # input portion, then decode only the new tokens.
+        new_tokens = out[0, input_ids_t.shape[1]:]
+        raw = tok.decode(new_tokens, skip_special_tokens=False)
         if "<|endoftext|>" in raw:
             raw = raw.split("<|endoftext|>", 1)[0]
         return raw

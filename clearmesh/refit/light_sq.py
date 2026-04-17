@@ -14,11 +14,21 @@ of writing, so this is a from-paper port of the CORE algorithm only:
      mesh rebuilt by sampling each primitive's implicit surface with
      marching cubes.
 
-Skipped vs the full paper (acceptable for a first prototype):
-  - Structure-aware convex decomposition + block-regrow-fill (§3.3).
-    Those reduce fragmentation at convex partition boundaries and
-    improve accuracy — without them this is basically Marching-Primitives
-    in spirit.
+Algorithm stages in this port:
+
+  GREEDY       (``LightSQRefiner.fit``)            — seed, fit, carve, repeat
+  BLOCK-REGROW (``LightSQRefiner.fit_with_regrow``) — paper §3.3.2 strategy:
+                 1. Block: fit K=1 SQ per convex partition of the TSDF
+                 2. Regrow: re-fit each SQ against the original TSDF
+                    with the OTHER SQs carved out (Eq. 13) — lets
+                    primitives grow beyond their initial block
+                 3. Fill: add primitives to any unfitted connected
+                    components of the target TSDF that remain
+
+Skipped vs the full paper:
+  - True structure-aware slice-plane convex decomposition (§3.3.1).
+    We use scipy label-connected-components on the occupancy grid
+    instead — simpler, no SDF-slice-saliency plane search.
   - Adaptive residual pruning by Main/Connector/Offcut classes (§3.4).
     We prune on a single size threshold.
   - EM-style σ² update (§A). We use plain Adam on L2 loss.
@@ -548,6 +558,230 @@ class LightSQRefiner:
         return LightSQResult(
             primitives=prims,
             final_residual_voxels=int((phi < 0).sum()),
+            n_iterations=len(prims),
+            timings=timings,
+        )
+
+    # ---------------- block-regrow-fill (paper §3.3.2) ----------------
+
+    def fit_with_regrow(
+        self,
+        mesh: trimesh.Trimesh,
+        n_blocks: Optional[int] = None,
+        regrow_rounds: int = 1,
+        partition: str = "kmeans",  # "kmeans" | "connected"
+        verbose: bool = True,
+    ) -> LightSQResult:
+        """Paper §3.3.2 port: BLOCK → REGROW → FILL.
+
+        Step 1 — BLOCK:
+          Partition the occupied TSDF voxels into connected components
+          (the paper uses a saliency-plane-driven convex decomposition
+          which is more sophisticated; scipy.ndimage.label gives us a
+          cheaper but generally-acceptable first approximation). Fit
+          one SQ per component.
+
+        Step 2 — REGROW (Eq. 13):
+          For each SQ, refit against the ORIGINAL TSDF with all other
+          SQs carved out. This lets a block-fit primitive grow outside
+          the artificial partition boundary into genuinely-similar
+          neighbouring geometry.
+
+        Step 3 — FILL:
+          After regrow, identify any connected components of the
+          residual TSDF that still have > min_residual_voxels occupied
+          voxels. Fit one SQ per component and add to the pool.
+
+        Args:
+            mesh: input mesh
+            n_blocks: cap on the number of initial connected-component
+                blocks. If there are more, keep the largest n_blocks.
+                Defaults to ``self.max_primitives``.
+            regrow_rounds: how many full regrow passes to run. 1 is
+                usually enough; more hurts stability.
+            verbose: print progress.
+
+        Returns:
+            LightSQResult — full set of primitives.
+        """
+        import time
+        from scipy.ndimage import label as ndi_label
+
+        timings: dict = {}
+        t0 = time.time()
+        norm_mesh, centroid, inv_scale = self._normalise(mesh)
+        phi_orig, coords = build_tsdf(norm_mesh, self.grid_res)
+        tau = 2.0 / self.grid_res
+        timings["tsdf"] = time.time() - t0
+
+        if n_blocks is None:
+            n_blocks = self.max_primitives
+
+        # --- STEP 1: BLOCK ---
+        t0 = time.time()
+        occ = phi_orig < 0
+
+        if partition == "connected":
+            labels, n_found = ndi_label(occ)
+            if verbose:
+                print(f"[light_sq/regrow] BLOCK (connected): "
+                      f"{n_found} connected components")
+        else:
+            # K-means partition over occupied voxel coordinates.
+            # Much more useful than connected-components for meshes
+            # where the occupancy is one big blob — we get n_blocks
+            # spatial regions regardless of topology.
+            occ_coords = coords[occ]
+            if len(occ_coords) == 0:
+                if verbose:
+                    print("[light_sq/regrow] BLOCK: no occupied voxels")
+                return LightSQResult(
+                    primitives=[],
+                    final_residual_voxels=0,
+                    n_iterations=0,
+                    timings={"tsdf": timings["tsdf"]},
+                )
+
+            try:
+                from sklearn.cluster import KMeans
+                km = KMeans(n_clusters=min(n_blocks, len(occ_coords)),
+                            n_init=4, random_state=0)
+                cluster_ids = km.fit_predict(occ_coords)
+            except ImportError:
+                # Pure-numpy fallback: random sample cluster centres +
+                # one round of nearest-centroid assignment
+                rng = np.random.default_rng(0)
+                k_eff = min(n_blocks, len(occ_coords))
+                seeds = occ_coords[rng.choice(len(occ_coords), k_eff, replace=False)]
+                dist = ((occ_coords[:, None] - seeds[None]) ** 2).sum(-1)
+                cluster_ids = dist.argmin(axis=1)
+
+            # Build a (R, R, R) label grid where non-occupied voxels
+            # are 0 and occupied ones carry cluster_id + 1.
+            labels = np.zeros_like(occ, dtype=np.int32)
+            labels[occ] = cluster_ids + 1
+            n_found = int(cluster_ids.max() + 1)
+            if verbose:
+                print(f"[light_sq/regrow] BLOCK (kmeans): "
+                      f"{n_found} spatial clusters")
+
+        # Order blocks by size, keep top n_blocks
+        component_sizes = []
+        for k in range(1, n_found + 1):
+            sz = int((labels == k).sum())
+            component_sizes.append((k, sz))
+        component_sizes.sort(key=lambda x: x[1], reverse=True)
+        kept = component_sizes[:n_blocks]
+        if verbose and len(component_sizes) > n_blocks:
+            dropped = sum(s for _, s in component_sizes[n_blocks:])
+            print(f"[light_sq/regrow]   keeping top {n_blocks}, "
+                  f"dropping {len(component_sizes) - n_blocks} "
+                  f"small blocks ({dropped:,} voxels)")
+
+        prims: List[SuperQuadric] = []
+        for block_idx, (k, sz) in enumerate(kept):
+            if sz < self.min_residual_voxels:
+                continue
+            # Build a LOCAL TSDF for this block: same phi_orig but masked
+            # so other components are treated as outside.
+            local_phi = phi_orig.copy()
+            other_occ = occ & (labels != k)
+            local_phi[other_occ] = +tau  # flag as outside
+            sq = _fit_one(
+                local_phi, coords, tau,
+                n_iters=self.n_iters, lr=self.lr,
+                init_seed=block_idx * 31337 + 1,
+                verbose=False,
+            )
+            if min(sq.ax, sq.ay, sq.az) < self.prune_size_threshold:
+                if verbose:
+                    print(f"[light_sq/regrow]   block {block_idx}: pruned (too small)")
+                continue
+            if max(abs(sq.tx), abs(sq.ty), abs(sq.tz)) > 0.98:
+                if verbose:
+                    print(f"[light_sq/regrow]   block {block_idx}: pruned (escaped cube)")
+                continue
+            prims.append(sq)
+            if verbose:
+                print(f"[light_sq/regrow]   block {block_idx} (sz={sz:,}) -> "
+                      f"a=({sq.ax:.2f},{sq.ay:.2f},{sq.az:.2f}) "
+                      f"t=({sq.tx:+.2f},{sq.ty:+.2f},{sq.tz:+.2f})")
+        timings["block"] = time.time() - t0
+
+        # --- STEP 2: REGROW ---
+        for round_idx in range(regrow_rounds):
+            t0 = time.time()
+            if verbose:
+                print(f"[light_sq/regrow] REGROW round {round_idx+1}/{regrow_rounds} "
+                      f"on {len(prims)} primitives")
+            new_prims: List[SuperQuadric] = []
+            for pi, sq in enumerate(prims):
+                # Build target TSDF: original, with all OTHER prims carved out.
+                phi_target = phi_orig.copy()
+                for pj, other in enumerate(prims):
+                    if pj == pi:
+                        continue
+                    phi_target = _carve(phi_target, coords, other, tau)
+                # Refit this primitive starting from its current parameters.
+                refit = _fit_one(
+                    phi_target, coords, tau,
+                    n_iters=max(30, self.n_iters // 2),
+                    lr=self.lr * 0.5,      # gentler — we're refining
+                    init=sq,               # warm start
+                    verbose=False,
+                )
+                if (min(refit.ax, refit.ay, refit.az) >= self.prune_size_threshold
+                        and max(abs(refit.tx), abs(refit.ty), abs(refit.tz)) <= 0.98):
+                    new_prims.append(refit)
+                else:
+                    # Keep the pre-regrow version if regrow produced a
+                    # degenerate SQ — don't drop the primitive entirely.
+                    new_prims.append(sq)
+            prims = new_prims
+            timings[f"regrow_{round_idx}"] = time.time() - t0
+
+        # --- STEP 3: FILL ---
+        t0 = time.time()
+        # Compute what's left unfitted after all prims carve
+        phi_residual = phi_orig.copy()
+        for sq in prims:
+            phi_residual = _carve(phi_residual, coords, sq, tau)
+        resid_occ = phi_residual < 0
+        labels_r, n_r = ndi_label(resid_occ)
+        if verbose:
+            print(f"[light_sq/regrow] FILL: {n_r} residual components, "
+                  f"{int(resid_occ.sum()):,} voxels")
+        fill_candidates = []
+        for k in range(1, n_r + 1):
+            sz = int((labels_r == k).sum())
+            if sz >= self.min_residual_voxels:
+                fill_candidates.append((k, sz))
+        fill_candidates.sort(key=lambda x: x[1], reverse=True)
+        remaining_budget = max(0, self.max_primitives - len(prims))
+        fill_candidates = fill_candidates[:remaining_budget]
+        for fi, (k, sz) in enumerate(fill_candidates):
+            phi_local = phi_orig.copy()
+            phi_local[~(resid_occ & (labels_r == k))] = +tau
+            sq = _fit_one(
+                phi_local, coords, tau,
+                n_iters=self.n_iters, lr=self.lr,
+                init_seed=(fi + 100) * 31337 + 7,
+                verbose=False,
+            )
+            if min(sq.ax, sq.ay, sq.az) < self.prune_size_threshold:
+                continue
+            if max(abs(sq.tx), abs(sq.ty), abs(sq.tz)) > 0.98:
+                continue
+            prims.append(sq)
+            if verbose:
+                print(f"[light_sq/regrow]   fill {fi} (sz={sz:,}) added")
+        timings["fill"] = time.time() - t0
+
+        timings["total"] = time.time() - t0
+        final_residual = phi_residual  # approximate post-fill residual
+        return LightSQResult(
+            primitives=prims,
+            final_residual_voxels=int((final_residual < 0).sum()),
             n_iterations=len(prims),
             timings=timings,
         )
