@@ -372,38 +372,41 @@ def _patch_laplacian_relax(
     import time
     t0 = time.time()
 
-    # Build vertex adjacency (each vertex -> list of neighbor indices)
-    # Cheap via trimesh.graph.vertex_adjacency_graph but that returns networkx;
-    # use edges_unique for a flat adjacency list.
-    edges = mesh.edges_unique  # (E, 2)
+    # Build a PATCH-LOCAL adjacency: only the 1-ring around patch verts
+    # matters. Full-mesh scatter_add per iteration was O(E) for all E
+    # edges of a 2M-face mesh — way too slow. Here we pre-filter edges
+    # to only those touching a patch vert (which is a tiny fraction).
     V = len(mesh.vertices)
+    patch_mask = np.zeros(V, dtype=bool)
+    patch_mask[patch_vertex_idx] = True
 
-    # Scatter neighbors using CSR-style bucketing
-    neighbor_sums = np.zeros((V, 3), dtype=np.float64)
-    neighbor_counts = np.zeros(V, dtype=np.int64)
-
-    patch_set = np.zeros(V, dtype=bool)
-    patch_set[patch_vertex_idx] = True
+    edges = mesh.edges_unique  # (E, 2)
+    touches_patch = patch_mask[edges].any(axis=1)
+    local_edges = edges[touches_patch]
+    num_local_patch_verts = len(patch_vertex_idx)
+    if verbose:
+        print(
+            f"[surgery] relaxation scope: {len(local_edges):,} / {len(edges):,} edges "
+            f"touching {num_local_patch_verts:,} patch verts"
+        )
 
     verts = mesh.vertices.astype(np.float64).copy()
-    patch_mask_all = patch_set  # alias
 
+    # CSR-style accumulators sized to full mesh but only updated via
+    # local_edges — O(len(local_edges)) per iter
     for i in range(iterations):
-        neighbor_sums[:] = 0
-        neighbor_counts[:] = 0
-        # Each edge contributes to both endpoints
-        np.add.at(neighbor_sums, edges[:, 0], verts[edges[:, 1]])
-        np.add.at(neighbor_sums, edges[:, 1], verts[edges[:, 0]])
-        np.add.at(neighbor_counts, edges[:, 0], 1)
-        np.add.at(neighbor_counts, edges[:, 1], 1)
+        neighbor_sums = np.zeros((V, 3), dtype=np.float64)
+        neighbor_counts = np.zeros(V, dtype=np.int64)
+        np.add.at(neighbor_sums, local_edges[:, 0], verts[local_edges[:, 1]])
+        np.add.at(neighbor_sums, local_edges[:, 1], verts[local_edges[:, 0]])
+        np.add.at(neighbor_counts, local_edges[:, 0], 1)
+        np.add.at(neighbor_counts, local_edges[:, 1], 1)
 
-        # New position only for patch verts
-        counts = np.maximum(neighbor_counts, 1)[:, None]
-        averages = neighbor_sums / counts
-        # Move toward average with step size lamb
-        verts[patch_mask_all] = (
-            (1 - lamb) * verts[patch_mask_all]
-            + lamb * averages[patch_mask_all]
+        # Only touch patch verts' positions
+        counts = np.maximum(neighbor_counts[patch_vertex_idx], 1)[:, None]
+        averages = neighbor_sums[patch_vertex_idx] / counts
+        verts[patch_vertex_idx] = (
+            (1 - lamb) * verts[patch_vertex_idx] + lamb * averages
         )
 
     out = trimesh.Trimesh(
@@ -413,7 +416,7 @@ def _patch_laplacian_relax(
     )
     if verbose:
         print(f"[surgery] patch relaxation: {iterations} iters "
-              f"on {len(patch_vertex_idx):,} verts in {time.time()-t0:.2f}s")
+              f"on {num_local_patch_verts:,} verts in {time.time()-t0:.2f}s")
     return out
 
 
@@ -479,9 +482,18 @@ def fill_hole_smooth(
     mesh: trimesh.Trimesh,
     smooth_iterations: int = 3,
     cumesh_max_perimeter: float = 2.0,
-    subdivide_patch: bool = True,
-    patch_relax_iterations: int = 30,
-    patch_relax_lamb: float = 0.7,
+    # Default subdivide_patch OFF: naive midpoint subdivision on only
+    # the patch faces creates T-junctions along the patch boundary
+    # (adjacent non-patch faces don't get split, so the new midpoint
+    # verts are only partially connected). Relaxation then drags them
+    # in the wrong direction, producing visible spikes at the rim.
+    # Proper implementation would require splitting boundary edges of
+    # neighboring faces too — that's not worth the complexity for
+    # typical patch sizes. Higher iteration count on un-subdivided
+    # patches converges to a clean curved cap.
+    subdivide_patch: bool = False,
+    patch_relax_iterations: int = 100,
+    patch_relax_lamb: float = 0.5,
     verbose: bool = False,
 ) -> trimesh.Trimesh:
     """Fill boundary holes with a cascade and lightly smooth the patches.
