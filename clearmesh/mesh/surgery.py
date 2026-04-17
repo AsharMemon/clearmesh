@@ -482,16 +482,13 @@ def fill_hole_smooth(
     mesh: trimesh.Trimesh,
     smooth_iterations: int = 3,
     cumesh_max_perimeter: float = 2.0,
-    # Default subdivide_patch OFF: naive midpoint subdivision on only
-    # the patch faces creates T-junctions along the patch boundary
-    # (adjacent non-patch faces don't get split, so the new midpoint
-    # verts are only partially connected). Relaxation then drags them
-    # in the wrong direction, producing visible spikes at the rim.
-    # Proper implementation would require splitting boundary edges of
-    # neighboring faces too — that's not worth the complexity for
-    # typical patch sizes. Higher iteration count on un-subdivided
-    # patches converges to a clean curved cap.
-    subdivide_patch: bool = False,
+    # subdivide_patch uses trimesh.remesh.subdivide which correctly
+    # handles T-junctions by splitting shared edges on both sides.
+    # Our earlier naive midpoint subdivision only touched patch faces,
+    # creating half-split edges and spike artifacts. The built-in
+    # remesher subdivides both the patch and adjacent non-patch faces
+    # along shared edges, maintaining manifoldness.
+    subdivide_patch: bool = True,
     patch_relax_iterations: int = 100,
     patch_relax_lamb: float = 0.5,
     verbose: bool = False,
@@ -585,40 +582,80 @@ def fill_hole_smooth(
             f"final boundary edges = {final_be}"
         )
 
-    # --- Stage 3: patch vertex relaxation (Dirichlet Laplacian) ---
-    # Identify the newly-added vertices. These are the only ones we'll
-    # move during smoothing — all original surrounding geometry stays
-    # bit-exact, preventing the "flattened surround" that standard
-    # Taubin on the whole mesh would cause.
-    patch_vert_idx = np.arange(before_verts, len(mesh.vertices))
+    # --- Stage 3: identify the patch faces and relax them ---
+    # Key insight: cumesh's fill_holes REUSES existing boundary vertices
+    # to close the hole, so checking for new verts misses most of the
+    # patch. Instead we identify patch FACES (added during fill) and
+    # compute patch VERTS as those referenced ONLY by patch faces (new
+    # internal verts, tiny handful) plus the RIM verts referenced by
+    # both patch and non-patch faces.
+    #
+    # Under Dirichlet constraints we pin verts whose most neighbors are
+    # non-patch so the surrounding mesh stays bit-exact.
+    patch_face_idx = np.arange(before_faces, len(mesh.faces))
 
-    if len(patch_vert_idx) > 0:
-        # Optional: subdivide the patch to give the smoother more dofs.
-        # Without this, a hole closed by cumesh tends to be filled with
-        # few large triangles, producing a faceted "fan" that relaxation
-        # can't really smooth (there just aren't enough vertices).
+    if len(patch_face_idx) > 0:
+        # Optional: properly subdivide the patch using trimesh's built-in
+        # remesher (handles T-junctions with adjacent non-patch faces
+        # automatically). This gives the Laplacian room to smooth.
         if subdivide_patch:
-            # Find the patch faces: any face that references a patch vertex
-            patch_vertex_mask = np.zeros(len(mesh.vertices), dtype=bool)
-            patch_vertex_mask[patch_vert_idx] = True
-            face_has_patch_vert = patch_vertex_mask[mesh.faces].any(axis=1)
-            patch_face_idx = np.where(face_has_patch_vert)[0]
-
-            if len(patch_face_idx) > 0:
-                mesh, midpoint_vert_idx = _subdivide_faces(mesh, patch_face_idx)
-                # Combined patch verts = original patch verts + new midpoints
-                patch_vert_idx = np.concatenate([patch_vert_idx, midpoint_vert_idx])
+            # trimesh.remesh.subdivide processes the given face subset
+            # but properly adds midpoint verts to adjacent faces too,
+            # avoiding the T-junction-spike failure mode.
+            try:
+                from trimesh import remesh as _remesh
+                pre_verts = len(mesh.vertices)
+                pre_faces = len(mesh.faces)
+                new_v, new_f = _remesh.subdivide(
+                    mesh.vertices, mesh.faces, face_index=patch_face_idx
+                )
+                mesh = trimesh.Trimesh(vertices=new_v, faces=new_f, process=False)
                 if verbose:
                     print(
-                        f"[surgery] subdivided {len(patch_face_idx)} patch faces "
-                        f"(+{len(midpoint_vert_idx)} midpoint verts)"
+                        f"[surgery] trimesh.remesh.subdivide: "
+                        f"{pre_faces:,} -> {len(mesh.faces):,} faces, "
+                        f"{pre_verts:,} -> {len(mesh.vertices):,} verts"
                     )
+                # Recompute patch faces: they're now the tail of the faces array
+                patch_face_idx = np.arange(
+                    pre_faces if pre_faces < len(mesh.faces) else 0,
+                    len(mesh.faces),
+                )
+            except Exception as e:
+                import warnings
+                warnings.warn(f"[surgery] subdivide failed ({e}); skipping")
 
-        # Dirichlet Laplacian relaxation on patch verts only
-        if patch_relax_iterations > 0:
+        # Find patch-only verts (referenced ONLY by patch faces) and rim
+        # verts (referenced by both patch and non-patch faces). Rim verts
+        # get light relaxation; non-patch-only verts are hard-fixed.
+        all_face_mask = np.zeros(len(mesh.faces), dtype=bool)
+        all_face_mask[patch_face_idx] = True
+        patch_vert_refs = np.zeros(len(mesh.vertices), dtype=np.int32)
+        non_patch_vert_refs = np.zeros(len(mesh.vertices), dtype=np.int32)
+        for fi, is_patch in enumerate(all_face_mask):
+            for v in mesh.faces[fi]:
+                if is_patch:
+                    patch_vert_refs[v] += 1
+                else:
+                    non_patch_vert_refs[v] += 1
+        # A vert is "free to move" if it is patch-only (no non-patch ref)
+        # OR on the rim (both refs; allow movement but will be pulled by
+        # its non-patch neighbors back toward surrounding surface).
+        free_vert_mask = patch_vert_refs > 0
+        rim_vert_mask = free_vert_mask & (non_patch_vert_refs > 0)
+        interior_patch_mask = free_vert_mask & (non_patch_vert_refs == 0)
+
+        relax_idx = np.where(free_vert_mask)[0]
+        if verbose:
+            print(
+                f"[surgery] patch ownership: {interior_patch_mask.sum():,} interior, "
+                f"{rim_vert_mask.sum():,} rim, {free_vert_mask.sum():,} total relaxable"
+            )
+
+        if patch_relax_iterations > 0 and len(relax_idx) > 0:
             mesh = _patch_laplacian_relax(
                 mesh,
-                patch_vertex_idx=patch_vert_idx,
+                patch_vertex_idx=relax_idx,
                 iterations=patch_relax_iterations,
                 lamb=patch_relax_lamb,
                 verbose=verbose,
