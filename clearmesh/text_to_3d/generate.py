@@ -2,13 +2,22 @@
 """Text-to-3D Generation — Text → Image → 3D Pipeline.
 
 Two-step approach:
-  1. Text → Image: FLUX.1-schnell (Black Forest Labs), 4-step generation
+  1. Text → Image: Qwen-Image (Alibaba, 2025) — default
   2. Image → 3D: ClearMesh pipeline (TRELLIS.2 + Stage 2 + repair + export)
 
-FLUX.1-schnell is chosen for:
-  - Speed: 4 inference steps (vs 20-50 for SDXL)
-  - Quality: state-of-the-art text-to-image
-  - License: Apache 2.0
+Qwen-Image is the default because:
+  - Strong single-object framing prior (unlike SDXL, which interprets
+    mechanical prompts like "steampunk gearbox" as 2D art collages and
+    produces floating gear sprites — see `docs/research/` for why)
+  - Apache 2.0, not gated (unlike FLUX.1-schnell)
+  - Strong prompt adherence for compositional prompts
+  - Diffusers support via QwenImagePipeline
+
+Other supported models (via ``--model-id`` / ``flux_model_id`` arg):
+  - black-forest-labs/FLUX.1-schnell       Apache 2.0, gated (needs HF_TOKEN)
+  - stabilityai/stable-diffusion-3.5-large SAI community licence
+  - stabilityai/stable-diffusion-xl-base-1.0  legacy, ungated but 2D-biased
+  - PixArt-alpha/PixArt-Sigma-XL-2-1024-MS    Apache 2.0 DiT
 
 Usage:
     from clearmesh.text_to_3d import TextTo3D
@@ -72,52 +81,94 @@ class TextTo3D:
 
     def __init__(
         self,
-        flux_model_id: str = "black-forest-labs/FLUX.1-schnell",
+        model_id: str = "Qwen/Qwen-Image",
         stage2_checkpoint: str | None = None,
         model_dir: str = "/workspace/models",
         device: str | None = None,
         dtype: torch.dtype = torch.bfloat16,
+        flux_model_id: str | None = None,
     ):
         """Initialize TextTo3D.
 
         Args:
-            flux_model_id: HuggingFace model ID for FLUX.1-schnell.
+            model_id: HuggingFace model ID for the text-to-image model.
+                Default ``Qwen/Qwen-Image`` (Apache 2.0, strong single-
+                object prior). Accepts FLUX, SDXL, SD3.5, PixArt-Σ too
+                — auto-detected from the id substring.
             stage2_checkpoint: Path to Stage 2 RefinementDiT checkpoint.
             model_dir: Directory with model weights.
             device: Compute device.
-            dtype: Model dtype (bfloat16 for FLUX).
+            dtype: Model dtype (bfloat16 recommended).
+            flux_model_id: DEPRECATED alias for ``model_id``. Preserved
+                for backward compat with earlier callers.
         """
-        self.flux_model_id = flux_model_id
+        # Back-compat: older callers pass flux_model_id=
+        if flux_model_id is not None:
+            model_id = flux_model_id
+        self.model_id = model_id
+        # Keep the old attribute name for any external code that reads it
+        self.flux_model_id = model_id
         self.stage2_checkpoint = stage2_checkpoint
         self.model_dir = model_dir
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.dtype = dtype
 
         # Lazy-loaded components
-        self._flux_pipeline = None
+        self._t2i_pipeline = None
+        self._flux_pipeline = None  # retained alias (same object)
         self._clearmesh_pipeline = None
 
     @property
-    def flux_pipeline(self):
-        """Lazy-load FLUX.1-schnell pipeline."""
-        if self._flux_pipeline is None:
-            print(f"Loading FLUX.1-schnell from {self.flux_model_id}...")
-            from diffusers import FluxPipeline
+    def t2i_pipeline(self):
+        """Lazy-load the text-to-image pipeline.
 
-            self._flux_pipeline = FluxPipeline.from_pretrained(
-                self.flux_model_id,
-                torch_dtype=self.dtype,
-            )
-            self._flux_pipeline.to(self.device)
+        Selects the right diffusers pipeline class based on ``model_id``:
+          - ``qwen`` in id   -> QwenImagePipeline
+          - ``flux`` in id   -> FluxPipeline (requires HF_TOKEN)
+          - otherwise        -> AutoPipelineForText2Image (SDXL, SD3, PixArt, etc)
+        """
+        if self._t2i_pipeline is None:
+            mid = self.model_id.lower()
+            print(f"Loading text-to-image model: {self.model_id}...")
+            if "qwen" in mid:
+                try:
+                    from diffusers import QwenImagePipeline
+                    pipe = QwenImagePipeline.from_pretrained(
+                        self.model_id, torch_dtype=self.dtype,
+                    )
+                except ImportError:
+                    from diffusers import AutoPipelineForText2Image
+                    pipe = AutoPipelineForText2Image.from_pretrained(
+                        self.model_id, torch_dtype=self.dtype, use_safetensors=True,
+                    )
+            elif "flux" in mid:
+                from diffusers import FluxPipeline
+                pipe = FluxPipeline.from_pretrained(
+                    self.model_id, torch_dtype=self.dtype,
+                )
+            else:
+                from diffusers import AutoPipelineForText2Image
+                pipe = AutoPipelineForText2Image.from_pretrained(
+                    self.model_id, torch_dtype=self.dtype, use_safetensors=True,
+                )
 
-            # Enable memory optimizations
             try:
-                self._flux_pipeline.enable_model_cpu_offload()
+                pipe.enable_model_cpu_offload()
             except Exception:
-                pass  # Not all setups support this
+                pipe.to(self.device)
 
-            print("FLUX.1-schnell loaded.")
-        return self._flux_pipeline
+            pipe._is_qwen = "qwen" in mid
+            pipe._is_flux = "flux" in mid
+            pipe._is_sd3 = "stable-diffusion-3" in mid
+            self._t2i_pipeline = pipe
+            self._flux_pipeline = pipe  # backward-compat alias
+            print(f"Loaded {self.model_id}.")
+        return self._t2i_pipeline
+
+    @property
+    def flux_pipeline(self):
+        """Deprecated alias for ``t2i_pipeline``. Kept for backward compat."""
+        return self.t2i_pipeline
 
     @property
     def clearmesh_pipeline(self):
@@ -135,43 +186,83 @@ class TextTo3D:
     def text_to_image(
         self,
         prompt: str,
-        negative_prompt: str = "",
-        num_inference_steps: int = 4,
-        guidance_scale: float = 0.0,
+        negative_prompt: str | None = None,
+        num_inference_steps: int | None = None,
+        guidance_scale: float | None = None,
         width: int = 1024,
         height: int = 1024,
         seed: int | None = None,
     ) -> Image.Image:
-        """Generate an image from a text prompt using FLUX.1-schnell.
+        """Generate an image from a text prompt.
+
+        Picks sensible steps/CFG per model family if not supplied:
+          - Qwen-Image      : 50 steps, true_cfg_scale=4.0
+          - FLUX.1-schnell  : 4 steps, guidance_scale=0.0 (distilled)
+          - SD3.5           : 28 steps, guidance_scale=7.0
+          - SDXL / PixArt   : 25 steps, guidance_scale=7.0
 
         Args:
             prompt: Text description of the desired image.
-            negative_prompt: What to avoid in the image.
-            num_inference_steps: Diffusion steps (4 for schnell, more for quality).
-            guidance_scale: CFG scale (0.0 for schnell — it's distilled).
-            width: Image width.
-            height: Image height.
+            negative_prompt: What to avoid. Defaults to a 3D-friendly negative.
+                FLUX ignores this.
+            num_inference_steps: Override per-family default.
+            guidance_scale: Override per-family default.
+            width / height: Image dimensions.
             seed: Random seed for reproducibility.
 
         Returns:
             Generated PIL Image.
         """
-        # Enhance prompt for 3D-friendly generation
+        pipe = self.t2i_pipeline
+        is_qwen = getattr(pipe, "_is_qwen", False)
+        is_flux = getattr(pipe, "_is_flux", False)
+        is_sd3 = getattr(pipe, "_is_sd3", False)
+
         enhanced_prompt = self._enhance_prompt(prompt)
+        if negative_prompt is None:
+            negative_prompt = (
+                "collage, grid, multiple objects, duplicates, floating parts, "
+                "montage, side by side, diptych, triptych, text, watermark, blur"
+            )
 
         generator = None
         if seed is not None:
             generator = torch.Generator(device=self.device).manual_seed(seed)
 
-        result = self.flux_pipeline(
-            prompt=enhanced_prompt,
-            negative_prompt=negative_prompt if negative_prompt else None,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-            width=width,
-            height=height,
-            generator=generator,
-        )
+        # Family-specific defaults
+        if is_qwen:
+            steps = num_inference_steps or 50
+            kwargs = dict(true_cfg_scale=guidance_scale or 4.0, num_inference_steps=steps)
+            neg_kwargs = dict(negative_prompt=negative_prompt)
+        elif is_flux:
+            steps = num_inference_steps or 4
+            kwargs = dict(guidance_scale=guidance_scale or 0.0, num_inference_steps=steps)
+            neg_kwargs = {}  # FLUX schnell ignores negative prompts
+        elif is_sd3:
+            steps = num_inference_steps or 28
+            kwargs = dict(guidance_scale=guidance_scale or 7.0, num_inference_steps=steps)
+            neg_kwargs = dict(negative_prompt=negative_prompt)
+        else:
+            steps = num_inference_steps or 25
+            kwargs = dict(guidance_scale=guidance_scale or 7.0, num_inference_steps=steps)
+            neg_kwargs = dict(negative_prompt=negative_prompt)
+
+        try:
+            result = pipe(
+                prompt=enhanced_prompt,
+                width=width, height=height,
+                generator=generator,
+                **neg_kwargs,
+                **kwargs,
+            )
+        except TypeError:
+            # Older pipeline that doesn't accept negative_prompt / true_cfg_scale
+            result = pipe(
+                prompt=enhanced_prompt,
+                width=width, height=height,
+                generator=generator,
+                **kwargs,
+            )
 
         return result.images[0]
 
@@ -207,10 +298,15 @@ class TextTo3D:
         if reference_image is None:
             t0 = time.time()
             print(f"Generating reference image: '{prompt}'")
+            # Let family defaults take over if the call site still passes
+            # the old FLUX-schnell defaults of (image_steps=4, cfg=0.0);
+            # those would cripple Qwen/SD3.
+            _steps = None if (image_steps == 4 and image_guidance_scale == 0.0) else image_steps
+            _cfg = None if (image_steps == 4 and image_guidance_scale == 0.0) else image_guidance_scale
             reference_image = self.text_to_image(
                 prompt=prompt,
-                num_inference_steps=image_steps,
-                guidance_scale=image_guidance_scale,
+                num_inference_steps=_steps,
+                guidance_scale=_cfg,
                 width=image_size[0],
                 height=image_size[1],
                 seed=seed,
@@ -271,8 +367,13 @@ class TextTo3D:
     def _enhance_prompt(self, prompt: str) -> str:
         """Enhance a prompt for better 3D-friendly image generation.
 
-        Adds modifiers that help generate images more suitable for
-        3D reconstruction (centered object, clean background, etc.).
+        Adds modifiers that force single-object framing — critical for
+        TRELLIS.2 reconstruction. Without "single object / full body /
+        isolated subject" in the prompt, some T2I models (especially
+        SDXL) interpret mechanical prompts like "steampunk gearbox"
+        as 2D art-style collages: floating gear sprites on a page,
+        not one coherent 3D object. The collage then gets reconstructed
+        as fragmented half-watertight mesh, which is unusable downstream.
 
         Args:
             prompt: Original text prompt.
@@ -280,18 +381,23 @@ class TextTo3D:
         Returns:
             Enhanced prompt.
         """
-        # Add 3D-friendly modifiers if not already present
-        modifiers = []
         prompt_lower = prompt.lower()
+        modifiers = []
 
-        if "3d" not in prompt_lower and "render" not in prompt_lower:
-            modifiers.append("3D render")
-        if "white background" not in prompt_lower and "background" not in prompt_lower:
-            modifiers.append("white background")
-        if "centered" not in prompt_lower:
-            modifiers.append("centered")
-        if "high detail" not in prompt_lower and "detailed" not in prompt_lower:
-            modifiers.append("highly detailed")
+        if "single" not in prompt_lower and "one " not in prompt_lower:
+            modifiers.append("single object")
+        if "full body" not in prompt_lower and "whole" not in prompt_lower:
+            modifiers.append("full body")
+        if "center" not in prompt_lower:
+            modifiers.append("centered composition")
+        if "product" not in prompt_lower and "3d" not in prompt_lower:
+            modifiers.append("studio product photography")
+        if "background" not in prompt_lower:
+            modifiers.append("plain white background")
+        if "isolated" not in prompt_lower:
+            modifiers.append("one isolated subject only")
+        if "detail" not in prompt_lower:
+            modifiers.append("sharp focus, highly detailed")
 
         if modifiers:
             return f"{prompt}, {', '.join(modifiers)}"
