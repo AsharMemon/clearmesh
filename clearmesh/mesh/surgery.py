@@ -420,6 +420,77 @@ def _patch_laplacian_relax(
     return out
 
 
+def _flatten_patch_onto_rim_plane(
+    mesh: trimesh.Trimesh,
+    rim_idx: np.ndarray,
+    interior_idx: np.ndarray,
+    rim_pull: float = 0.5,
+    verbose: bool = False,
+) -> trimesh.Trimesh:
+    """Fit a best-fit plane through rim verts, project interior patch
+    verts onto that plane, and pull rim verts partway toward it.
+
+    Uses SVD-based least-squares plane fitting (standard technique:
+    centroid = mean of points, normal = smallest eigenvector of the
+    covariance matrix).
+
+    Args:
+        mesh: Trimesh with patch already filled + relaxed.
+        rim_idx: Indices of rim verts (both patch + non-patch refs).
+            Plane is fit to these.
+        interior_idx: Indices of interior patch verts (patch-only).
+            Snapped fully onto the plane.
+        rim_pull: 0.0 keeps rim verts put (may still show spikes),
+                  1.0 snaps rim fully coplanar (cleanest cap but
+                  slightly distorts surrounding mesh where rim
+                  verts are shared).
+    """
+    if len(rim_idx) < 3:
+        return mesh
+
+    verts = mesh.vertices.copy()
+    rim_points = verts[rim_idx].astype(np.float64)
+
+    # Fit plane via PCA: centroid + smallest eigenvector as normal
+    centroid = rim_points.mean(axis=0)
+    centered = rim_points - centroid
+    # Use SVD for numerical stability
+    _, _, vt = np.linalg.svd(centered, full_matrices=False)
+    # Last row of vt is the axis of smallest variance = plane normal
+    normal = vt[-1] / np.linalg.norm(vt[-1])
+
+    # Project a vertex onto the plane: p' = p - ((p - centroid) . normal) * normal
+    def project_to_plane(pts):
+        disp = (pts - centroid) @ normal
+        return pts - disp[:, None] * normal
+
+    # Snap interior verts fully (rim_pull=1 for interior always)
+    if len(interior_idx) > 0:
+        verts[interior_idx] = project_to_plane(
+            verts[interior_idx].astype(np.float64)
+        ).astype(verts.dtype)
+
+    # Pull rim verts partway (lerp with rim_pull)
+    if rim_pull > 0.0:
+        rim_projected = project_to_plane(verts[rim_idx].astype(np.float64))
+        verts[rim_idx] = (
+            (1.0 - rim_pull) * verts[rim_idx]
+            + rim_pull * rim_projected.astype(verts.dtype)
+        )
+
+    if verbose:
+        # Residual = how far rim verts were from the plane (RMS)
+        residuals = np.abs((rim_points - centroid) @ normal)
+        print(
+            f"[surgery] flat-cap plane fit: normal={normal.round(3).tolist()}, "
+            f"rim residual RMS={np.sqrt((residuals**2).mean()):.4f}, "
+            f"max={residuals.max():.4f}; snapped {len(interior_idx)} interior "
+            f"+ pulled {len(rim_idx)} rim verts (rim_pull={rim_pull})"
+        )
+
+    return trimesh.Trimesh(vertices=verts, faces=mesh.faces, process=False)
+
+
 def _subdivide_faces(
     mesh: trimesh.Trimesh,
     face_indices: np.ndarray,
@@ -491,6 +562,12 @@ def fill_hole_smooth(
     subdivide_patch: bool = True,
     patch_relax_iterations: int = 100,
     patch_relax_lamb: float = 0.5,
+    # Flat-cap mode: after relaxation, snap interior patch verts to the
+    # best-fit plane through the rim verts and pull rim verts partway
+    # toward that plane. Eliminates "slight spikes" from non-coplanar
+    # rim vertices that Laplacian relaxation alone can't resolve.
+    flat_cap: bool = True,
+    flat_cap_rim_pull: float = 0.5,  # 0 = rim stays put, 1 = fully coplanar
     verbose: bool = False,
 ) -> trimesh.Trimesh:
     """Fill boundary holes with a cascade and lightly smooth the patches.
@@ -660,6 +737,27 @@ def fill_hole_smooth(
                 lamb=patch_relax_lamb,
                 verbose=verbose,
             )
+
+        # --- Stage 4: flat-plane projection of interior patch ---
+        # After relaxation, the cap can still have "slight spikes" because
+        # rim verts are at slightly different heights (the cut contour
+        # wasn't planar). Fit a best-fit plane through the rim, project
+        # every INTERIOR patch vert onto that plane exactly, and pull
+        # rim verts partway toward it. This produces a flat cap that
+        # smoothly continues from the (still-preserved) surrounding
+        # geometry while eliminating the crown-spike pattern.
+        if flat_cap and len(relax_idx) > 0:
+            rim_idx = np.where(rim_vert_mask)[0]
+            interior_idx = np.where(interior_patch_mask)[0]
+
+            if len(rim_idx) >= 3 and len(interior_idx) > 0:
+                mesh = _flatten_patch_onto_rim_plane(
+                    mesh,
+                    rim_idx=rim_idx,
+                    interior_idx=interior_idx,
+                    rim_pull=flat_cap_rim_pull,
+                    verbose=verbose,
+                )
 
     # Legacy: very light whole-mesh Taubin (kept for backcompat/tuning).
     # Skip by default; the patch relaxation above is strictly better.
