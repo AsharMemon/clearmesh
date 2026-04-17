@@ -346,28 +346,98 @@ def remove_by_bounding_box(
 def fill_hole_smooth(
     mesh: trimesh.Trimesh,
     smooth_iterations: int = 3,
+    cumesh_max_perimeter: float = 2.0,
     verbose: bool = False,
 ) -> trimesh.Trimesh:
-    """Fill boundary holes and lightly smooth the new patches.
+    """Fill boundary holes with a cascade and lightly smooth the patches.
 
-    Uses trimesh's advancing-front hole filler then runs a few Taubin
-    iterations just on the newly-added patch triangles to blend seams.
+    Cascade (each stage runs only if the previous left boundary edges):
+      1. trimesh.fill_holes()  - fast, works on simple small holes.
+      2. cumesh fill_holes     - CUDA-accelerated, handles complex
+                                 multi-loop boundaries and large holes.
+                                 Uses max_hole_perimeter = cumesh_max_perimeter
+                                 (default 2.0 = HUGE, closes almost anything).
+      3. Light Taubin smoothing - blends patch seams, only if we added
+                                  geometry (preserves original surface).
     """
     import time
-    t0 = time.time()
 
-    # Trimesh's fill_holes modifies in place
+    def boundary_edge_count(m: trimesh.Trimesh) -> int:
+        try:
+            from trimesh.grouping import group_rows
+            return int(len(group_rows(np.sort(m.edges, axis=1), require_count=1)))
+        except Exception:
+            return -1
+
+    t_total = time.time()
     mesh = mesh.copy()
     before_faces = len(mesh.faces)
-    mesh.fill_holes()
-    new_faces = len(mesh.faces) - before_faces
 
+    # --- Stage 1: trimesh.fill_holes (fast path) ---
+    try:
+        mesh.fill_holes()
+    except Exception as e:
+        if verbose:
+            print(f"[surgery] trimesh.fill_holes raised {e}; continuing")
+    stage1_faces = len(mesh.faces) - before_faces
+    be1 = boundary_edge_count(mesh)
     if verbose:
-        print(f"[surgery] added {new_faces} fill-hole triangles")
+        print(f"[surgery] stage 1 trimesh.fill_holes: +{stage1_faces} faces, {be1} residual boundary edges")
 
-    if smooth_iterations > 0 and new_faces > 0:
+    # --- Stage 2: cumesh aggressive fill (CUDA) for any remaining loops ---
+    before_stage2_faces = len(mesh.faces)
+    if be1 > 0:
         try:
-            # Light Taubin only — don't over-smooth the surrounding mesh
+            import cumesh  # type: ignore
+            import torch  # type: ignore
+            if torch.cuda.is_available():
+                t0 = time.time()
+                v = torch.tensor(np.asarray(mesh.vertices), dtype=torch.float32, device="cuda")
+                f = torch.tensor(np.asarray(mesh.faces), dtype=torch.int32, device="cuda")
+                cm = cumesh.CuMesh()
+                cm.init(v, f)
+                cm.get_edges()
+                cm.get_boundary_info()
+                if cm.num_boundaries > 0:
+                    cm.get_vertex_edge_adjacency()
+                    cm.get_vertex_boundary_adjacency()
+                    cm.get_manifold_boundary_adjacency()
+                    cm.read_manifold_boundary_adjacency()
+                    cm.get_boundary_connected_components()
+                    cm.get_boundary_loops()
+                    if cm.num_boundary_loops > 0:
+                        cm.fill_holes(max_hole_perimeter=cumesh_max_perimeter)
+                        nv, nf = cm.read()
+                        mesh = trimesh.Trimesh(
+                            vertices=nv.cpu().numpy(),
+                            faces=nf.cpu().numpy(),
+                            process=False,
+                        )
+                        if verbose:
+                            print(
+                                f"[surgery] stage 2 cumesh.fill_holes("
+                                f"max_perimeter={cumesh_max_perimeter}): "
+                                f"+{len(mesh.faces) - before_stage2_faces} faces "
+                                f"in {time.time() - t0:.2f}s"
+                            )
+        except ImportError:
+            if verbose:
+                print("[surgery] cumesh unavailable; skipping stage 2")
+        except Exception as e:
+            import warnings
+            warnings.warn(f"[surgery] cumesh fill failed ({e}); stage 2 skipped")
+
+    total_new_faces = len(mesh.faces) - before_faces
+    final_be = boundary_edge_count(mesh)
+    if verbose:
+        print(
+            f"[surgery] total added {total_new_faces} patch faces, "
+            f"final boundary edges = {final_be}"
+        )
+
+    # --- Stage 3: patch-only Taubin smoothing ---
+    if smooth_iterations > 0 and total_new_faces > 0:
+        try:
             trimesh.smoothing.filter_taubin(
                 mesh,
                 lamb=0.3,
@@ -379,7 +449,7 @@ def fill_hole_smooth(
             warnings.warn(f"[surgery] patch smoothing failed ({e}); leaving rough fill")
 
     if verbose:
-        print(f"[surgery] fill_hole_smooth done in {time.time()-t0:.2f}s")
+        print(f"[surgery] fill_hole_smooth done in {time.time() - t_total:.2f}s")
     return mesh
 
 
