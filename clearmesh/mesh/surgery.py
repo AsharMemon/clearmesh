@@ -343,10 +343,145 @@ def remove_by_bounding_box(
     return cut_mesh
 
 
+def _patch_laplacian_relax(
+    mesh: trimesh.Trimesh,
+    patch_vertex_idx: np.ndarray,
+    iterations: int = 20,
+    lamb: float = 0.7,
+    verbose: bool = False,
+) -> trimesh.Trimesh:
+    """Dirichlet-boundary Laplacian smoothing: move ONLY the listed
+    vertices toward the average of their neighbors while all other
+    vertices stay fixed.
+
+    This is the canonical way to relax a newly-added patch into the
+    surrounding mesh smoothly without perturbing the original geometry.
+
+    Args:
+        mesh: Trimesh with the patch already added.
+        patch_vertex_idx: Indices of vertices that are FREE to move
+            (everything else is a hard constraint).
+        iterations: Smoothing passes. 10-30 is a good range.
+        lamb: Step size per iteration (0 < lamb <= 1). 0.7 converges
+            fast without oscillating on well-shaped patches.
+        verbose: Print stats.
+    """
+    if len(patch_vertex_idx) == 0:
+        return mesh
+
+    import time
+    t0 = time.time()
+
+    # Build vertex adjacency (each vertex -> list of neighbor indices)
+    # Cheap via trimesh.graph.vertex_adjacency_graph but that returns networkx;
+    # use edges_unique for a flat adjacency list.
+    edges = mesh.edges_unique  # (E, 2)
+    V = len(mesh.vertices)
+
+    # Scatter neighbors using CSR-style bucketing
+    neighbor_sums = np.zeros((V, 3), dtype=np.float64)
+    neighbor_counts = np.zeros(V, dtype=np.int64)
+
+    patch_set = np.zeros(V, dtype=bool)
+    patch_set[patch_vertex_idx] = True
+
+    verts = mesh.vertices.astype(np.float64).copy()
+    patch_mask_all = patch_set  # alias
+
+    for i in range(iterations):
+        neighbor_sums[:] = 0
+        neighbor_counts[:] = 0
+        # Each edge contributes to both endpoints
+        np.add.at(neighbor_sums, edges[:, 0], verts[edges[:, 1]])
+        np.add.at(neighbor_sums, edges[:, 1], verts[edges[:, 0]])
+        np.add.at(neighbor_counts, edges[:, 0], 1)
+        np.add.at(neighbor_counts, edges[:, 1], 1)
+
+        # New position only for patch verts
+        counts = np.maximum(neighbor_counts, 1)[:, None]
+        averages = neighbor_sums / counts
+        # Move toward average with step size lamb
+        verts[patch_mask_all] = (
+            (1 - lamb) * verts[patch_mask_all]
+            + lamb * averages[patch_mask_all]
+        )
+
+    out = trimesh.Trimesh(
+        vertices=verts.astype(np.float32),
+        faces=mesh.faces,
+        process=False,
+    )
+    if verbose:
+        print(f"[surgery] patch relaxation: {iterations} iters "
+              f"on {len(patch_vertex_idx):,} verts in {time.time()-t0:.2f}s")
+    return out
+
+
+def _subdivide_faces(
+    mesh: trimesh.Trimesh,
+    face_indices: np.ndarray,
+) -> tuple[trimesh.Trimesh, np.ndarray]:
+    """1-level midpoint subdivide of specific faces.
+
+    Each triangle becomes 4 smaller triangles. Returns the new mesh
+    and the indices of the NEW vertices (which will be the patch
+    interior we can relax).
+    """
+    if len(face_indices) == 0:
+        return mesh, np.array([], dtype=np.int64)
+
+    V = mesh.vertices
+    F = mesh.faces
+    # Identify edges that need splitting
+    tri_faces = F[face_indices]  # (Nsub, 3)
+    edge_pairs = np.vstack([
+        tri_faces[:, [0, 1]],
+        tri_faces[:, [1, 2]],
+        tri_faces[:, [2, 0]],
+    ])
+    edge_pairs_sorted = np.sort(edge_pairs, axis=1)
+    unique_edges, inverse = np.unique(edge_pairs_sorted, axis=0, return_inverse=True)
+
+    # New midpoint vertices
+    midpoints = (V[unique_edges[:, 0]] + V[unique_edges[:, 1]]) / 2.0
+    new_verts = np.vstack([V, midpoints])
+    mid_offset = len(V)
+
+    # For each subdivided face, create 4 new triangles
+    num_sub_faces = len(tri_faces)
+    mid01 = mid_offset + inverse[:num_sub_faces]
+    mid12 = mid_offset + inverse[num_sub_faces:2*num_sub_faces]
+    mid20 = mid_offset + inverse[2*num_sub_faces:]
+
+    new_sub_faces = np.stack([
+        np.stack([tri_faces[:, 0], mid01, mid20], axis=1),
+        np.stack([tri_faces[:, 1], mid12, mid01], axis=1),
+        np.stack([tri_faces[:, 2], mid20, mid12], axis=1),
+        np.stack([mid01, mid12, mid20], axis=1),
+    ], axis=0).reshape(-1, 3)
+
+    # Keep non-subdivided faces as-is
+    keep_mask = np.ones(len(F), dtype=bool)
+    keep_mask[face_indices] = False
+    final_faces = np.vstack([F[keep_mask], new_sub_faces])
+
+    new_mesh = trimesh.Trimesh(
+        vertices=new_verts,
+        faces=final_faces,
+        process=False,
+    )
+    # Indices of newly-added midpoint vertices
+    new_vert_idx = np.arange(mid_offset, len(new_verts))
+    return new_mesh, new_vert_idx
+
+
 def fill_hole_smooth(
     mesh: trimesh.Trimesh,
     smooth_iterations: int = 3,
     cumesh_max_perimeter: float = 2.0,
+    subdivide_patch: bool = True,
+    patch_relax_iterations: int = 30,
+    patch_relax_lamb: float = 0.7,
     verbose: bool = False,
 ) -> trimesh.Trimesh:
     """Fill boundary holes with a cascade and lightly smooth the patches.
@@ -372,6 +507,7 @@ def fill_hole_smooth(
     t_total = time.time()
     mesh = mesh.copy()
     before_faces = len(mesh.faces)
+    before_verts = len(mesh.vertices)
 
     # --- Stage 1: trimesh.fill_holes (fast path) ---
     try:
@@ -428,15 +564,58 @@ def fill_hole_smooth(
             warnings.warn(f"[surgery] cumesh fill failed ({e}); stage 2 skipped")
 
     total_new_faces = len(mesh.faces) - before_faces
+    total_new_verts = len(mesh.vertices) - before_verts
     final_be = boundary_edge_count(mesh)
     if verbose:
         print(
-            f"[surgery] total added {total_new_faces} patch faces, "
+            f"[surgery] total added {total_new_faces} patch faces "
+            f"+ {total_new_verts} patch verts, "
             f"final boundary edges = {final_be}"
         )
 
-    # --- Stage 3: patch-only Taubin smoothing ---
-    if smooth_iterations > 0 and total_new_faces > 0:
+    # --- Stage 3: patch vertex relaxation (Dirichlet Laplacian) ---
+    # Identify the newly-added vertices. These are the only ones we'll
+    # move during smoothing — all original surrounding geometry stays
+    # bit-exact, preventing the "flattened surround" that standard
+    # Taubin on the whole mesh would cause.
+    patch_vert_idx = np.arange(before_verts, len(mesh.vertices))
+
+    if len(patch_vert_idx) > 0:
+        # Optional: subdivide the patch to give the smoother more dofs.
+        # Without this, a hole closed by cumesh tends to be filled with
+        # few large triangles, producing a faceted "fan" that relaxation
+        # can't really smooth (there just aren't enough vertices).
+        if subdivide_patch:
+            # Find the patch faces: any face that references a patch vertex
+            patch_vertex_mask = np.zeros(len(mesh.vertices), dtype=bool)
+            patch_vertex_mask[patch_vert_idx] = True
+            face_has_patch_vert = patch_vertex_mask[mesh.faces].any(axis=1)
+            patch_face_idx = np.where(face_has_patch_vert)[0]
+
+            if len(patch_face_idx) > 0:
+                mesh, midpoint_vert_idx = _subdivide_faces(mesh, patch_face_idx)
+                # Combined patch verts = original patch verts + new midpoints
+                patch_vert_idx = np.concatenate([patch_vert_idx, midpoint_vert_idx])
+                if verbose:
+                    print(
+                        f"[surgery] subdivided {len(patch_face_idx)} patch faces "
+                        f"(+{len(midpoint_vert_idx)} midpoint verts)"
+                    )
+
+        # Dirichlet Laplacian relaxation on patch verts only
+        if patch_relax_iterations > 0:
+            mesh = _patch_laplacian_relax(
+                mesh,
+                patch_vertex_idx=patch_vert_idx,
+                iterations=patch_relax_iterations,
+                lamb=patch_relax_lamb,
+                verbose=verbose,
+            )
+
+    # Legacy: very light whole-mesh Taubin (kept for backcompat/tuning).
+    # Skip by default; the patch relaxation above is strictly better.
+    if smooth_iterations > 0 and total_new_faces > 0 and len(patch_vert_idx) == 0:
+        # Only runs if we couldn't track patch verts (defensive path)
         try:
             trimesh.smoothing.filter_taubin(
                 mesh,
@@ -446,7 +625,7 @@ def fill_hole_smooth(
             )
         except Exception as e:
             import warnings
-            warnings.warn(f"[surgery] patch smoothing failed ({e}); leaving rough fill")
+            warnings.warn(f"[surgery] Taubin fallback failed ({e})")
 
     if verbose:
         print(f"[surgery] fill_hole_smooth done in {time.time() - t_total:.2f}s")
