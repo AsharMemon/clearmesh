@@ -663,8 +663,8 @@ def fill_hole_smooth(
 
     # Legacy: very light whole-mesh Taubin (kept for backcompat/tuning).
     # Skip by default; the patch relaxation above is strictly better.
-    if smooth_iterations > 0 and total_new_faces > 0 and len(patch_vert_idx) == 0:
-        # Only runs if we couldn't track patch verts (defensive path)
+    if smooth_iterations > 0 and total_new_faces > 0 and len(patch_face_idx) == 0:
+        # Only runs if we couldn't track patch faces (defensive path)
         try:
             trimesh.smoothing.filter_taubin(
                 mesh,
