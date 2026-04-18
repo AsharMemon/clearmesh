@@ -179,6 +179,104 @@ def prune(
     return n_killed
 
 
+def _theta_min_curriculum(config: DualPrimConfig, iteration: int) -> float:
+    """θ-curriculum schedule.
+
+    Returns the EFFECTIVE theta_min for the current training step,
+    linearly annealing from config.theta_curriculum_start down to
+    config.theta_min over the first config.theta_curriculum_fraction
+    of training, then holding at config.theta_min.
+    """
+    tot = max(config.num_iterations, 1)
+    frac = iteration / tot
+    stop = config.theta_curriculum_fraction
+    if frac >= stop:
+        return config.theta_min
+    alpha = frac / max(stop, 1e-9)
+    return (1.0 - alpha) * config.theta_curriculum_start + alpha * config.theta_min
+
+
+def _dp_diagnostics(
+    scene: DualPrimScene,
+    ray_sampler: Optional["RaySampler"] = None,
+    n_probe: int = 1024,
+    theta_min_eff: float = 0.01,
+    mu: float = 0.0,
+) -> dict:
+    """Diagnostics to catch P_E-gate collapse and NSQ inactivity.
+
+    Without these, failure modes like "NSQ drifted out of PSQ" only
+    show up via post-hoc parameter dumps. Everything here runs under
+    ``torch.no_grad`` and is cheap.
+
+    Returns (all scalars or lists of floats):
+      theta_p10/50/90       percentiles of θ across alive primitives
+      nsq_overlap_pct       % of alive primitives whose NSQ AABB
+                            overlaps its PSQ AABB (cheap proxy for
+                            "P_E can be nonzero for this primitive")
+      pe_mean_fg            mean P_E at foreground probe-ray samples
+                            (populated only if ray_sampler provided
+                            and it returns mask_gt > 0 rays)
+    """
+    with torch.no_grad():
+        out: dict = {}
+        alive = scene.alive
+        alive_idx = alive.nonzero(as_tuple=True)[0]
+        if len(alive_idx) == 0:
+            return {"alive": 0}
+
+        theta_alive = scene.theta()[alive_idx].float()
+        out["theta_p10"] = theta_alive.quantile(0.1).item()
+        out["theta_p50"] = theta_alive.quantile(0.5).item()
+        out["theta_p90"] = theta_alive.quantile(0.9).item()
+
+        psq_t = scene.psq_translation()[alive_idx]
+        psq_s = scene.psq_scale()[alive_idx]
+        nsq_t = scene.nsq_translation()[alive_idx]
+        nsq_s = scene.nsq_scale()[alive_idx]
+        # Axis-aligned bounding boxes ignore rotation, but give a fast
+        # and sufficient necessary-condition for "primitives might
+        # overlap somewhere" (no overlap here ⇒ definitely no P_E > 0).
+        psq_lo, psq_hi = psq_t - psq_s, psq_t + psq_s
+        nsq_lo, nsq_hi = nsq_t - nsq_s, nsq_t + nsq_s
+        aabb_overlap = torch.all(
+            (psq_lo <= nsq_hi) & (psq_hi >= nsq_lo), dim=-1,
+        )
+        out["nsq_overlap_pct"] = float(aabb_overlap.float().mean().item() * 100)
+
+        # Optional: mean P_E at foreground probe rays. Requires a
+        # ray_sampler that returns mask_gt so we can filter to fg.
+        if ray_sampler is not None:
+            from clearmesh.dualprim.renderer import sample_ray_points
+            from clearmesh.dualprim.superquadric import (
+                sq_implicit, effectiveness_probability,
+            )
+            batch = ray_sampler(n_probe)
+            fg = batch.mask_gt > 0.5
+            if int(fg.sum()) > 32:
+                o = batch.origins[fg]
+                d = batch.dirs[fg]
+                pts, _, _ = sample_ray_points(
+                    o, d, near=0.1, far=4.0, N=16,
+                    perturb=False, device=scene.params.device,
+                )
+                f_psq = sq_implicit(
+                    pts, scene.psq_translation(), scene.psq_rotation(),
+                    scene.psq_scale(), scene.psq_shape(),
+                )
+                f_nsq = sq_implicit(
+                    pts, scene.nsq_translation(), scene.nsq_rotation(),
+                    scene.nsq_scale(), scene.nsq_shape(),
+                )
+                p_e = effectiveness_probability(
+                    f_psq, f_nsq, scene.theta(),
+                    mu=mu, theta_min=theta_min_eff,
+                )
+                out["pe_mean_fg"] = float(p_e.mean().item())
+                out["pe_max_fg"] = float(p_e.max().item())
+        return out
+
+
 def prune_view_dependent(
     scene: DualPrimScene,
     ray_sampler: "RaySampler",
@@ -366,6 +464,12 @@ def train(
     for it in range(config.num_iterations):
         batch = ray_sampler(rays_per_batch)
 
+        # θ curriculum — broad gate early, sharper as training progresses.
+        # Review feedback: without this, θ collapses to its floor on
+        # every primitive and the P_E gate becomes razor-thin, so NSQs
+        # that drift outside their PSQs never find their way back.
+        theta_min_eff = _theta_min_curriculum(config, it)
+
         t0 = time.time()
         render = render_rays(
             scene,
@@ -374,7 +478,7 @@ def train(
             near=config.near_plane,
             far=config.far_plane,
             mu=config.mu_gate_offset,
-            theta_min=config.theta_min,
+            theta_min=theta_min_eff,
             background=config.background_color,
         )
         timings["render"] += time.time() - t0
@@ -440,6 +544,17 @@ def train(
         if it % config.log_interval == 0:
             parts["iter"] = it
             parts["alive"] = scene.num_alive
+            parts["theta_min_eff"] = theta_min_eff
+            # Cheap diagnostics at every log step; expensive P_E probe
+            # only every 4th log step.
+            probe_this_step = (it % (config.log_interval * 4) == 0)
+            diag = _dp_diagnostics(
+                scene,
+                ray_sampler=ray_sampler if probe_this_step else None,
+                theta_min_eff=theta_min_eff,
+                mu=config.mu_gate_offset,
+            )
+            parts.update(diag)
             loss_history.append(parts)
             if log_fn is not None:
                 log_fn(it, parts)
@@ -498,6 +613,8 @@ def train_mesh_fit(
         qp = query_points[idx]
         tg = target_sdf[idx]
 
+        theta_min_eff = _theta_min_curriculum(config, it)
+
         t0 = time.time()
         loss, parts = total_loss_tsdf(
             scene, qp, tg,
@@ -505,7 +622,7 @@ def train_mesh_fit(
             lambda_entropy=config.lambda_entropy,
             lambda_max=config.lambda_max,
             mu=config.mu_gate_offset,
-            theta_min=config.theta_min,
+            theta_min=theta_min_eff,
         )
         timings["loss"] += time.time() - t0
 
@@ -538,6 +655,13 @@ def train_mesh_fit(
         if it % config.log_interval == 0:
             parts["iter"] = it
             parts["alive"] = scene.num_alive
+            parts["theta_min_eff"] = theta_min_eff
+            diag = _dp_diagnostics(
+                scene, ray_sampler=None,
+                theta_min_eff=theta_min_eff,
+                mu=config.mu_gate_offset,
+            )
+            parts.update(diag)
             loss_history.append(parts)
             if log_fn is not None:
                 log_fn(it, parts)

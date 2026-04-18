@@ -51,6 +51,17 @@ class DualPrimConfig:
     mu_gate_offset: float = 0.0    # NOT SPECIFIED IN PAPER
     theta_min: float = 0.01         # floor on per-primitive θ to avoid div-by-zero
 
+    # θ curriculum — a review-driven fix for the P_E-gate collapse mode
+    # observed on the hole canary. Without this, θ drifts to its floor
+    # on every primitive, the gate becomes razor-sharp, and NSQs that
+    # drift outside their PSQs have no gradient pull back in.
+    #
+    # Schedule: effective theta_min starts at theta_curriculum_start and
+    # anneals LINEARLY to config.theta_min over the first
+    # theta_curriculum_fraction of training.
+    theta_curriculum_start: float = 0.2
+    theta_curriculum_fraction: float = 0.5    # first half of training
+
     # ================================================================
     # Volumetric rendering (§3.2 Renderer, Eq 1, 7-11)
     # Same formulation as NeuS.

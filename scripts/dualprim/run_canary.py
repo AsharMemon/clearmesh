@@ -152,9 +152,23 @@ def main():
     else:
         def log_fn(it, parts):
             log_rows.append(parts)
-            print(f"[canary] it={it:6d} total={parts['total']:.4f} "
-                  f"rgb={parts['rgb']:.3f} mask={parts['mask']:.3f} "
-                  f"norm={parts['norm']:.3f} alive={parts['alive']}")
+            # Core loss + prune health
+            line = (
+                f"[canary] it={it:6d} total={parts['total']:.4f} "
+                f"rgb={parts['rgb']:.3f} mask={parts['mask']:.3f} "
+                f"norm={parts['norm']:.3f} alive={parts['alive']}"
+            )
+            # NSQ-health diagnostics (added in review round 3)
+            if "theta_p50" in parts:
+                line += (f"  θ[{parts['theta_p10']:.2f}/{parts['theta_p50']:.2f}/"
+                         f"{parts['theta_p90']:.2f}]")
+            if "theta_min_eff" in parts:
+                line += f" θ_min_eff={parts['theta_min_eff']:.2f}"
+            if "nsq_overlap_pct" in parts:
+                line += f" NSQ∩PSQ={parts['nsq_overlap_pct']:.0f}%"
+            if "pe_mean_fg" in parts:
+                line += f" P_E_fg={parts['pe_mean_fg']:.3f}/{parts['pe_max_fg']:.2f}"
+            print(line)
             with open(log_path, "w") as f:
                 json.dump(log_rows, f, indent=2)
 
