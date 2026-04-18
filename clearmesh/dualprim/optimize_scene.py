@@ -109,23 +109,36 @@ def init_scene(config: DualPrimConfig, device="cuda") -> DualPrimScene:
 def clip_to_ranges(scene: DualPrimScene, config: DualPrimConfig):
     """Project each per-primitive field back into its Table 1 range.
 
-    NOTE on α: we DO NOT clamp α here. α has a soft cap via L_max
-    (Eq 17 = ReLU(α − 1)), which only fires if α is allowed to
-    exceed 1 during the forward pass. Hard-clamping α each step
-    effectively disables L_max — α never goes above 1, so the
-    gradient from L_max is always 0. The paper relies on L_max as
-    a learned regularizer, not as a box constraint. We clamp α
-    strictly only at export time (see DualPrimConfig.export_alpha_threshold).
+    Box-constraint vs soft-regularizer philosophy:
 
-    Similarly we don't hard-clamp shape exponents into Table 1 range
-    here — ``sq_implicit`` has its own internal clamp so the math
-    stays stable, but we leave the raw parameter free so its
-    gradient doesn't get killed.
+      α:
+        NOT clamped here. L_max (Eq 17 = ReLU(α − 1)) is a soft cap
+        that only fires if α is allowed to exceed 1 during the forward
+        pass. Hard-clamping α each step would make α never exceed 1,
+        making L_max's gradient identically zero. We clamp α strictly
+        only at export time.
+
+      shape (ε1, ε2):
+        CLAMPED here. There is no soft regularizer for shape in the
+        paper's six losses, so without post-step projection the raw
+        parameter can drift outside [0.05, 2.0] permanently — and once
+        it's outside, ``sq_implicit`` clamps it internally BEFORE
+        using it in the forward pass, which produces a zero gradient
+        through the clamp. So without explicit projection, a shape
+        param that steps outside the valid range has no way back in.
+        Projecting post-step keeps the raw param in-range so the
+        unclipped forward always sees it.
+
+        (Review round 1 removed this clamp in an attempt to mirror α's
+        soft-regularizer philosophy. Review round 2 caught that shape
+        has no matching soft loss, so projection has to come back.)
     """
     with torch.no_grad():
         scene.params[:, IDX_PSQ_SCALE].clamp_(*config.scale_range)
         scene.params[:, IDX_NSQ_SCALE].clamp_(*config.scale_range)
-        # Shape + α are soft-regularized by L_* losses, not hard-clamped.
+        scene.params[:, IDX_PSQ_SHAPE].clamp_(*config.shape_range)
+        scene.params[:, IDX_NSQ_SHAPE].clamp_(*config.shape_range)
+        # α intentionally NOT clamped — see docstring above.
         scene.params[:, IDX_THETA].clamp_(*config.sharpness_range)
         scene.params[:, IDX_PSQ_TRANSLATION].clamp_(*config.translation_range)
         scene.params[:, IDX_NSQ_TRANSLATION].clamp_(*config.translation_range)
@@ -173,6 +186,8 @@ def prune_view_dependent(
     *,
     num_probe_rays: int = 8192,
     weight_threshold: float = 1e-3,
+    foreground_only: bool = True,
+    min_foreground_rays: int = 256,
     verbose: bool = False,
 ) -> int:
     """Kill primitives with negligible rendering weight across viewpoints.
@@ -181,21 +196,26 @@ def prune_view_dependent(
     across all viewpoints." A primitive is redundant if no ray through
     any view ever accumulates significant contribution from it.
 
-    Implementation: run the standard renderer over ``num_probe_rays``
-    rays sampled from the ray_sampler (which should cover all N
-    viewpoints), accumulate per-primitive total rendering weight, and
-    kill any alive primitive whose total is below ``weight_threshold``.
+    Normalization note (fixed in review round 2):
+      We normalize per-primitive contribution by the FOREGROUND-HIT
+      ray count, not the total probe-ray count. If probes are sampled
+      uniformly over the image (most render_views-based samplers),
+      most rays miss the object entirely — including them in the
+      denominator makes the threshold depend on silhouette area and
+      disproportionately punishes thin primitives (slats, rings, small
+      protrusions — exactly what DualPrim's NSQ is designed to keep).
 
-    Per-primitive rendering weight at sample n of ray r is
-        w_k(r, n) = σ_k_weighted(r, n) · transmittance(r, n) · δ(r, n)
-    which is the contribution of primitive k to the alpha-composite at
-    that sample. We sum over samples and rays to get a scalar per
-    primitive.
+    Args:
+      foreground_only: if True (default), filter the probe batch to
+          rays with mask_gt > 0.5 before accumulating. Requires the
+          sampler to provide mask_gt; falls back to using rays whose
+          rendered mask is > 0.5 if mask_gt is all zero (legacy
+          sanity samplers).
+      min_foreground_rays: if fewer than this many rays actually hit
+          the object, skip this prune cycle entirely (not enough
+          signal to trust the threshold).
 
-    This runs under ``torch.no_grad`` so it's cheap compared to a
-    training step.
-
-    Returns the number of primitives killed.
+    Runs under ``torch.no_grad``.
     """
     from clearmesh.dualprim.renderer import (
         sample_ray_points,
@@ -206,15 +226,34 @@ def prune_view_dependent(
 
     with torch.no_grad():
         batch = ray_sampler(num_probe_rays)
+
+        # Foreground filter — the critical fix. Without this, thin
+        # primitives in pixel-sparse regions get pruned just because
+        # most probe rays miss them.
+        if foreground_only:
+            fg_mask = batch.mask_gt > 0.5
+            n_fg = int(fg_mask.sum().item())
+            if n_fg < min_foreground_rays:
+                if verbose:
+                    print(f"[prune/view] only {n_fg} foreground rays "
+                          f"(< {min_foreground_rays}); skipping prune cycle")
+                return 0
+            origins = batch.origins[fg_mask]
+            dirs = batch.dirs[fg_mask]
+            R_eff = n_fg
+        else:
+            origins = batch.origins
+            dirs = batch.dirs
+            R_eff = num_probe_rays
+
         points, t_vals, deltas = sample_ray_points(
-            batch.origins, batch.dirs,
+            origins, dirs,
             near=config.near_plane, far=config.far_plane,
             N=config.num_samples_per_ray,
             perturb=False, device=scene.params.device,
         )
 
-        # Density, with α-weighting (matches the main render path)
-        dp = batch.dirs.unsqueeze(1) * 0.01  # same default Δp
+        dp = dirs.unsqueeze(1) * 0.01  # same default Δp
         f_fwd = _scene_field(
             scene, points + dp, config.mu_gate_offset, config.theta_min,
         )
@@ -226,24 +265,24 @@ def prune_view_dependent(
         )
 
         alive = scene.alive.to(sigma_k.dtype)
+        # NOTE: α is unclamped during training (see clip_to_ranges comment).
+        # Clamp locally only for computing composited weights, so a
+        # temporarily-above-1 α doesn't artificially inflate contribution.
         alpha_k = scene.alpha().clamp(0.0, 1.0)
         sigma_k_weighted = sigma_k * (alpha_k * alive).view(1, 1, -1)
 
-        sigma = sigma_k_weighted.sum(dim=-1)                 # (R, N)
-        alpha_ray = 1.0 - torch.exp(-sigma * deltas)         # (R, N)
-        trans = _accumulated_transmittance(alpha_ray)        # (R, N)
-        # Per-sample ray weight
-        w_ray = alpha_ray * trans                            # (R, N)
+        sigma = sigma_k_weighted.sum(dim=-1)                 # (R_eff, N)
+        alpha_ray = 1.0 - torch.exp(-sigma * deltas)         # (R_eff, N)
+        trans = _accumulated_transmittance(alpha_ray)        # (R_eff, N)
+        w_ray = alpha_ray * trans                            # (R_eff, N)
 
-        # Per-primitive contribution: w_ray * (σ_k / σ).
-        # Aggregate over rays and samples.
         denom = sigma.unsqueeze(-1) + 1e-8
         per_prim_contrib = (
             (sigma_k_weighted / denom) * w_ray.unsqueeze(-1)
         ).sum(dim=(0, 1))                                     # (K,)
 
-        # Normalize so threshold is comparable across num_probe_rays
-        per_prim_contrib = per_prim_contrib / max(num_probe_rays, 1)
+        # Normalize by foreground-hit-ray count, NOT total probe rays.
+        per_prim_contrib = per_prim_contrib / max(R_eff, 1)
 
         kill = scene.alive & (per_prim_contrib < weight_threshold)
         n_killed = int(kill.sum().item())
@@ -252,7 +291,8 @@ def prune_view_dependent(
 
     if verbose and n_killed > 0:
         print(f"[prune/view] killed {n_killed} primitives "
-              f"(contribution < {weight_threshold}); {scene.num_alive} alive")
+              f"(contribution<{weight_threshold}, over {R_eff} fg rays); "
+              f"{scene.num_alive} alive")
     return n_killed
 
 

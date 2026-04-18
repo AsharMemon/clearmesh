@@ -98,6 +98,7 @@ def loss_tsdf(
     mu: float = 0.0,
     theta_min: float = 0.01,
     truncation: float = 0.1,
+    beta: float = 8.0,
 ) -> torch.Tensor:
     """Clamped-L1 between combined dual-primitive field and a target SDF.
 
@@ -106,32 +107,58 @@ def loss_tsdf(
     mesh2sdf on the ground-truth mesh). Both are clamped to
     [-truncation, +truncation] before taking the difference.
 
-    This supervises the implicit directly — no volumetric rendering
-    required. It's NOT paper-parity; it's for the debug mesh_fit mode.
+    Aggregation across primitives (updated in review round 2):
+
+      scene SDF at p = α-weighted smooth-min of per-primitive SDFs
+
+    In weighted-LogSumExp form:
+
+      softmin_α(f_k) = -(1/β) · logsumexp(log(α_k) − β·f_k)
+
+    This uses α as a CONTINUOUS weight (not just an alive/dead
+    boolean, as the previous version did). Primitives with small α
+    are suppressed in the min regardless of their SDF value. Dead
+    primitives (alive=False) get α set to 0 here so log(α) = −∞
+    kills their contribution exactly.
+
+    Note: this aggregation is specific to mesh_fit mode. It is NOT
+    paper-parity — the paper supervises via the differentiable
+    renderer where α enters as a density scale.
     """
     from clearmesh.dualprim.superquadric import scene_combined_field
     f_comb = scene_combined_field(
         query_points, scene, mu=mu, theta_min=theta_min,
     )   # (P, K)
 
-    # Aggregate per-primitive SDFs into a single scene SDF by
-    # min-over-alive-primitives, weighted by α. Use a smooth-min
-    # (LogSumExp / -β) so gradients flow to multiple primitives.
     alpha = scene.alpha().clamp(0.0, 1.0)
     alive = scene.alive.to(alpha.dtype)
-    weights = alpha * alive
-    # Suppress dead primitives by adding a large number to their field
-    DEAD_OFFSET = 100.0
-    f_masked = f_comb + (1.0 - (weights > 0).float()).unsqueeze(0) * DEAD_OFFSET
+    effective_alpha = alpha * alive                        # (K,)
 
-    # Smooth-min across primitives (β=8 gives a reasonably sharp min
-    # while preserving gradients to multiple primitives)
-    beta = 8.0
-    f_scene = -torch.logsumexp(-beta * f_masked, dim=-1) / beta
+    # Add a tiny ε to avoid log(0); ε ≪ any live α so live primitives
+    # dominate unambiguously.
+    alpha_eps = 1e-6
+    log_w = torch.log(effective_alpha + alpha_eps)         # (K,) in (-∞, 0]
 
-    f_scene_t = f_scene.clamp(-truncation, truncation)
+    # Weighted soft-min: softmin_w(f) = -log(Σ w · exp(-β·f)) / β
+    #                  = -logsumexp(log w - β·f) / β
+    f_scene = -torch.logsumexp(
+        log_w.unsqueeze(0) - beta * f_comb, dim=-1,
+    ) / beta
+
+    # Only the TARGET is truncated — NOT the prediction. If we clamp
+    # both, a badly-wrong prediction at initialisation (when f_scene
+    # is tens-to-thousands because all query points are outside every
+    # random-init primitive) saturates against the clamp's max, which
+    # has zero gradient. That kills the optimization entirely at the
+    # very place we need signal the most.
+    #
+    # Clamping only the target + using L1 on the difference gives:
+    #   - Inside the target's ±truncation band: normal L1 matching.
+    #   - Outside: loss increases linearly with |prediction|, which
+    #     is the correct thing to penalise (a prediction shouldn't
+    #     be ±1000 when the target is a truncated SDF of ~±0.1).
     target_t = target_sdf.clamp(-truncation, truncation)
-    return (f_scene_t - target_t).abs().mean()
+    return (f_scene - target_t).abs().mean()
 
 
 def total_loss_tsdf(
