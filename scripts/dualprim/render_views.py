@@ -127,46 +127,51 @@ def render_views(
     render_normals: bool = True,
     bg_color: tuple = (255, 255, 255, 0),
 ):
-    """Write rgb/mask/normal PNGs for all 26 views + views.json."""
-    import pyrender  # required only at render time
+    """Write rgb/mask/normal PNGs for all 26 views + views.json.
+
+    Uses the same "fresh scene per view" pattern as
+    ``scripts/demo_end_to_end.render_mesh`` — set_pose on a persistent
+    camera/light node would be cheaper but on some Vast.ai images it
+    triggers ``EGL_BAD_SURFACE`` during the second-onwards render.
+    Recreating the scene each call sidesteps the problem at ~50 ms/view
+    cost.
+    """
+    import pyrender
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
     mesh = trimesh.load(mesh_path, force="mesh")
     mesh = _normalize_mesh(mesh)
+    mesh.fix_normals()   # ensure vertex_normals are present for _render_world_normals
 
     directions = paper_view_directions(n_sphere_views)
     yfov = math.radians(yfov_deg)
 
-    # --- Single scene for RGB+mask; separate for normals ---
-    scene_rgb = pyrender.Scene(
-        ambient_light=(0.35, 0.35, 0.35),
-        bg_color=bg_color,
-    )
-    rmesh = pyrender.Mesh.from_trimesh(mesh, smooth=False)
-    scene_rgb.add(rmesh)
-
-    cam = pyrender.PerspectiveCamera(yfov=yfov, aspectRatio=1.0)
-    cam_node = scene_rgb.add(cam, pose=np.eye(4))
-    light = pyrender.DirectionalLight(color=np.ones(3), intensity=3.5)
-    light_node = scene_rgb.add(light, pose=np.eye(4))
-
-    renderer = pyrender.OffscreenRenderer(resolution, resolution)
-
     views = []
     for i, d in enumerate(directions):
         pose = camera_pose_from_direction(d, distance=distance)
-        scene_rgb.set_pose(cam_node, pose)
-        scene_rgb.set_pose(light_node, pose)
 
+        # --- Fresh scene per view for RGB+mask (EGL-stable) ---
+        scene_rgb = pyrender.Scene(
+            ambient_light=(0.35, 0.35, 0.35),
+            bg_color=bg_color,
+        )
+        scene_rgb.add(pyrender.Mesh.from_trimesh(mesh, smooth=False))
+        cam = pyrender.PerspectiveCamera(yfov=yfov, aspectRatio=1.0)
+        scene_rgb.add(cam, pose=pose)
+        light = pyrender.DirectionalLight(color=np.ones(3), intensity=3.5)
+        scene_rgb.add(light, pose=pose)
+
+        renderer = pyrender.OffscreenRenderer(resolution, resolution)
         color, depth = renderer.render(scene_rgb)
+        renderer.delete()
+
         rgb = color[..., :3]
         mask = (depth > 0).astype(np.uint8) * 255
 
         Image.fromarray(rgb).save(out / f"{i:02d}_rgb.png")
         Image.fromarray(mask).save(out / f"{i:02d}_mask.png")
 
-        # --- Normals: render a normal-shaded version of the mesh ---
         if render_normals:
             normal_map = _render_world_normals(mesh, pose, resolution, yfov)
             Image.fromarray(normal_map).save(out / f"{i:02d}_normal.png")
@@ -178,8 +183,6 @@ def render_views(
             "resolution": resolution,
             "yfov_rad": yfov,
         })
-
-    renderer.delete()
 
     with open(out / "views.json", "w") as f:
         json.dump({
