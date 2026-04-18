@@ -107,9 +107,16 @@ def sq_implicit(
     Y = (p_local[..., 1].abs() / a[..., 1] + eps)
     Z = (p_local[..., 2].abs() / a[..., 2] + eps)
 
-    inner = X ** (2.0 / e2) + Y ** (2.0 / e2)
-    f = inner ** (e2 / e1) + Z ** (2.0 / e1)
-    return f - 1.0   # < 0 inside
+    # Value clipping to prevent X^(2/ε) from overflowing when ε is
+    # near its lower bound of 0.05 (2/0.05 = 40, so X^40 at X=2 is
+    # 1e12; at X=5 it's 1e28 — well into Inf territory for float32).
+    # Clamp each axis-contribution before the composition, and clamp
+    # the final f, so the gate still gets a finite (but very large)
+    # value and gradients stay finite.
+    FCLAMP = 1e6
+    term_xy = (X ** (2.0 / e2) + Y ** (2.0 / e2)).clamp(max=FCLAMP)
+    f = (term_xy ** (e2 / e1)).clamp(max=FCLAMP) + (Z ** (2.0 / e1)).clamp(max=FCLAMP)
+    return (f - 1.0).clamp(min=-FCLAMP, max=FCLAMP)   # < 0 inside
 
 
 def sq_implicit_grad(

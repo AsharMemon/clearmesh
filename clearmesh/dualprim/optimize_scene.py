@@ -394,13 +394,29 @@ def train(
 
         t0 = time.time()
         optimizer.zero_grad()
+        # Skip the step if loss or grads are non-finite (NaN protection).
+        # sq_implicit can still produce huge finite values near ε=0.05
+        # that, combined with the softmin, occasionally overflow. The
+        # value-clamp + this rollback gives us a clean recovery.
+        if not torch.isfinite(loss):
+            timings["step"] += time.time() - t0
+            if it % config.log_interval == 0 and log_fn is not None:
+                parts["iter"] = it; parts["alive"] = scene.num_alive
+                parts["nan_skip"] = 1
+                log_fn(it, parts)
+            continue
         loss.backward()
-        # Clip gradients before the Adam step. The first canary run
-        # converged cleanly for 2000 iters and then NaN'd at 2200 —
-        # classic gradient spike, probably from sq_implicit's
-        # X^(2/ε) blowing up when a shape exponent drifts near 0.05.
-        # Max-norm 1.0 prevents the step from making that worse.
+        # Clip gradients before the Adam step.
         torch.nn.utils.clip_grad_norm_(opt_params, max_norm=1.0)
+        # Double-check gradients after clipping (clip doesn't fix NaN)
+        any_nan_grad = any(
+            (p.grad is not None and not torch.isfinite(p.grad).all())
+            for p in opt_params
+        )
+        if any_nan_grad:
+            optimizer.zero_grad()
+            timings["step"] += time.time() - t0
+            continue
         optimizer.step()
         if scheduler is not None:
             scheduler.step()
@@ -495,9 +511,19 @@ def train_mesh_fit(
 
         t0 = time.time()
         optimizer.zero_grad()
+        if not torch.isfinite(loss):
+            timings["step"] += time.time() - t0
+            continue
         loss.backward()
-        # Gradient clipping (see comment in train() above for rationale).
         torch.nn.utils.clip_grad_norm_(opt_params, max_norm=1.0)
+        any_nan_grad = any(
+            (p.grad is not None and not torch.isfinite(p.grad).all())
+            for p in opt_params
+        )
+        if any_nan_grad:
+            optimizer.zero_grad()
+            timings["step"] += time.time() - t0
+            continue
         optimizer.step()
         if scheduler is not None:
             scheduler.step()
