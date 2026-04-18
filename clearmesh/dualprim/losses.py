@@ -82,6 +82,102 @@ def loss_norm_reg(
 
 
 # ---------------------------------------------------------------------
+# TSDF loss — NOT in the paper
+#
+# The paper only supervises via the differentiable renderer. We add
+# this separately so `mode="mesh_fit"` (a debug / sanity path that
+# skips rendering entirely) has something real to optimize. Do NOT
+# use this path for paper-parity runs.
+# ---------------------------------------------------------------------
+
+def loss_tsdf(
+    scene: DualPrimScene,
+    query_points: torch.Tensor,    # (P, 3) query positions
+    target_sdf: torch.Tensor,      # (P,) target signed distance
+    *,
+    mu: float = 0.0,
+    theta_min: float = 0.01,
+    truncation: float = 0.1,
+) -> torch.Tensor:
+    """Clamped-L1 between combined dual-primitive field and a target SDF.
+
+    For each query point p, compares the scene's combined field
+    f(p, S) (paper Eq 5) against a known target SDF sample (e.g. from
+    mesh2sdf on the ground-truth mesh). Both are clamped to
+    [-truncation, +truncation] before taking the difference.
+
+    This supervises the implicit directly — no volumetric rendering
+    required. It's NOT paper-parity; it's for the debug mesh_fit mode.
+    """
+    from clearmesh.dualprim.superquadric import scene_combined_field
+    f_comb = scene_combined_field(
+        query_points, scene, mu=mu, theta_min=theta_min,
+    )   # (P, K)
+
+    # Aggregate per-primitive SDFs into a single scene SDF by
+    # min-over-alive-primitives, weighted by α. Use a smooth-min
+    # (LogSumExp / -β) so gradients flow to multiple primitives.
+    alpha = scene.alpha().clamp(0.0, 1.0)
+    alive = scene.alive.to(alpha.dtype)
+    weights = alpha * alive
+    # Suppress dead primitives by adding a large number to their field
+    DEAD_OFFSET = 100.0
+    f_masked = f_comb + (1.0 - (weights > 0).float()).unsqueeze(0) * DEAD_OFFSET
+
+    # Smooth-min across primitives (β=8 gives a reasonably sharp min
+    # while preserving gradients to multiple primitives)
+    beta = 8.0
+    f_scene = -torch.logsumexp(-beta * f_masked, dim=-1) / beta
+
+    f_scene_t = f_scene.clamp(-truncation, truncation)
+    target_t = target_sdf.clamp(-truncation, truncation)
+    return (f_scene_t - target_t).abs().mean()
+
+
+def total_loss_tsdf(
+    scene: DualPrimScene,
+    query_points: torch.Tensor,
+    target_sdf: torch.Tensor,
+    *,
+    lambda_sparse: float = 0.01,
+    lambda_entropy: float = 0.01,
+    lambda_max: float = 0.1,
+    mu: float = 0.0,
+    theta_min: float = 0.01,
+    truncation: float = 0.1,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Total loss for mesh_fit mode.
+
+    Combines:
+      - loss_tsdf (the actual geometry-matching term)
+      - loss_sparsity / loss_entropy / loss_max (regularizers shared
+        with paper mode)
+    """
+    l_tsdf = loss_tsdf(
+        scene, query_points, target_sdf,
+        mu=mu, theta_min=theta_min, truncation=truncation,
+    )
+    l_sp = loss_sparsity(scene)
+    l_e = loss_entropy(scene)
+    l_max = loss_max(scene)
+
+    total = (
+        l_tsdf
+        + lambda_sparse * l_sp
+        + lambda_entropy * l_e
+        + lambda_max * l_max
+    )
+    parts = {
+        "tsdf": l_tsdf.item(),
+        "sparse": l_sp.item(),
+        "entropy": l_e.item(),
+        "max": l_max.item(),
+        "total": total.item(),
+    }
+    return total, parts
+
+
+# ---------------------------------------------------------------------
 # Combined loss
 # ---------------------------------------------------------------------
 

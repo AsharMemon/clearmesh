@@ -99,7 +99,10 @@ def main():
 
     # ----- Build the ray sampler for this mode -----
     if args.mode == "mesh_fit":
-        sampler = _build_mesh_fit_sampler(args.input, device=device)
+        # mesh_fit skips the renderer entirely. Precompute a TSDF and
+        # use the dedicated train_mesh_fit() path below. We bypass the
+        # ray sampler / train() flow.
+        sampler = None
     elif args.mode == "mesh_rendered_views":
         views_dir = out_dir / "views"
         if not (views_dir / "views.json").exists():
@@ -118,27 +121,52 @@ def main():
         )
 
     # ----- Train -----
-    print(f"[canary] training for {config.num_iterations} iters, "
-          f"{args.rays} rays/batch")
+    print(f"[canary] training for {config.num_iterations} iters")
     log_path = out_dir / "logs.json"
     log_rows = []
 
-    def log_fn(it, parts):
-        log_rows.append(parts)
-        print(f"[canary] it={it:6d} total={parts['total']:.4f} "
-              f"rgb={parts['rgb']:.3f} mask={parts['mask']:.3f} "
-              f"norm={parts['norm']:.3f} alive={parts['alive']}")
-        with open(log_path, "w") as f:
-            json.dump(log_rows, f, indent=2)
+    if args.mode == "mesh_fit":
+        # Precompute target TSDF on a grid, use train_mesh_fit
+        from clearmesh.dualprim.optimize_scene import train_mesh_fit
+        query_points, target_sdf = _build_mesh_fit_tsdf(
+            args.input, device=device, resolution=64,
+        )
+        print(f"[canary] TSDF: {query_points.shape[0]:,} samples, "
+              f"target range [{target_sdf.min():.3f}, {target_sdf.max():.3f}]")
 
-    t0 = time.time()
-    state = train(
-        scene, sampler, config,
-        rays_per_batch=args.rays,
-        device=device,
-        log_fn=log_fn,
-        checkpoint_path=str(out_dir / "checkpoints"),
-    )
+        def log_fn(it, parts):
+            log_rows.append(parts)
+            print(f"[canary] it={it:6d} total={parts['total']:.4f} "
+                  f"tsdf={parts['tsdf']:.4f} alive={parts['alive']}")
+            with open(log_path, "w") as f:
+                json.dump(log_rows, f, indent=2)
+
+        t0 = time.time()
+        state = train_mesh_fit(
+            scene, query_points, target_sdf, config,
+            samples_per_batch=args.rays * 4,   # re-use --rays as batch size
+            device=device,
+            log_fn=log_fn,
+            checkpoint_path=str(out_dir / "checkpoints"),
+        )
+    else:
+        def log_fn(it, parts):
+            log_rows.append(parts)
+            print(f"[canary] it={it:6d} total={parts['total']:.4f} "
+                  f"rgb={parts['rgb']:.3f} mask={parts['mask']:.3f} "
+                  f"norm={parts['norm']:.3f} alive={parts['alive']}")
+            with open(log_path, "w") as f:
+                json.dump(log_rows, f, indent=2)
+
+        t0 = time.time()
+        state = train(
+            scene, sampler, config,
+            rays_per_batch=args.rays,
+            device=device,
+            log_fn=log_fn,
+            checkpoint_path=str(out_dir / "checkpoints"),
+        )
+
     train_dt = time.time() - t0
     print(f"[canary] training done in {train_dt/60:.1f} min "
           f"— {scene.num_alive}/{config.num_primitives_init} alive")
@@ -182,26 +210,56 @@ def main():
 # Samplers
 # ---------------------------------------------------------------------
 
-def _build_mesh_fit_sampler(mesh_path: str, device: str):
-    """Sanity sampler — returns zero rays, supervision comes from SDF
-    L2 directly. In practice we still need the ray interface, so we
-    generate degenerate rays and let total_loss ignore them (rgb/mask
-    weights 0, sparsity + entropy carry the optimization)."""
-    from clearmesh.dualprim import RaySampleBatch
+def _build_mesh_fit_tsdf(
+    mesh_path: str, device: str, resolution: int = 64,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build a TSDF of the reference mesh on a regular grid in [-1, 1]^3.
 
-    def sampler(n_rays: int) -> RaySampleBatch:
-        # Degenerate rays along +x. With RGB=white, mask=0, normal=0,
-        # the RGB+mask+normal losses should all be ~0 and only the
-        # regularizers fire. This is genuinely just a wiring sanity
-        # check, not a useful supervision signal.
-        return RaySampleBatch(
-            origins=torch.zeros(n_rays, 3, device=device),
-            dirs=torch.tensor([[1.0, 0.0, 0.0]], device=device).expand(n_rays, 3),
-            rgb_gt=torch.ones(n_rays, 3, device=device),
-            mask_gt=torch.zeros(n_rays, device=device),
-            normals_gt=torch.zeros(n_rays, 3, device=device),
+    Returns (query_points, target_sdf) — both torch tensors on ``device``.
+    Used as supervision for the mesh_fit debug path. Tries mesh2sdf
+    (fast, CUDA) first and falls back to trimesh contains + EDT if not
+    available — same strategy as clearmesh.refit.light_sq.build_tsdf.
+    """
+    import numpy as np
+
+    mesh = trimesh.load(mesh_path, force="mesh")
+    # Normalize to [-1+1/N, 1-1/N]^3 (same frame as init_scene)
+    mesh = mesh.copy()
+    mesh.vertices -= mesh.centroid
+    s = mesh.extents.max()
+    if s > 0:
+        mesh.vertices *= (2.0 / s) * 0.98    # 2% margin
+
+    lin = np.linspace(-1.0 + 1.0 / resolution, 1.0 - 1.0 / resolution, resolution)
+    gx, gy, gz = np.meshgrid(lin, lin, lin, indexing="ij")
+    coords = np.stack([gx, gy, gz], axis=-1).reshape(-1, 3).astype(np.float32)
+
+    try:
+        import mesh2sdf
+        verts = np.asarray(mesh.vertices, dtype=np.float32)
+        faces = np.asarray(mesh.faces, dtype=np.int32)
+        sdf_pos_in = mesh2sdf.compute(
+            verts, faces, size=resolution,
+            fix=False, level=2.0 / resolution, return_mesh=False,
         )
-    return sampler
+        # Paper convention: negative inside
+        sdf = -sdf_pos_in.astype(np.float32).reshape(-1)
+    except ImportError:
+        from scipy.ndimage import distance_transform_edt
+        occupied = np.zeros(len(coords), dtype=bool)
+        chunk = 100_000
+        for i in range(0, len(coords), chunk):
+            occupied[i:i + chunk] = mesh.contains(coords[i:i + chunk])
+        occ_grid = occupied.reshape(resolution, resolution, resolution)
+        voxel = 2.0 / resolution
+        d_out = distance_transform_edt(~occ_grid) * voxel
+        d_in = distance_transform_edt(occ_grid) * voxel
+        sdf = np.where(occ_grid, -d_in, d_out).astype(np.float32).reshape(-1)
+
+    return (
+        torch.from_numpy(coords).to(device),
+        torch.from_numpy(sdf).to(device),
+    )
 
 
 def _build_views_sampler(views_dir: Path, device: str):

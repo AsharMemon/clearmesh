@@ -17,7 +17,8 @@ Package layout:
 from clearmesh.dualprim.params import DualPrimConfig
 from clearmesh.dualprim.types import DualPrimitive, DualPrimScene
 from clearmesh.dualprim.optimize_scene import (
-    init_scene, train, prune, clip_to_ranges,
+    init_scene, train, train_mesh_fit,
+    prune, prune_view_dependent, clip_to_ranges,
     RaySampleBatch, TrainingState,
 )
 from clearmesh.dualprim.export import (
@@ -28,7 +29,8 @@ from clearmesh.dualprim.export import (
 __all__ = [
     "DualPrimConfig",
     "DualPrimitive", "DualPrimScene",
-    "init_scene", "train", "prune", "clip_to_ranges",
+    "init_scene", "train", "train_mesh_fit",
+    "prune", "prune_view_dependent", "clip_to_ranges",
     "RaySampleBatch", "TrainingState",
     "export_dual_primitive", "export_scene",
     "tessellate_superquadric", "boolean_difference",

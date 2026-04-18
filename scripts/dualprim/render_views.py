@@ -38,9 +38,12 @@ for _root in _CANDIDATE_ROOTS:
         sys.path.insert(0, _root)
 
 import numpy as np
-import pyrender
 import trimesh
 from PIL import Image
+
+# pyrender is imported at function scope so the geometry helpers
+# (fibonacci_sphere / paper_view_directions) can be imported on
+# machines without GL / EGL (e.g. a headless laptop for unit tests).
 
 
 # ---------------------------------------------------------------------
@@ -48,12 +51,18 @@ from PIL import Image
 # ---------------------------------------------------------------------
 
 def fibonacci_sphere(n: int) -> list[tuple[float, float, float]]:
-    """n roughly-evenly-spaced unit vectors via Fibonacci lattice."""
+    """n roughly-evenly-spaced unit vectors via Fibonacci lattice.
+
+    Uses the (i + 0.5) / n offset so the sampled points do NOT coincide
+    with the exact poles — that lets callers append separate top/bottom
+    views without duplicating them, which matches the paper's
+    "24 sphere + top + bottom = 26" setup.
+    """
     points = []
     phi_golden = math.pi * (math.sqrt(5.0) - 1.0)
     for i in range(n):
-        y = 1.0 - (i / float(n - 1)) * 2.0          # [-1, 1]
-        r = math.sqrt(1.0 - y * y)
+        y = 1.0 - ((i + 0.5) / float(n)) * 2.0      # (-1, 1), excludes poles
+        r = math.sqrt(max(1.0 - y * y, 0.0))
         theta = phi_golden * i
         x = math.cos(theta) * r
         z = math.sin(theta) * r
@@ -62,7 +71,11 @@ def fibonacci_sphere(n: int) -> list[tuple[float, float, float]]:
 
 
 def paper_view_directions(n_sphere: int = 24) -> list[tuple[float, float, float]]:
-    """Paper §5.1: 24 sphere + top + bottom."""
+    """Paper §5.1: 24 sphere + top + bottom = 26 unique directions.
+
+    The fibonacci_sphere() above excludes the poles, so appending
+    (0, 1, 0) and (0, -1, 0) here does not duplicate any sphere view.
+    """
     sphere = fibonacci_sphere(n_sphere)
     return sphere + [(0.0, 1.0, 0.0), (0.0, -1.0, 0.0)]
 
@@ -115,6 +128,7 @@ def render_views(
     bg_color: tuple = (255, 255, 255, 0),
 ):
     """Write rgb/mask/normal PNGs for all 26 views + views.json."""
+    import pyrender  # required only at render time
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -180,6 +194,7 @@ def render_views(
 def _render_world_normals(mesh, pose, resolution, yfov):
     """Render world-space normals by baking per-vertex RGB = (n+1)/2
     then alpha-compositing. Clean for analytic supervision."""
+    import pyrender
     # Compute vertex normals
     if mesh.vertex_normals is None or len(mesh.vertex_normals) != len(mesh.vertices):
         mesh = mesh.copy()

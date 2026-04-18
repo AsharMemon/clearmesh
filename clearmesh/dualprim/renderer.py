@@ -129,7 +129,6 @@ def _psi(f: torch.Tensor, theta: torch.Tensor, theta_min: float = 0.01) -> torch
 
 
 def density_from_field(
-    f_mid: torch.Tensor,     # f at sample point (..., K)
     f_fwd: torch.Tensor,     # f at sample + Δp (..., K)
     f_bwd: torch.Tensor,     # f at sample − Δp (..., K)
     theta: torch.Tensor,     # (K,)
@@ -138,15 +137,22 @@ def density_from_field(
 ):
     """Paper Eq 7 — NeuS-style SDF → density.
 
-        σ_S(p) = max( (Φ(f(p+Δp)/θ) − Φ(f(p−Δp)/θ)) / Φ(f(p)/θ), 0 )
+        σ_S(p) = max(
+            (Φ(f(p+Δp,S)/θ_S) − Φ(f(p−Δp,S)/θ_S)) / Φ(f(p+Δp,S)/θ_S),
+            0
+        )
 
-    Returns (..., K).
+    The denominator is Φ of the FORWARD point — NOT the midpoint.
+    (Previous version used Φ(f_mid/θ) which is a different formula and
+    was caught in Phase A review.)
+
+    The mid-point field is not used in this function; it was removed
+    from the signature to prevent it from being accidentally reintroduced.
     """
-    cdf_mid = _psi(f_mid, theta, theta_min)
     cdf_fwd = _psi(f_fwd, theta, theta_min)
     cdf_bwd = _psi(f_bwd, theta, theta_min)
     num = cdf_fwd - cdf_bwd
-    den = cdf_mid + eps
+    den = cdf_fwd + eps
     sigma = (num / den).clamp(min=0.0)
     return sigma
 
@@ -190,19 +196,19 @@ def render_rays(
     )
     # points: (R, N, 3)
 
-    # Midpoint field + forward/backward for Eq 7 finite diff along ray
+    # Forward/backward for Eq 7 finite diff along ray.
+    # Paper's Eq 7 denominator is the FORWARD point, not the midpoint,
+    # so we don't need to evaluate the field at the midpoint here.
     dp = ray_dirs.unsqueeze(1) * delta_p  # (R, 1, 3) → broadcast to (R, N, 3)
     pts_fwd = points + dp
     pts_bwd = points - dp
 
-    # Evaluate combined field at mid, fwd, bwd
-    f_mid = _scene_field(scene, points, mu, theta_min)    # (R, N, K)
-    f_fwd = _scene_field(scene, pts_fwd, mu, theta_min)
+    f_fwd = _scene_field(scene, pts_fwd, mu, theta_min)   # (R, N, K)
     f_bwd = _scene_field(scene, pts_bwd, mu, theta_min)
 
     # Per-primitive density from Eq 7
     sigma_k = density_from_field(
-        f_mid, f_fwd, f_bwd, scene.theta(), theta_min=theta_min,
+        f_fwd, f_bwd, scene.theta(), theta_min=theta_min,
     )  # (R, N, K)
 
     # Apply alpha weighting (pruning via alive mask + learned α)
