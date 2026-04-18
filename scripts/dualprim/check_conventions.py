@@ -202,11 +202,12 @@ def check_mesh2sdf_frame():
     res = 32
     verts = np.asarray(sphere.vertices, dtype=np.float32)
     faces = np.asarray(sphere.faces, dtype=np.int32)
-    sdf_pos_in = mesh2sdf.compute(
+    # mesh2sdf returns NEGATIVE-INSIDE directly (matches the paper
+    # convention — no flip). Earlier code assumed positive-inside and
+    # double-negated; this test was the catch.
+    sdf = mesh2sdf.compute(
         verts, faces, size=res, fix=False, level=2.0 / res, return_mesh=False,
     )
-    # We flip: paper convention is negative-inside
-    sdf = -sdf_pos_in
 
     # Centre voxel of the grid should be deeply inside the sphere
     mid = res // 2

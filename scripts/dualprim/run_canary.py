@@ -238,12 +238,13 @@ def _build_mesh_fit_tsdf(
         import mesh2sdf
         verts = np.asarray(mesh.vertices, dtype=np.float32)
         faces = np.asarray(mesh.faces, dtype=np.int32)
-        sdf_pos_in = mesh2sdf.compute(
+        # mesh2sdf already returns negative-inside (matches paper).
+        # Verified via scripts/dualprim/check_conventions.py group [4]:
+        # raw centre-of-sphere = -0.976, raw corner-of-cube = +0.648.
+        sdf = mesh2sdf.compute(
             verts, faces, size=resolution,
             fix=False, level=2.0 / resolution, return_mesh=False,
-        )
-        # Paper convention: negative inside
-        sdf = -sdf_pos_in.astype(np.float32).reshape(-1)
+        ).astype(np.float32).reshape(-1)
     except ImportError:
         from scipy.ndimage import distance_transform_edt
         occupied = np.zeros(len(coords), dtype=bool)

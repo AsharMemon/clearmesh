@@ -201,18 +201,18 @@ def build_tsdf(
 
     if mesh2sdf is not None:
         # mesh2sdf expects the mesh to live inside [-1+1/N, 1-1/N]^3
-        # and returns a (N, N, N) signed distance with POSITIVE inside.
+        # and returns a (N, N, N) signed distance with NEGATIVE inside
+        # (matches the paper convention directly — no sign flip needed).
+        # Verified via scripts/dualprim/check_conventions.py group [4].
         verts = np.asarray(mesh.vertices, dtype=np.float32)
         faces = np.asarray(mesh.faces, dtype=np.int32)
-        sdf_pos_inside = mesh2sdf.compute(
+        sd = mesh2sdf.compute(
             verts, faces,
             size=resolution,
             fix=False,
             level=2.0 / resolution,
             return_mesh=False,
-        )
-        # Flip sign to match paper: negative inside
-        sd = -sdf_pos_inside.astype(np.float64)
+        ).astype(np.float64)
         phi = np.clip(sd, -tau, +tau)
         return phi, coords
 
