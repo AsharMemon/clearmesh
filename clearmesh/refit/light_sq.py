@@ -247,12 +247,33 @@ def build_tsdf(
 # Single-primitive optimisation
 # =====================================================================
 
+# Shape-exponent presets we cycle through during initialisation. Each
+# (e1, e2) pair represents a different superquadric "family":
+#   (0.2, 0.2) — sharp box       (gear bodies, brackets, plates)
+#   (1.0, 1.0) — sphere          (knobs, lenses, balls)
+#   (0.2, 1.0) — cylinder        (shafts, pegs, bezels)
+#   (1.0, 0.2) — bipyramid       (octahedron-ish features)
+#   (0.5, 0.5) — rounded cube    (general/safe default)
+#   (1.5, 1.5) — pinched ellipsoid (caps, smooth bumps)
+# Without varying these the optimiser collapses everything to ~rounded
+# cube (the previous compass demo had every SQ at e1≈e2≈0.6).
+_SHAPE_PRESETS = (
+    (0.2, 0.2),
+    (1.0, 1.0),
+    (0.2, 1.0),
+    (1.0, 0.2),
+    (0.5, 0.5),
+    (1.5, 1.5),
+)
+
+
 def _init_from_moments(
     coords: np.ndarray,
     mask: np.ndarray,
     scale_frac: float = 0.35,
     seed_region_frac: float = 0.25,
     rng_seed: int = 0,
+    shape_preset_idx: Optional[int] = None,
 ) -> SuperQuadric:
     """Initialise a SQ inside a SUB-REGION of the occupied set.
 
@@ -310,8 +331,16 @@ def _init_from_moments(
     rx = math.atan2(axes[2, 1], axes[2, 2])
     ry = math.atan2(-axes[2, 0], math.hypot(axes[2, 1], axes[2, 2]))
     rz = math.atan2(axes[1, 0], axes[0, 0])
+
+    # Cycle through shape presets so successive primitives explore
+    # different superquadric families (box / sphere / cylinder /
+    # bipyramid / rounded cube / pinched ellipsoid).
+    if shape_preset_idx is None:
+        shape_preset_idx = rng_seed
+    e1, e2 = _SHAPE_PRESETS[shape_preset_idx % len(_SHAPE_PRESETS)]
+
     return SuperQuadric(
-        e1=1.0, e2=1.0,
+        e1=e1, e2=e2,
         ax=scales[0], ay=scales[1], az=scales[2],
         rx=rx, ry=ry, rz=rz,
         tx=c[0], ty=c[1], tz=c[2],
@@ -358,7 +387,8 @@ def _fit_one(
     sample_phi = flat_phi[pick]
 
     if init is None:
-        init = _init_from_moments(coords, occ_mask, rng_seed=init_seed)
+        init = _init_from_moments(coords, occ_mask, rng_seed=init_seed,
+                                  shape_preset_idx=init_seed)
     params = init.to_vector()
 
     def loss_at(p: np.ndarray) -> float:
