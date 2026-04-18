@@ -162,6 +162,44 @@ def stage_ultrashape(
     return refined
 
 
+def _keep_largest_component(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    """Drop disconnected floating bits; keep only the largest connected
+    component. The compass demo had a small "orb" floating off to the
+    side that survived cumesh.remove_small_connected_components — its
+    threshold is geometric, not relative-volume, so a medium-size noise
+    blob can pass through. Splitting + sorting by face count is a much
+    sharper filter.
+    """
+    parts = mesh.split(only_watertight=False)
+    if len(parts) <= 1:
+        return mesh
+    parts_sorted = sorted(parts, key=lambda p: len(p.faces), reverse=True)
+    largest = parts_sorted[0]
+    print(f"[polish/components] kept largest of {len(parts)} components: "
+          f"{len(largest.faces):,}/{len(mesh.faces):,} faces "
+          f"(dropped {sum(len(p.faces) for p in parts_sorted[1:]):,})")
+    return largest
+
+
+def _aggressive_fill_holes(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    """trimesh.repair.fill_holes is good at the small-hole tail that
+    cumesh's CUDA filler skips (cumesh has a hard max_perimeter that
+    rejects irregular boundary loops). Run after cumesh to mop up.
+    """
+    try:
+        import trimesh.repair as repair
+        before = len(mesh.faces)
+        mesh = mesh.copy()
+        repair.fill_holes(mesh)
+        after = len(mesh.faces)
+        if after > before:
+            print(f"[polish/fill_holes] added {after - before:,} faces "
+                  f"({before:,} -> {after:,})")
+    except Exception as e:
+        print(f"[polish/fill_holes] skipped: {e}")
+    return mesh
+
+
 def stage_polish(mesh: trimesh.Trimesh, out_dir: str, target_faces: int = 1_500_000) -> trimesh.Trimesh:
     from clearmesh.mesh.repair import polish_mesh, quadric_decimate, repair_mesh_cuda
 
@@ -175,6 +213,10 @@ def stage_polish(mesh: trimesh.Trimesh, out_dir: str, target_faces: int = 1_500_
         m = repair_mesh_cuda(m, fill_holes=True, verbose=True)
     except Exception as e:
         print(f"[stage 4c] CUDA repair failed: {e}")
+    print("[stage 4d] keep largest connected component")
+    m = _keep_largest_component(m)
+    print("[stage 4e] aggressive trimesh fill_holes")
+    m = _aggressive_fill_holes(m)
     m.export(os.path.join(out_dir, "03_polished.glb"))
     return m
 
