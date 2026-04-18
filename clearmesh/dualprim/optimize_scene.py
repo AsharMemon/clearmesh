@@ -395,6 +395,12 @@ def train(
         t0 = time.time()
         optimizer.zero_grad()
         loss.backward()
+        # Clip gradients before the Adam step. The first canary run
+        # converged cleanly for 2000 iters and then NaN'd at 2200 —
+        # classic gradient spike, probably from sq_implicit's
+        # X^(2/ε) blowing up when a shape exponent drifts near 0.05.
+        # Max-norm 1.0 prevents the step from making that worse.
+        torch.nn.utils.clip_grad_norm_(opt_params, max_norm=1.0)
         optimizer.step()
         if scheduler is not None:
             scheduler.step()
@@ -490,6 +496,8 @@ def train_mesh_fit(
         t0 = time.time()
         optimizer.zero_grad()
         loss.backward()
+        # Gradient clipping (see comment in train() above for rationale).
+        torch.nn.utils.clip_grad_norm_(opt_params, max_norm=1.0)
         optimizer.step()
         if scheduler is not None:
             scheduler.step()
