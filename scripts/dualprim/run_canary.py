@@ -74,6 +74,10 @@ def main():
                     choices=["coupled", "independent"],
                     help="NSQ init strategy: 'coupled' (NSQ near PSQ) or "
                          "'independent' (NSQ random, paper-faithful)")
+    ap.add_argument("--union-export", action="store_true",
+                    help="Boolean-union all primitives at export. "
+                         "Slow (~minutes for K>=20) but produces a single "
+                         "watertight mesh ~10-100x more compact than concatenate.")
     args = ap.parse_args()
 
     out_dir = Path(args.out)
@@ -200,7 +204,7 @@ def main():
 
     # ----- Export -----
     print(f"[canary] exporting (α ≥ {config.export_alpha_threshold})")
-    scene_mesh, per_prim = export_scene(scene, config, union_all=False)
+    scene_mesh, per_prim = export_scene(scene, config, union_all=args.union_export)
     scene_mesh.export(out_dir / "refit.glb")
     for i, m in enumerate(per_prim):
         m.export(out_dir / f"per_prim_{i:03d}.glb")
