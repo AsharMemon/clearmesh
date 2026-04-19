@@ -65,9 +65,12 @@ def init_scene(config: DualPrimConfig, device="cuda") -> DualPrimScene:
     init_s_hi = min(s_hi, 0.3)  # start compact so they don't cover the whole cube
     params[:, IDX_PSQ_SCALE] = _uniform(s_lo, init_s_hi, (K, 3))
 
-    # Shape — start at rounded cuboid (paper's implicit default)
-    params[:, IDX_PSQ_SHAPE] = _uniform(0.5, 1.2, (K, 2))
-    params[:, IDX_NSQ_SHAPE] = _uniform(0.5, 1.2, (K, 2))
+    # Shape — friend's tuning: bias init toward boxier shapes (lower ε
+    # = more box-like; ε=1 is sphere). Manmade objects like a hole-box
+    # tend to want sharp primitives, and the optimizer rarely pushes ε
+    # downward from a sphere init.
+    params[:, IDX_PSQ_SHAPE] = _uniform(0.2, 0.8, (K, 2))
+    params[:, IDX_NSQ_SHAPE] = _uniform(0.2, 0.8, (K, 2))
 
     # α — start small (sparse) so the sparsity loss has room to work
     params[:, IDX_ALPHA] = _uniform(0.3, 0.5, (K,))

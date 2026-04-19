@@ -294,10 +294,20 @@ def _build_mesh_fit_tsdf(
     )
 
 
-def _build_views_sampler(views_dir: Path, device: str):
+def _build_views_sampler(views_dir: Path, device: str, fg_bias: float = 0.7):
     """Sample rays from the 26 rendered views in `views_dir`.
 
-    Loads RGB+mask+normal PNGs once, samples random pixels per batch.
+    Friend's tuning input: uniform pixel sampling wastes most rays on
+    background. For shape supervision (especially for hole/concavity
+    detection), the foreground silhouette and its boundary are where
+    the geometry signal lives. Bias sampling toward foreground +
+    boundary pixels.
+
+    fg_bias: fraction of rays drawn from "interesting" pixels (mask
+    foreground OR mask-boundary). Remaining (1 - fg_bias) drawn
+    uniformly across the full image.
+
+    Pre-computes per-view boundary masks once (mask XOR eroded mask).
     """
     from PIL import Image
     from clearmesh.dualprim import RaySampleBatch
@@ -340,23 +350,69 @@ def _build_views_sampler(views_dir: Path, device: str):
     poses_t = torch.from_numpy(poses).to(device)
     cam_dirs_t = torch.from_numpy(cam_dirs).to(device)
 
+    # Pre-compute "interesting" pixel index sets per view: foreground
+    # (mask>0.5) PLUS a few-pixel-wide boundary band around the mask
+    # (extracted via 1-px erosion XOR mask). The boundary captures
+    # silhouette + hole edges, which are where the geometric pressure
+    # for carving lives.
+    from scipy import ndimage
+    interesting_per_view = []
+    for v in range(V):
+        m = masks[v] > 0.5
+        eroded = ndimage.binary_erosion(m, iterations=2)
+        boundary = m & ~eroded
+        # Also add the inverse boundary (just-outside-mask) so silhouette
+        # rays actually hit empty space too.
+        outer = ndimage.binary_dilation(m, iterations=2) & ~m
+        interesting = m | boundary | outer
+        # Flatten to indices
+        idx = np.flatnonzero(interesting.ravel())
+        interesting_per_view.append(idx)
+    # Pad to same length so we can stack (use max length, sample with
+    # replacement if needed — fine since pool is large).
+    max_len = max(len(ix) for ix in interesting_per_view)
+    interesting_padded = np.zeros((V, max_len), dtype=np.int64)
+    for v in range(V):
+        ix = interesting_per_view[v]
+        # Cycle to fill
+        if len(ix) < max_len:
+            reps = (max_len + len(ix) - 1) // len(ix)
+            ix = np.tile(ix, reps)[:max_len]
+        interesting_padded[v] = ix
+    interesting_padded_t = torch.from_numpy(interesting_padded).to(device)
+
     rng = torch.Generator(device=device).manual_seed(42)
 
     def sampler(n_rays: int) -> RaySampleBatch:
-        # Random (view, y, x)
-        vi = torch.randint(0, V, (n_rays,), generator=rng, device=device)
-        yi = torch.randint(0, H, (n_rays,), generator=rng, device=device)
-        xi = torch.randint(0, W, (n_rays,), generator=rng, device=device)
+        n_fg = int(n_rays * fg_bias)
+        n_uniform = n_rays - n_fg
+
+        # Foreground+boundary biased rays
+        vi_f = torch.randint(0, V, (n_fg,), generator=rng, device=device)
+        # Pick from each view's interesting pool
+        col = torch.randint(0, max_len, (n_fg,), generator=rng, device=device)
+        flat = interesting_padded_t[vi_f, col]
+        yi_f = flat // W
+        xi_f = flat % W
+
+        # Uniform rays
+        vi_u = torch.randint(0, V, (n_uniform,), generator=rng, device=device)
+        yi_u = torch.randint(0, H, (n_uniform,), generator=rng, device=device)
+        xi_u = torch.randint(0, W, (n_uniform,), generator=rng, device=device)
+
+        # Concatenate
+        vi = torch.cat([vi_f, vi_u])
+        yi = torch.cat([yi_f, yi_u])
+        xi = torch.cat([xi_f, xi_u])
 
         rgb = rgbs_t[vi, yi, xi]                              # (R, 3)
         mask = masks_t[vi, yi, xi]                             # (R,)
         normal = normals_t[vi, yi, xi]                         # (R, 3)
 
-        # Cam-space ray dir -> world-space via pose
-        cam_dir = cam_dirs_t[yi, xi]                            # (R, 3)
-        rot = poses_t[vi, :3, :3]                               # (R, 3, 3)
-        world_dir = torch.einsum("rij,rj->ri", rot, cam_dir)    # (R, 3)
-        origin = poses_t[vi, :3, 3]                             # (R, 3)
+        cam_dir = cam_dirs_t[yi, xi]
+        rot = poses_t[vi, :3, :3]
+        world_dir = torch.einsum("rij,rj->ri", rot, cam_dir)
+        origin = poses_t[vi, :3, 3]
 
         return RaySampleBatch(
             origins=origin, dirs=world_dir,

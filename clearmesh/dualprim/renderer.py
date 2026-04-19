@@ -233,9 +233,18 @@ def render_rays(
         "rnk,kc->rnc", sigma_k_weighted, c_basic,
     ) / denom                                                # (R, N, 3)
 
+    # ----- composited normal (Eq 10-11) — compute ONCE -----
+    # Used for both the lighting MLP residual and the final normal
+    # output. Each _scene_normal call evaluates sq_implicit_grad twice
+    # (PSQ + NSQ) which expands to 12 sq_implicit forwards via FD-grad,
+    # plus 2 more sq_implicit for the gate — so calling it twice was
+    # adding 28 extra sq_implicit evaluations per iter to the autograd
+    # graph. Caching this single result cuts the backward pass cost
+    # roughly in half on profiling.
+    normals_per_sample = _scene_normal(scene, points, sigma_k_weighted, sigma, mu, theta_min)
+
     # Lighting residual: MLP on (point, view_dir, weighted_normal)
     if scene.lighting_mlp is not None:
-        normals_per_sample = _scene_normal(scene, points, sigma_k_weighted, sigma, mu, theta_min)
         view_dirs_exp = ray_dirs.unsqueeze(1).expand_as(points)
         lighting = scene.lighting_mlp(points, view_dirs_exp, normals_per_sample)
         c_per_sample = c_per_sample + lighting
@@ -245,12 +254,6 @@ def render_rays(
     # ----- mask (Eq 9) -----
     mask = weights.sum(dim=1).clamp(0.0, 1.0)                 # (R,)
 
-    # ----- composited normal (Eq 10-11) -----
-    # Compute per-sample normal from combined field (slow — requires
-    # autograd grad). In the skeleton we compute it only when needed
-    # (mask > small threshold); a full impl could cache the autograd
-    # graph. For the skeleton, recompute; this keeps the code readable.
-    normals_per_sample = _scene_normal(scene, points, sigma_k_weighted, sigma, mu, theta_min)
     normals = (weights.unsqueeze(-1) * normals_per_sample).sum(dim=1)
     normals = F.normalize(normals, dim=-1, eps=1e-8)
 

@@ -92,7 +92,11 @@ class DualPrimConfig:
     #        + λ_max·L_max + λ_norm_reg·L_norm_reg
     # Paper doesn't give λ values — these are educated defaults.
     # ================================================================
-    lambda_mask: float = 1.0                # NOT SPECIFIED IN PAPER
+    lambda_mask: float = 3.0                # Friend's tuning suggestion: bumped
+                                             # from 1.0 to put more pressure on
+                                             # silhouette/hole boundary, since
+                                             # boundaries are what tell DualPrim
+                                             # to carve. NOT SPECIFIED IN PAPER.
     lambda_sparse: float = 0.01             # NOT SPECIFIED
     lambda_entropy: float = 0.01            # NOT SPECIFIED
     lambda_max: float = 0.1                 # NOT SPECIFIED
