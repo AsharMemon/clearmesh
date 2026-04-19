@@ -245,6 +245,80 @@ was roughly spherical — can't cut through a box. May need elongated
 NSQs along the axis, achievable via either denser axial views OR
 NSQs initialized with axis-aligned elongation.
 
+### Round 3 decision tree
+
+#### If round 3 PASSES Gate 0 (through-hole-open > 30%, IoU ≥ 0.85)
+
+- Commit the "coupled init is necessary" finding to the plan
+- Kick off `gate05_warmstart.py` using round 3's trajectory
+  snapshots. Measure the refinement curve.
+- If Gate 0.5 passes (≤1000 refine steps for recovery): start
+  Gate 1 (Objaverse teacher data collection). Launch via
+  `autonomous_runner.py --mesh-list <objaverse_manifest> --seeds 0 1 --trajectory`.
+- If Gate 0.5 fails (>1000 refine steps needed): draft a kernel-
+  level speedup proposal (fused CUDA for superquadric + gradient).
+
+#### If round 3 FAILS Gate 0 (through-hole-open < 10%)
+
+Fall back to round 4: heavier supervision + denser views.
+
+Concrete round 4 launcher (to execute, not to plan further):
+
+```bash
+# On pod:
+# Step 1: re-render hole canary with 52 sphere views (instead of 24).
+rm /workspace/dualprim_round4/hole/views/views.json 2>/dev/null
+PYOPENGL_PLATFORM=egl python -u scripts/dualprim/render_views.py \
+    --input /workspace/test_box_hole.glb \
+    --out /workspace/dualprim_round4/hole/views \
+    --resolution 192 --n-sphere-views 52
+
+# Step 2: run training with the denser views + coupled init
+# Also: pruning_interval=2000 (from 1000) so NSQs have longer to
+# migrate before we start killing them.
+# Also: lambda_mask=5 (from 3) — friend's suggestion if 3 wasn't enough.
+# We can't bump lambda_mask from CLI (not exposed), so patch params.py
+# inline for round 4:
+
+python -c "
+import sys; sys.path.insert(0, '/workspace/clearmesh')
+# Temporary config override via inline patch (undoable on next git pull)
+import clearmesh.dualprim.params as p
+p.DualPrimConfig.lambda_mask = 5.0
+p.DualPrimConfig.pruning_interval = 2000
+"
+# (Actually this only patches the defaults, not sure it'd persist
+# across subprocess calls. Better approach: add --lambda-mask and
+# --pruning-interval CLI flags to run_canary. TODO.)
+
+PYOPENGL_PLATFORM=egl python -u scripts/dualprim/run_canary.py \
+    --input /workspace/test_box_hole.glb \
+    --out /workspace/dualprim_round4/hole \
+    --mode mesh_rendered_views \
+    --k 100 --iters 15000 --rays 768 --resolution 192 \
+    --seed 0 \
+    --nsq-init coupled \
+    --union-export \
+    --fg-bias 0.7 \
+    --trajectory-dir /workspace/dualprim_round4/hole/trajectory
+```
+
+If round 4 still fails: this suggests DualPrim as published needs
+something we're missing. Possibilities:
+- Paper uses a specific normal-map supervision from StableNormal we
+  haven't matched (we use analytic normals)
+- Paper's P_E gate uses a different μ offset value than our μ=0
+- Paper's lighting MLP capacity is different
+
+Last-resort diagnostics before giving up:
+- Inspect raw SDF field at the hole axis via a custom renderer pass
+  (is the field carved at all? If not, optimization is fundamentally
+  broken. If yes, export is the issue.)
+- Try higher tessellation_resolution (128 or 256) at export — maybe
+  the marching-cubes grid is missing the thin carve
+- Try a simple mesh_fit baseline (skip the renderer, just fit TSDF)
+  to isolate whether it's the render pipeline or the SQ optimization
+
 ---
 
 *Last updated: 2026-04-19, mid-round-3. Update this doc when gates pass or plans shift.*

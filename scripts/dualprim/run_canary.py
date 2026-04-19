@@ -95,6 +95,15 @@ def main():
                          "Useful for measuring 'how few iters do I need "
                          "from a good starting point?' — the Gate 3 "
                          "feasibility check.")
+    ap.add_argument("--lambda-mask", type=float, default=None,
+                    help="Override lambda_mask in config. Friend's initial "
+                         "tuning bumped this 1->3; round 4 fallback may "
+                         "try 5+ if round 3 still fails.")
+    ap.add_argument("--pruning-interval", type=int, default=None,
+                    help="Override pruning_interval (how often to kill "
+                         "weak primitives). Default 1000. Increase to "
+                         "2000+ to give primitives more time to find "
+                         "positions before being pruned.")
     args = ap.parse_args()
 
     out_dir = Path(args.out)
@@ -111,6 +120,11 @@ def main():
         seed=args.seed,
         nsq_init_strategy=args.nsq_init,
     )
+    # CLI overrides for round-4 tuning levers
+    if args.lambda_mask is not None:
+        config.lambda_mask = args.lambda_mask
+    if args.pruning_interval is not None:
+        config.pruning_interval = args.pruning_interval
     # Write the effective config for reproducibility
     from dataclasses import asdict
     with open(out_dir / "config.json", "w") as f:
