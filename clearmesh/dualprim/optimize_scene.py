@@ -64,8 +64,6 @@ def init_scene(config: DualPrimConfig, device="cuda") -> DualPrimScene:
     s_lo, s_hi = config.scale_range
     init_s_hi = min(s_hi, 0.3)  # start compact so they don't cover the whole cube
     params[:, IDX_PSQ_SCALE] = _uniform(s_lo, init_s_hi, (K, 3))
-    # NSQ starts ~0.7x of PSQ so subtraction lands inside
-    params[:, IDX_NSQ_SCALE] = params[:, IDX_PSQ_SCALE] * 0.7
 
     # Shape — start at rounded cuboid (paper's implicit default)
     params[:, IDX_PSQ_SHAPE] = _uniform(0.5, 1.2, (K, 2))
@@ -77,19 +75,28 @@ def init_scene(config: DualPrimConfig, device="cuda") -> DualPrimScene:
     # θ (render sharpness) — mid-range
     params[:, IDX_THETA] = _uniform(0.3, 0.7, (K,))
 
-    # Translation — paper: "randomly in [-1, 1] space"
+    # Translation + NSQ scale — depends on init strategy
     t_lo, t_hi = config.init_space
     params[:, IDX_PSQ_TRANSLATION] = _uniform(t_lo, t_hi, (K, 3))
-    # NSQ translation near its PSQ partner so they overlap by default
-    params[:, IDX_NSQ_TRANSLATION] = (
-        params[:, IDX_PSQ_TRANSLATION]
-        + _uniform(-0.05, 0.05, (K, 3))
-    )
 
-    # Rotation — uniform over full range, in radians
     import math
     params[:, IDX_PSQ_ROTATION] = _uniform(-math.pi, math.pi, (K, 3))
-    params[:, IDX_NSQ_ROTATION] = params[:, IDX_PSQ_ROTATION].clone()
+
+    if config.nsq_init_strategy == "coupled":
+        # NSQ starts at PSQ position with smaller scale (legacy default).
+        params[:, IDX_NSQ_SCALE] = params[:, IDX_PSQ_SCALE] * 0.7
+        params[:, IDX_NSQ_TRANSLATION] = (
+            params[:, IDX_PSQ_TRANSLATION]
+            + _uniform(-0.05, 0.05, (K, 3))
+        )
+        params[:, IDX_NSQ_ROTATION] = params[:, IDX_PSQ_ROTATION].clone()
+    elif config.nsq_init_strategy == "independent":
+        # Paper-faithful: NSQ random in [-1,1]^3, scale independent.
+        params[:, IDX_NSQ_SCALE] = _uniform(s_lo, init_s_hi, (K, 3))
+        params[:, IDX_NSQ_TRANSLATION] = _uniform(t_lo, t_hi, (K, 3))
+        params[:, IDX_NSQ_ROTATION] = _uniform(-math.pi, math.pi, (K, 3))
+    else:
+        raise ValueError(f"unknown nsq_init_strategy: {config.nsq_init_strategy}")
 
     # Color — mid-grey
     params[:, IDX_COLOR] = _uniform(0.4, 0.6, (K, 3))

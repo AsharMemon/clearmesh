@@ -70,6 +70,10 @@ def main():
                     help="view render resolution")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--nsq-init", default="coupled",
+                    choices=["coupled", "independent"],
+                    help="NSQ init strategy: 'coupled' (NSQ near PSQ) or "
+                         "'independent' (NSQ random, paper-faithful)")
     args = ap.parse_args()
 
     out_dir = Path(args.out)
@@ -84,6 +88,7 @@ def main():
         view_resolution=args.resolution,
         mode=args.mode,
         seed=args.seed,
+        nsq_init_strategy=args.nsq_init,
     )
     # Write the effective config for reproducibility
     from dataclasses import asdict

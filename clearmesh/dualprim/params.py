@@ -29,6 +29,17 @@ class DualPrimConfig:
     init_space: Tuple[float, float] = (-1.0, 1.0)  # paper: "[-1,1] space"
     seed: int = 0
 
+    # NSQ initialisation strategy:
+    #   "coupled"     — NSQ starts at PSQ position with smaller scale
+    #                   (more samples per dual-primitive contribute to
+    #                   carving early; my original approach)
+    #   "independent" — NSQ randomly placed in [-1,1] like PSQ, scale
+    #                   independent. Paper-faithful: paper says "K=100
+    #                   randomly in [-1,1]^3" without coupling. Most
+    #                   pairs won't overlap initially; pruning kills
+    #                   the unhelpful ones.
+    nsq_init_strategy: str = "coupled"
+
     # ================================================================
     # Per-primitive parameter RANGES (Table 1)
     # Hard-clipped during optimization.
