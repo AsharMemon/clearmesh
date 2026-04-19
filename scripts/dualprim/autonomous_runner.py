@@ -71,6 +71,7 @@ def run_experiment(
     seed: int = 0,
     nsq_init: str = "coupled",
     union_export: bool = False,
+    fg_bias: float = 0.7,
 ) -> dict:
     """Train, render, evaluate. Returns a result dict."""
     out_dir = Path(out_root) / name
@@ -107,6 +108,7 @@ def run_experiment(
         "--resolution", str(resolution),
         "--seed", str(seed),
         "--nsq-init", nsq_init,
+        "--fg-bias", str(fg_bias),
     ]
     if union_export:
         train_cmd.append("--union-export")
@@ -285,6 +287,10 @@ def main():
     ap.add_argument("--nsq-init", default="coupled",
                     choices=["coupled", "independent"])
     ap.add_argument("--union-export", action="store_true")
+    ap.add_argument("--fg-bias", type=float, default=0.7,
+                    help="Foreground+boundary ray sampling fraction; "
+                         "0.0 = uniform (paper default), 0.7 = friend's "
+                         "recommended silhouette-pressure setting.")
     args = ap.parse_args()
 
     repo_root = Path(args.repo_root)
@@ -303,6 +309,7 @@ def main():
                 k=args.k, iters=args.iters,
                 resolution=args.resolution, rays=args.rays,
                 nsq_init=args.nsq_init, union_export=args.union_export,
+                fg_bias=args.fg_bias,
             )
         except Exception as e:
             print(f"[error] {exp_key} failed: {e}")

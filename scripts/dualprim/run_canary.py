@@ -78,6 +78,11 @@ def main():
                     help="Boolean-union all primitives at export. "
                          "Slow (~minutes for K>=20) but produces a single "
                          "watertight mesh ~10-100x more compact than concatenate.")
+    ap.add_argument("--fg-bias", type=float, default=0.7,
+                    help="Fraction of rays drawn from foreground+boundary "
+                         "pixels (rest uniform). 0.0 = paper's default "
+                         "uniform sampling; 0.7 = friend's recommended "
+                         "silhouette-pressure boost.")
     args = ap.parse_args()
 
     out_dir = Path(args.out)
@@ -122,7 +127,7 @@ def main():
                 resolution=config.view_resolution,
                 render_normals=True,
             )
-        sampler = _build_views_sampler(views_dir, device=device)
+        sampler = _build_views_sampler(views_dir, device=device, fg_bias=args.fg_bias)
     elif args.mode == "paper":
         raise NotImplementedError(
             "mode=paper requires real source images + StableNormal — "
