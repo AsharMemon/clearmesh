@@ -108,7 +108,14 @@ class DualPrimConfig:
     # Export (§3.3 Mesh Exportation)
     # ================================================================
     boolean_backend: str = "manifold3d"     # "manifold3d" | "trimesh" | "pymesh"
-    tessellation_resolution: int = 128      # NOT SPECIFIED (marching cubes grid)
+    # Marching cubes grid resolution per primitive. The autonomous-runner
+    # experiments showed that going from 128 -> 32 -> 16 changes mesh
+    # compactness by 16-30x but barely moves Chamfer (194.3 -> 194.0 -> 188.0
+    # on the hole canary). Defaulting to 32 since that matches paper-style
+    # compactness without quality loss; original 128 default was "more
+    # detail = better assumed" — wrong, the limit is the SQ implicit not
+    # the tessellation. Keep configurable via DualPrimConfig.
+    tessellation_resolution: int = 32
 
     # ================================================================
     # Supervision mode
