@@ -69,6 +69,8 @@ def run_experiment(
     resolution: int,
     rays: int,
     seed: int = 0,
+    nsq_init: str = "coupled",
+    union_export: bool = False,
 ) -> dict:
     """Train, render, evaluate. Returns a result dict."""
     out_dir = Path(out_root) / name
@@ -104,7 +106,10 @@ def run_experiment(
         "--rays", str(rays),
         "--resolution", str(resolution),
         "--seed", str(seed),
+        "--nsq-init", nsq_init,
     ]
+    if union_export:
+        train_cmd.append("--union-export")
     with open(log_file, "w") as lf:
         proc = subprocess.run(train_cmd, stdout=lf, stderr=subprocess.STDOUT, env=env)
     train_dt = time.time() - t0
@@ -277,6 +282,9 @@ def main():
     ap.add_argument("--rays", type=int, default=768)
     ap.add_argument("--repo-root", default="/workspace/clearmesh",
                     help="Path to git repo for committing results")
+    ap.add_argument("--nsq-init", default="coupled",
+                    choices=["coupled", "independent"])
+    ap.add_argument("--union-export", action="store_true")
     args = ap.parse_args()
 
     repo_root = Path(args.repo_root)
@@ -294,6 +302,7 @@ def main():
                 exp_key, ref_glb, summary, args.out_root,
                 k=args.k, iters=args.iters,
                 resolution=args.resolution, rays=args.rays,
+                nsq_init=args.nsq_init, union_export=args.union_export,
             )
         except Exception as e:
             print(f"[error] {exp_key} failed: {e}")
