@@ -61,9 +61,23 @@ the paper-faithful "independent" NSQ init didn't work for us. Phase 1
 
 ## Pod state
 
-- Pod 35076678 (ssh6.vast.ai:36678), A100_SXM4, ~$14 credit remaining
-- phase 2 autonomous_runner: PID 7009, window_box run_canary: PID 8188
-- round3 queue watcher: PID 9270, watching for phase2 exit
+- Pod 35076678 (ssh6.vast.ai:36678), A100_SXM4, $0.89/hr, ~97% util,
+  **~$13 credit remaining**
+- Round 3 run_canary: PID 9816, actively training
+- Round 3 queue watcher: PID 9270, will trigger hole_metric +
+  diagnose_primitives when run_canary exits
+
+### ⚠️ Attention: second pod burning money idle
+
+- Pod **35082988** (ssh3.vast.ai:12988), H100_NVL, **$1.79/hr**
+- Label: `easy3e-sprint`
+- **0% GPU util**, 5.6 hours uptime = ~$10 burned idle already
+- Not used by this DualPrim work; belongs to the Easy3E editing plan
+- **Decision needed when user returns:** keep running for Easy3E
+  sprint, or destroy and recreate when needed. Idle cost = $43/day
+  if left running.
+- I am NOT touching it autonomously — destroying someone else's pod
+  is not my call.
 
 ## Critical open questions
 
