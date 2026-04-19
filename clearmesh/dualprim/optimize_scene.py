@@ -448,6 +448,8 @@ def train(
     device: str = "cuda",
     log_fn: Optional[Callable[[int, dict], None]] = None,
     checkpoint_path: Optional[str] = None,
+    trajectory_dir: Optional[str] = None,
+    trajectory_iters: Optional[list[int]] = None,
 ) -> TrainingState:
     """Run per-scene optimization.
 
@@ -455,7 +457,28 @@ def train(
     normal GT. Caller is responsible for building this — see
     scripts/dualprim/run_canary.py for the mesh-rendered-views
     implementation.
+
+    Trajectory snapshots (for training a warm-start / refinement
+    predictor downstream): if ``trajectory_dir`` is given, write the
+    scene's live primitives to ``{trajectory_dir}/step_{N:06d}.json``
+    at every iter in ``trajectory_iters``. Default snapshot schedule
+    is canonical (~log-spaced over the run) — see
+    clearmesh.dualprim.io.canonical_trajectory_iters.
+
+    Saving JSON mid-training is cheap: no renderer, no gradients, just
+    pack live primitives into a dict and dump. Empirically <50ms per
+    snapshot even for K=100. Five snapshots over a 15k-iter run is
+    negligible overhead but gives the downstream dataset ~5× more
+    training points per mesh than endpoint-only.
     """
+    from clearmesh.dualprim.io import save_scene_json, canonical_trajectory_iters
+
+    if trajectory_dir is not None:
+        if trajectory_iters is None:
+            trajectory_iters = canonical_trajectory_iters(config.num_iterations)
+        trajectory_iter_set = set(trajectory_iters)
+    else:
+        trajectory_iter_set = set()
     opt_params = [scene.params]
     if scene.lighting_mlp is not None:
         opt_params += list(scene.lighting_mlp.parameters())
@@ -585,6 +608,27 @@ def train(
 
         if checkpoint_path and it > 0 and it % config.checkpoint_interval == 0:
             _save_checkpoint(scene, checkpoint_path, it)
+
+        # Trajectory snapshot (JSON, for downstream warm-start training).
+        # Use (it + 1) semantics: snapshot AFTER the step has completed.
+        # So a schedule of [1000, 3000, ...] captures state post-iter-999,
+        # post-iter-2999, etc. — the "after N optimization steps" state.
+        if trajectory_dir is not None and (it + 1) in trajectory_iter_set:
+            save_scene_json(
+                scene,
+                Path(trajectory_dir) / f"step_{it + 1:06d}.json",
+                iteration=it + 1,
+            )
+
+    # Always save a final-step snapshot if we're tracking trajectories.
+    # Cheap insurance against off-by-one schedule mistakes and gives a
+    # predictable end-of-run filename downstream loaders can key on.
+    if trajectory_dir is not None:
+        save_scene_json(
+            scene,
+            Path(trajectory_dir) / f"step_{config.num_iterations:06d}.json",
+            iteration=config.num_iterations,
+        )
 
     timings["total"] = time.time() - t_start
     return TrainingState(

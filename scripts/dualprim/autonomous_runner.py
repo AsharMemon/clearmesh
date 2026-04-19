@@ -72,9 +72,20 @@ def run_experiment(
     nsq_init: str = "coupled",
     union_export: bool = False,
     fg_bias: float = 0.7,
+    trajectory: bool = False,
+    run_label: str = None,
 ) -> dict:
-    """Train, render, evaluate. Returns a result dict."""
-    out_dir = Path(out_root) / name
+    """Train, render, evaluate. Returns a result dict.
+
+    If ``trajectory=True``, passes --trajectory-dir to run_canary so
+    log-spaced JSON snapshots are written to {out_dir}/trajectory/ —
+    these become training points for the warm-start predictor.
+
+    ``run_label`` (e.g. "seed0") is appended to the output dir name so
+    multiple seeds of the same experiment don't collide.
+    """
+    dir_name = f"{name}_{run_label}" if run_label else name
+    out_dir = Path(out_root) / dir_name
     out_dir.mkdir(parents=True, exist_ok=True)
     log_file = out_dir / "train.log"
     print(f"\n{'=' * 70}\n[{name}] {summary}\n{'=' * 70}")
@@ -112,6 +123,8 @@ def run_experiment(
     ]
     if union_export:
         train_cmd.append("--union-export")
+    if trajectory:
+        train_cmd.extend(["--trajectory-dir", str(out_dir / "trajectory")])
     with open(log_file, "w") as lf:
         proc = subprocess.run(train_cmd, stdout=lf, stderr=subprocess.STDOUT, env=env)
     train_dt = time.time() - t0
@@ -195,10 +208,17 @@ def run_experiment(
     except Exception:
         pass
 
-    return {
+    result = {
         "name": name,
         "summary": summary,
-        "config": {"k": k, "iters": iters, "resolution": resolution, "rays": rays},
+        "dir_name": dir_name,
+        "seed": seed,
+        "run_label": run_label,
+        "config": {
+            "k": k, "iters": iters, "resolution": resolution, "rays": rays,
+            "nsq_init": nsq_init, "fg_bias": fg_bias,
+            "union_export": union_export, "trajectory": trajectory,
+        },
         "ok": train_ok,
         "train_minutes": train_dt / 60,
         "scene_verts": n_v,
@@ -206,7 +226,21 @@ def run_experiment(
         "chamfer_x1000": cd_scaled,
         "renders": render_paths,
         "final_log_tail": final_log,
+        "ref_glb": ref_glb,
     }
+
+    # Write per-run metrics.json so the downstream dataset loader can
+    # filter by quality without re-reading train logs. Dataset builder
+    # only keeps runs where {chamfer ≤ threshold, hole_metric ≥
+    # threshold, train_ok} — a failed optimization is NOT valid
+    # training data.
+    try:
+        with open(out_dir / "metrics.json", "w") as f:
+            json.dump(result, f, indent=2, default=str)
+    except Exception as e:
+        print(f"[{name}] metrics.json write failed: {e}")
+
+    return result
 
 
 def write_report(out_path: Path, results: list[dict]):
@@ -291,6 +325,18 @@ def main():
                     help="Foreground+boundary ray sampling fraction; "
                          "0.0 = uniform (paper default), 0.7 = friend's "
                          "recommended silhouette-pressure setting.")
+    ap.add_argument("--seeds", nargs="+", type=int, default=[0],
+                    help="Run each experiment with these seeds. "
+                         "Multi-seed teaches the downstream predictor "
+                         "the DISTRIBUTION of valid primitive decompositions "
+                         "for the same mesh, not a single (arbitrary) one. "
+                         "Friend's guidance: 2-3 seeds per mesh.")
+    ap.add_argument("--trajectory", action="store_true",
+                    help="Save log-spaced primitives snapshots during "
+                         "training. Each run produces ~5 training points "
+                         "instead of 1 endpoint — critical for training a "
+                         "warm-start predictor that outputs partially-"
+                         "refined states.")
     args = ap.parse_args()
 
     repo_root = Path(args.repo_root)
@@ -298,22 +344,41 @@ def main():
     docs_dir.mkdir(parents=True, exist_ok=True)
     results: list[dict] = []
 
-    for exp_key in args.experiments:
+    # Cross-product of {experiments} × {seeds}. Multi-seed is the
+    # primary source of dataset richness — same mesh with different
+    # random inits converges to different (valid) primitive configs,
+    # which is exactly the signal a warm-start predictor needs.
+    run_specs = [
+        (exp_key, seed)
+        for exp_key in args.experiments
+        for seed in args.seeds
+    ]
+    print(f"[runner] {len(run_specs)} runs: "
+          f"{len(args.experiments)} exps × {len(args.seeds)} seeds")
+
+    for exp_key, seed in run_specs:
         summary, ref_glb = EXPERIMENT_LIBRARY[exp_key]
         if not Path(ref_glb).exists():
             print(f"[skip] {exp_key}: ref mesh {ref_glb} not found")
             continue
+        # Only add a seed suffix when running >1 seed — keeps single-seed
+        # output layout backward-compatible with phase 1 / phase 2 runs.
+        run_label = f"seed{seed}" if len(args.seeds) > 1 else None
         try:
             res = run_experiment(
                 exp_key, ref_glb, summary, args.out_root,
                 k=args.k, iters=args.iters,
                 resolution=args.resolution, rays=args.rays,
+                seed=seed,
                 nsq_init=args.nsq_init, union_export=args.union_export,
                 fg_bias=args.fg_bias,
+                trajectory=args.trajectory,
+                run_label=run_label,
             )
         except Exception as e:
-            print(f"[error] {exp_key} failed: {e}")
-            res = {"name": exp_key, "summary": summary, "ok": False, "error": str(e),
+            print(f"[error] {exp_key}/seed{seed} failed: {e}")
+            res = {"name": exp_key, "summary": summary, "seed": seed,
+                   "ok": False, "error": str(e),
                    "config": {"k": args.k, "iters": args.iters,
                               "resolution": args.resolution, "rays": args.rays},
                    "train_minutes": 0, "scene_verts": 0, "scene_faces": 0}
@@ -321,9 +386,10 @@ def main():
 
         # Copy renders into the docs dir for git commit
         if res.get("ok") and res.get("renders"):
-            target = docs_dir / exp_key
+            doc_subdir = res.get("dir_name", exp_key)
+            target = docs_dir / doc_subdir
             target.mkdir(parents=True, exist_ok=True)
-            src_dir = Path(args.out_root) / exp_key
+            src_dir = Path(args.out_root) / doc_subdir
             for rp in res["renders"]:
                 try:
                     import shutil
@@ -336,7 +402,8 @@ def main():
         # Commit + push (might no-op if no changes)
         commit_results(
             repo_root, docs_dir,
-            msg=f"dualprim_runs: {exp_key} complete (CD={res.get('chamfer_x1000', 'na')})",
+            msg=f"dualprim_runs: {res.get('dir_name', exp_key)} complete "
+                f"(CD={res.get('chamfer_x1000', 'na')})",
         )
 
     # Final summary

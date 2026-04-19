@@ -83,6 +83,18 @@ def main():
                          "pixels (rest uniform). 0.0 = paper's default "
                          "uniform sampling; 0.7 = friend's recommended "
                          "silhouette-pressure boost.")
+    ap.add_argument("--trajectory-dir", default=None,
+                    help="If set, write primitives_step_{N}.json snapshots "
+                         "at canonical training iters (~log-spaced). Used "
+                         "to build a warm-start training corpus: each "
+                         "snapshot is one (mesh, seed, step) tuple for the "
+                         "downstream feedforward predictor. Default off.")
+    ap.add_argument("--resume-primitives", default=None,
+                    help="Path to a primitives JSON (endpoint or trajectory "
+                         "snapshot) to warm-start from. Skips random init. "
+                         "Useful for measuring 'how few iters do I need "
+                         "from a good starting point?' — the Gate 3 "
+                         "feasibility check.")
     args = ap.parse_args()
 
     out_dir = Path(args.out)
@@ -109,7 +121,16 @@ def main():
     print(f"[canary] device={device}")
     print(f"[canary] mode={args.mode}, K={config.num_primitives_init}, "
           f"iters={config.num_iterations}")
-    scene = init_scene(config, device=device)
+    if args.resume_primitives:
+        from clearmesh.dualprim.io import load_scene_from_json
+        print(f"[canary] WARM START from {args.resume_primitives}")
+        scene = load_scene_from_json(
+            args.resume_primitives, config,
+            device=device, pad_to_K=config.num_primitives_init,
+        )
+        print(f"[canary] loaded {scene.num_alive}/{scene.K} live primitives")
+    else:
+        scene = init_scene(config, device=device)
 
     # ----- Build the ray sampler for this mode -----
     if args.mode == "mesh_fit":
@@ -201,6 +222,7 @@ def main():
             device=device,
             log_fn=log_fn,
             checkpoint_path=str(out_dir / "checkpoints"),
+            trajectory_dir=args.trajectory_dir,
         )
 
     train_dt = time.time() - t0
@@ -214,20 +236,15 @@ def main():
     for i, m in enumerate(per_prim):
         m.export(out_dir / f"per_prim_{i:03d}.glb")
 
-    # Save primitive params
-    from dataclasses import asdict as _asdict
-
-    def _tensor_to_list(x):
-        return x.detach().cpu().tolist() if torch.is_tensor(x) else list(x)
-
-    prims_json = []
-    for i, dp in enumerate(scene.live_primitives()):
-        d = {}
-        for k, v in _asdict(dp).items():
-            d[k] = _tensor_to_list(v)
-        prims_json.append(d)
-    with open(out_dir / "primitives.json", "w") as f:
-        json.dump({"primitives": prims_json, "training_s": train_dt}, f, indent=2)
+    # Save primitive params (same format as trajectory snapshots for
+    # corpus-uniformity — downstream dataset loaders can treat the
+    # final primitives.json as just another snapshot keyed at iter==N).
+    from clearmesh.dualprim.io import save_scene_json
+    save_scene_json(
+        scene, out_dir / "primitives.json",
+        iteration=config.num_iterations,
+        extra_metadata={"training_s": train_dt},
+    )
 
     print()
     print("=" * 60)
