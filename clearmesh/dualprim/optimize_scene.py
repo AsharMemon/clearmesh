@@ -459,6 +459,9 @@ def train(
 
     loss_history: list[dict] = []
     timings = {"total": 0.0, "render": 0.0, "loss": 0.0, "step": 0.0, "prune": 0.0}
+    # Stage-timing baseline (per-window deltas in the log_fn block)
+    prev_log_it = 0
+    prev_t_render = prev_t_loss = prev_t_step = prev_t_prune = 0.0
     t_start = time.time()
 
     for it in range(config.num_iterations):
@@ -555,6 +558,17 @@ def train(
                 mu=config.mu_gate_offset,
             )
             parts.update(diag)
+            # Stage timings — average per-iter for the just-completed window.
+            # Catches the cost-cliff failure mode: "GPU at 100% but iter
+            # rate falls off a cliff because one stage exploded".
+            n_window = max(it - prev_log_it, 1)
+            parts["t_render_ms"] = 1000.0 * (timings["render"] - prev_t_render) / n_window
+            parts["t_loss_ms"] = 1000.0 * (timings["loss"] - prev_t_loss) / n_window
+            parts["t_step_ms"] = 1000.0 * (timings["step"] - prev_t_step) / n_window
+            parts["t_prune_ms"] = 1000.0 * (timings["prune"] - prev_t_prune) / n_window
+            prev_t_render, prev_t_loss = timings["render"], timings["loss"]
+            prev_t_step, prev_t_prune = timings["step"], timings["prune"]
+            prev_log_it = it
             loss_history.append(parts)
             if log_fn is not None:
                 log_fn(it, parts)

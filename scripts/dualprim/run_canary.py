@@ -168,6 +168,14 @@ def main():
                 line += f" NSQ∩PSQ={parts['nsq_overlap_pct']:.0f}%"
             if "pe_mean_fg" in parts:
                 line += f" P_E_fg={parts['pe_mean_fg']:.3f}/{parts['pe_max_fg']:.2f}"
+            if "t_render_ms" in parts:
+                # Stage timings — per-iter average for this window. Friend's
+                # debug recommendation: catches "one iteration takes 30s"
+                # cost-cliff failure modes (NaN-skip storms, etc).
+                line += (
+                    f"  t[r{parts['t_render_ms']:.0f}/l{parts['t_loss_ms']:.0f}"
+                    f"/s{parts['t_step_ms']:.0f}/p{parts['t_prune_ms']:.0f}]ms"
+                )
             print(line)
             with open(log_path, "w") as f:
                 json.dump(log_rows, f, indent=2)
