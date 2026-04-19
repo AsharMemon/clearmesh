@@ -10,14 +10,23 @@ the paper-faithful "independent" NSQ init didn't work for us. Phase 1
 (coupled init) produced 14 carving primitives / 24 alive; Phase 2
 (independent init) produced 0 carvers / 55 alive.
 
-**In flight:**
-- Phase 2 `window_box` finishing (should be done ~17:30 pod-time)
-- Round 3 `hole` queued — reverts to `coupled` NSQ init, otherwise
-  identical to Phase 2. Tests the single-variable hypothesis.
+**Phase 2 window_box: KILLED** — hung at iter 0 for 17 min (100% GPU,
+130 threads, no log progress). See
+[dualprim_known_issues.md](dualprim_known_issues.md) §1.
 
-**Next automated decision** (scheduled wakeup at 17:57):
-- If round 3 passes Gate 0 → fire `gate05_warmstart.py` for Gate 0.5
-- If round 3 fails → draft round-4 (double views, λ_mask=5,
+**Round 3 (coupled init) RUNNING:**
+- Started ~23:04 pod-time
+- Iter 0 signature: NSQ∩PSQ=**100%** (vs phase 2's 2%), P_E_fg
+  max=**0.92** (vs phase 2's 0.00). Both confirm the coupled init
+  hypothesis — primitives ARE configured to carve from the start.
+- Expected completion ~01:10 pod-time (~2 hours from start)
+- 15k iters × ~512ms/iter = ~128 min
+- Monitor task `b83hfaq25` watches for refit.glb completion or crash
+
+**Next automated decision** (when round 3 completes):
+- If Gate 0 passes (through-hole-open > 30%, IoU ≥ 0.85) → fire
+  `gate05_warmstart.py` for Gate 0.5
+- If fails → draft round-4 (double views, λ_mask=5,
   pruning_interval=2000)
 
 ## Headline numbers
