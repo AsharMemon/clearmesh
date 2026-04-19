@@ -309,8 +309,20 @@ def commit_results(repo_root: Path, results_dir: Path, msg: str):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--experiments", nargs="+", required=True,
-                    choices=list(EXPERIMENT_LIBRARY.keys()))
+    # Two mutually-exclusive mesh-source modes:
+    #   --experiments: named canaries from EXPERIMENT_LIBRARY (phase 1/2 style)
+    #   --mesh-list: JSON manifest (e.g. from objaverse_sampler) for
+    #     teacher data collection at scale
+    ap.add_argument("--experiments", nargs="+",
+                    choices=list(EXPERIMENT_LIBRARY.keys()),
+                    help="Named canary meshes from EXPERIMENT_LIBRARY. "
+                         "Mutually exclusive with --mesh-list.")
+    ap.add_argument("--mesh-list", default=None,
+                    help="Path to a JSON manifest (as written by "
+                         "objaverse_sampler.py) listing {uid, path, "
+                         "lvis_class} records. Runs autonomous training "
+                         "on each listed mesh. Mutually exclusive with "
+                         "--experiments.")
     ap.add_argument("--out-root", default="/workspace/dualprim_auto")
     ap.add_argument("--k", type=int, default=30)
     ap.add_argument("--iters", type=int, default=5000)
@@ -339,25 +351,49 @@ def main():
                          "refined states.")
     args = ap.parse_args()
 
+    # Validate mesh-source flags: exactly one must be set.
+    if bool(args.experiments) == bool(args.mesh_list):
+        ap.error("specify exactly one of --experiments or --mesh-list")
+
     repo_root = Path(args.repo_root)
     docs_dir = repo_root / "docs" / "dualprim_runs"
     docs_dir.mkdir(parents=True, exist_ok=True)
     results: list[dict] = []
 
-    # Cross-product of {experiments} × {seeds}. Multi-seed is the
+    # Build the (exp_key, ref_glb, summary) tuples we'll iterate.
+    # Named canaries and Objaverse manifest items unify into the same
+    # shape, so the main loop below doesn't branch on source type.
+    mesh_specs: list[tuple[str, str, str]] = []
+    if args.experiments:
+        for exp_key in args.experiments:
+            summary, ref_glb = EXPERIMENT_LIBRARY[exp_key]
+            mesh_specs.append((exp_key, ref_glb, summary))
+    else:
+        manifest = json.load(open(args.mesh_list))
+        meshes = manifest.get("meshes", [])
+        for m in meshes:
+            # Slugify the Objaverse UID (first 8 chars) + lvis_class for
+            # a stable, human-readable experiment key.
+            uid_short = m["uid"][:8]
+            lvis = m.get("lvis_class", "unknown").replace(" ", "_")
+            exp_key = f"{lvis}_{uid_short}"
+            summary = f"Objaverse {m['uid']} ({m.get('lvis_class', '?')})"
+            mesh_specs.append((exp_key, m["path"], summary))
+        print(f"[runner] loaded {len(mesh_specs)} meshes from {args.mesh_list}")
+
+    # Cross-product of {meshes} × {seeds}. Multi-seed is the
     # primary source of dataset richness — same mesh with different
     # random inits converges to different (valid) primitive configs,
     # which is exactly the signal a warm-start predictor needs.
     run_specs = [
-        (exp_key, seed)
-        for exp_key in args.experiments
+        (ms, seed)
+        for ms in mesh_specs
         for seed in args.seeds
     ]
     print(f"[runner] {len(run_specs)} runs: "
-          f"{len(args.experiments)} exps × {len(args.seeds)} seeds")
+          f"{len(mesh_specs)} meshes × {len(args.seeds)} seeds")
 
-    for exp_key, seed in run_specs:
-        summary, ref_glb = EXPERIMENT_LIBRARY[exp_key]
+    for (exp_key, ref_glb, summary), seed in run_specs:
         if not Path(ref_glb).exists():
             print(f"[skip] {exp_key}: ref mesh {ref_glb} not found")
             continue
