@@ -191,4 +191,60 @@ Infrastructure to capture these goes into the week-0 async job scaffolding. Metr
 
 ---
 
-*Last updated: 2026-04-19. Update this doc when gates pass or plans shift.*
+---
+
+## Run log
+
+### 2026-04-19, evening — Phase 2 Gate 0 result
+
+**Result: Gate 0 FAILED definitively.**
+
+Phase 2 config: K=100, 15k iters, independent NSQ init, fg_bias=0.7,
+lambda_mask=3.0, boxier shape init, θ curriculum, union-export.
+
+Hole metric (upgraded with 24 hole-axis-biased ring views):
+- Mean mask IoU (all views): 0.6619
+- Through-hole open %: **0.0% (0/24 ring views)**
+- Mean hole recall: **0.0000**
+
+Diagnostic (`scripts/dualprim/diagnose_primitives.py`):
+- 55 export-alive primitives out of K=100
+- **0 carvers** (α≥0.5 AND ‖NSQ‖≥0.03 AND NSQ inside PSQ)
+- **1 / 55 NSQs positioned inside their PSQ**
+
+Compare to Phase 1 (coupled init, K=30, 5k iters, no supervision tuning):
+- 24 export-alive / 30
+- **14 carvers**
+- **16 / 24 NSQs inside their PSQ** (67% retention)
+- 1 carver near hole axis — but too spherical to cut through-hole
+
+**Root cause:** the paper-faithful "independent" NSQ init (random in
+[-1,1]^3) failed catastrophically. Supervision could not pull random-
+placed NSQs into their PSQs over 15k iters. 2% retention is barely
+distinguishable from random init. The supervision pressure we tuned
+(λ_mask=3, fg_bias=0.7) assumed NSQs would be near their PSQs
+initially; it's not strong enough to close a cross-volume distance.
+
+**Round 3 kicked off:** revert `nsq_init` to `coupled`, keep all
+other supervision tuning. Isolates this one variable. Queued on pod
+to fire after window_box completes. Expected runtime ~90 min.
+
+If round 3 passes Gate 0 → next step is Gate 0.1 sweep (iter /
+resolution) and Gate 0.5 (warm-start feasibility).
+
+If round 3 still fails → round 4 proposal: double the training view
+count (26 → 52) so supervision actually sees the hole axis at
+several views. Possibly add explicit "NSQ-in-PSQ" positional loss
+as a patch that makes independent init work too.
+
+Training views note: `render_views.py` uses `paper_view_directions`
+= 24 fibonacci + top + bottom. Same 2/26 hole-axis problem the
+metric had before the ring-view upgrade. Even with coupled init,
+supervision at the hole axis is thin. Phase 1's one carver-near-axis
+was roughly spherical — can't cut through a box. May need elongated
+NSQs along the axis, achievable via either denser axial views OR
+NSQs initialized with axis-aligned elongation.
+
+---
+
+*Last updated: 2026-04-19, mid-round-3. Update this doc when gates pass or plans shift.*
