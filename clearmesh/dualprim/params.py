@@ -109,6 +109,12 @@ class DualPrimConfig:
     # Default 0 = off (backward compatible). Round 7 uses ~5.0.
     lambda_open_ray: float = 0.0
 
+    # Mask loss type: "bce" (paper) or "mse" (NaN-safe).
+    # Round 11 discovery: BCE gradient -1/(1-m) at m→1 cascades into
+    # NaN through the rendering backward chain at K=30+. MSE bounded
+    # gradient ±2 is NaN-safe and gets ~100% effective iters.
+    mask_loss_type: str = "mse"
+
     # ================================================================
     # Adaptive pruning (§4.2)
     # ================================================================

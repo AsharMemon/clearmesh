@@ -574,6 +574,7 @@ def train(
             lambda_norm_reg=config.lambda_norm_reg,
             lambda_open_ray=config.lambda_open_ray,
             hole_ray_gt=getattr(batch, "hole_ray_gt", None),
+            mask_loss_type=getattr(config, "mask_loss_type", "bce"),
         )
         timings["loss"] += time.time() - t0
 

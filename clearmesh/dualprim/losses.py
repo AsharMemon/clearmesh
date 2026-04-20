@@ -40,8 +40,23 @@ def loss_mask(
     render: RenderOutput,
     mask_gt: torch.Tensor,         # (R,) in [0, 1]
     eps: float = 1e-6,
+    loss_type: str = "bce",
 ) -> torch.Tensor:
-    """Eq 14 — per-ray BCE on rendered mask vs GT mask."""
+    """Eq 14 — per-ray loss on rendered mask vs GT mask.
+
+    loss_type:
+      "bce" — paper's binary cross-entropy (eps-clamped for stability).
+              Strong penalty on confident wrong predictions.
+              Gradient -1/(1-m) unbounded near m=1; with mask_gt=0,
+              this can hit ~1e6 magnitude per ray at eps=1e-6, which
+              cascades through the rendering backward chain and
+              produces NaN when aggregated over many rays.
+      "mse" — mean squared error. Gradient 2*(m - mask_gt) bounded
+              by ±2 per element. Much NaN-safer. Empirically round
+              11 showed ~90% NaN-skip with BCE drops to ~0% with MSE.
+    """
+    if loss_type == "mse":
+        return F.mse_loss(render.mask, mask_gt)
     m = render.mask.clamp(eps, 1.0 - eps)
     return F.binary_cross_entropy(m, mask_gt)
 
@@ -275,13 +290,14 @@ def total_loss(
     lambda_norm_reg: float = 0.1,
     lambda_open_ray: float = 0.0,
     hole_ray_gt=None,
+    mask_loss_type: str = "bce",
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Eq 12 — weighted sum of the 6 terms + optional open-ray loss.
 
     Returns (scalar loss, dict for logging).
     """
     l_rgb = loss_rgb(render, rgb_gt, mask_gt)
-    l_mask = loss_mask(render, mask_gt)
+    l_mask = loss_mask(render, mask_gt, loss_type=mask_loss_type)
     l_sp = loss_sparsity(scene)
     l_e = loss_entropy(scene)
     l_max = loss_max(scene)
