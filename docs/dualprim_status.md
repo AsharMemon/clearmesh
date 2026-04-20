@@ -53,12 +53,24 @@ snapshot automatically. Expected outcome regardless of hang:
 
 ## Headline numbers
 
-| Run | Mask IoU | Through-hole open | Hole recall | Carvers |
-|---|---|---|---|---|
-| Phase 1 hole (baseline) | 0.60 | 0.0% (0/2 views) | 0.00 | 14 |
-| Phase 2 hole (tuned, indep. init) | 0.66 | 0.0% (0/24 views) | 0.00 | **0** |
-| Round 3 hole (coupled init) | ⏳ pending | ⏳ | ⏳ | ⏳ |
-| Paper (reference) | — | — | — | claim "works" |
+| Run | K | iters | Mask IoU | Through-hole open | Carvers | NSQs-inside-PSQ |
+|---|---|---|---|---|---|---|
+| Phase 1 hole | 30 | 5k | 0.60 | 0.0% (n=2) | 14 | 16/24 (67%) |
+| Phase 2 hole (indep. init) | 100 | 15k | 0.66 | 0.0% (n=24 ring) | 0 | 1/55 (2%) |
+| Round 3 hole @ iter 1000 (coupled) | 100 | 15k→hung | 0.66 | 0.0% (n=24) | **54** | **57/57 (100%)** |
+| Round 4 hole (52 views, λ=5) | 100 | 15k→? | ⏳ | ⏳ | ⏳ | ⏳ |
+| Paper | 100 | 30k | — | "works" | — | — |
+
+**Interpretation:**
+- Coupled init is **structurally correct** (54 carvers, 100%
+  NSQ-inside-PSQ retention). Independent init is broken at current
+  supervision level (2% retention).
+- Carver count alone doesn't give through-hole. Need carvers
+  positioned *along the hole axis*. Round 3 had 3/54. Even phase 1
+  with its "best" carver produced only a spherical pocket, not a
+  cylinder.
+- Training hang at iter ~1000-2000 is a reproducible bug (round 3
+  + window_box both hit it). Round 4 has a watchdog mitigation.
 
 ## What I built this session
 
