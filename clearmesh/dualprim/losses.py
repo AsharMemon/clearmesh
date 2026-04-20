@@ -121,11 +121,17 @@ def loss_open_ray(
     # NaN that propagates. This clip is cheap insurance.
     m = torch.nan_to_num(m, nan=0.0, posinf=1.0, neginf=0.0)
     m = m.clamp(0.0, 1.0)
-    # Squared instead of BCE: the BCE component already penalizes mask
-    # >0 via loss_mask; we want to ADD pressure, not duplicate it, and
-    # squared loss has a strong gradient exactly at the non-zero values
-    # we need to kill.
-    return (m ** 2).mean()
+    # L1 instead of squared. Initial round 7 used squared which had
+    # two problems:
+    #   (1) gradient = 2m at mask values near 1 is large — with
+    #       lambda_open_ray=5 and m~1.0, individual-ray grad contribution
+    #       can dominate the backward pass and produce NaN via accumulated
+    #       sq_implicit FD-grad overflow in the rendering graph.
+    #   (2) near zero (where we want to land), gradient vanishes,
+    #       making the loss weak exactly where it should be effective.
+    # L1 (absolute value, .mean() of non-negative m is identity) has
+    # CONSTANT gradient magnitude and is NaN-resistant.
+    return m.mean()
 
 
 # ---------------------------------------------------------------------
