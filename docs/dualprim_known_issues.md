@@ -17,7 +17,21 @@ init, lambda_mask=3, fg_bias=0.7) hung after iter 0.
 - Process actively launching CUDA kernels (100% util steady)
 
 **Not reproduced:** Phase 2 hole completed fine with the same config
-(just different reference mesh). So it's geometry-specific.
+(just different reference mesh). So it's data-dependent, not
+config-dependent.
+
+**REPRODUCED** in round 3 hole (coupled init, K=100, 15k iters).
+Hung around iter 1000-2000, log frozen for 1+ hour, 100% GPU util,
+no errors. Process alive in R state. Trajectory snapshot at iter
+999 WAS written, so the loop progressed past iter 999. Log writes
+past iter 200 never reached disk — strongly suggests hang is
+between the trajectory save and the next log_fn call, or inside
+log_fn itself.
+
+So the hang is **NOT unique to independent init**. Something in the
+training loop post-iter-~1000 fails intermittently. Round 4 is
+running with a watchdog (`queue_round4.sh`) that kills on 10-min
+log stall, so we don't waste compute.
 
 **Hypotheses:**
 - Pathological primitive → ray intersection causing sq_implicit to

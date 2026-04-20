@@ -14,20 +14,42 @@ the paper-faithful "independent" NSQ init didn't work for us. Phase 1
 130 threads, no log progress). See
 [dualprim_known_issues.md](dualprim_known_issues.md) §1.
 
-**Round 3 (coupled init) RUNNING:**
-- Started ~23:04 pod-time
-- Iter 0 signature: NSQ∩PSQ=**100%** (vs phase 2's 2%), P_E_fg
-  max=**0.92** (vs phase 2's 0.00). Both confirm the coupled init
-  hypothesis — primitives ARE configured to carve from the start.
-- Expected completion ~01:10 pod-time (~2 hours from start)
-- 15k iters × ~512ms/iter = ~128 min
-- Monitor task `b83hfaq25` watches for refit.glb completion or crash
+**Round 3 (coupled init) HUNG + killed.** Same hang pattern as
+window_box — log frozen past iter ~200, process at 100% GPU but
+no observable progress for 1+ hour. Watchdog caught it after I
+killed manually.
 
-**Next automated decision** (when round 3 completes):
-- If Gate 0 passes (through-hole-open > 30%, IoU ≥ 0.85) → fire
-  `gate05_warmstart.py` for Gate 0.5
-- If fails → draft round-4 (double views, λ_mask=5,
-  pruning_interval=2000)
+**Round 3 iter-1000 snapshot DID produce real data** (rendered via
+`export_from_snapshot.py`):
+- 54 carvers (vs phase 2's 0) ✓
+- 57 / 57 NSQs-inside-PSQs (100% retention) ✓
+- **3 carvers positioned near hole axis**
+- BUT: those 3 carvers at Y = {-0.85, +0.34, +0.55} with NSQ scale
+  ~0.25 (diameter 0.5) — GAPS between them larger than carving
+  reach. No through-hole formed.
+- Mask IoU 0.66, through-hole open **0%**.
+
+**Root cause of hole failure now understood:**
+- Coupled init correctly pairs NSQ↔PSQ (supervision structure OK)
+- But only 2/26 training views look down the hole axis, so only
+  ~3-5% of carvers land near it, and they're spherical not
+  elongated. Can't chain into a through-hole.
+- Fix: more training views + stronger mask weight + later pruning.
+
+**Round 4 RUNNING:**
+- 52 training views (up from 26)
+- coupled init, lambda_mask=5 (up from 3), pruning_interval=2000
+  (up from 1000, gives NSQs more time to find positions)
+- `queue_round4.sh` on pod with watchdog: auto-kills training if
+  train.log stalls >10 min. Failure-safe.
+- Monitor task `bf792pl26` tracking progress or terminal state.
+- Iter 0 logged at ~00:12 pod-time.
+
+**If round 4 hangs:** watchdog kills, we evaluate latest trajectory
+snapshot automatically. Expected outcome regardless of hang:
+    - if 30+ carvers land near the hole axis → good structural fit
+    - if through-hole-open > 0% → Gate 0 partial pass, tune further
+    - if still 0% → need hole-axis-biased training views, not just more
 
 ## Headline numbers
 
