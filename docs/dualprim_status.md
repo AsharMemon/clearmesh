@@ -3,6 +3,32 @@
 TL;DR of where we are. Updated whenever something changes. For the
 full plan see [dualprim_plan.md](dualprim_plan.md).
 
+## ⛔ STOPPED: credit exhausted
+
+**Vast.ai balance: -$0.18** (as of end-of-session). Both pods auto-exited:
+- 35076678 (A100 DualPrim work) — exited mid-round-6
+- 35082988 (H100 easy3e-sprint, idle at 0% util) — also exited
+
+**User action required:** add credit to resume. Pods preserved disk
+state; `/workspace/dualprim_round{3,4,5,6}/` artifacts still exist and
+can be evaluated once pods restart.
+
+**Credit burn analysis:**
+- A100 at $0.89/hr × 9 hrs ≈ $8 this session (expected)
+- H100 at $1.79/hr × 9 hrs idle ≈ $16 unexpected drain
+- The H100 is the main culprit. I flagged it in status early but
+  didn't destroy it autonomously (not my call on user's other work).
+
+**When you come back:**
+1. Top up credit (~$20 recommended — enough for round 6 rerun + Gate
+   0.5 + a few more experiments)
+2. Restart pod 35076678 — round 6 partial outputs on disk may be
+   useful; check `/workspace/dualprim_round6/hole/`
+3. Destroy pod 35082988 if easy3e-sprint isn't currently active
+4. Resume work following the round-6 decision tree in this doc
+
+---
+
 ## Right now
 
 **Gate 0 status:** Phase 2 hole FAILED definitively. Root cause diagnosed:
@@ -36,20 +62,29 @@ killed manually.
   elongated. Can't chain into a through-hole.
 - Fix: more training views + stronger mask weight + later pruning.
 
-**Round 4 RUNNING:**
-- 52 training views (up from 26)
-- coupled init, lambda_mask=5 (up from 3), pruning_interval=2000
-  (up from 1000, gives NSQs more time to find positions)
-- `queue_round4.sh` on pod with watchdog: auto-kills training if
-  train.log stalls >10 min. Failure-safe.
-- Monitor task `bf792pl26` tracking progress or terminal state.
-- Iter 0 logged at ~00:12 pod-time.
+**Round 4 HUNG at iter 200** — watchdog killed at 10 min stall. No
+usable output (no trajectory snapshot reached).
 
-**If round 4 hangs:** watchdog kills, we evaluate latest trajectory
-snapshot automatically. Expected outcome regardless of hang:
-    - if 30+ carvers land near the hole axis → good structural fit
-    - if through-hole-open > 0% → Gate 0 partial pass, tune further
-    - if still 0% → need hole-axis-biased training views, not just more
+**Round 5 (K=50 coupled 5k iters) HUNG at iter 200** — same pattern.
+No useful output.
+
+**Pattern diagnosed:**
+- K=30 coupled lambda=1: works (phase 1)
+- K=30+ coupled lambda=3+: HANGS at iter ~200-1000
+- K=100 independent: works (phase 2 hole)
+- Changed between phase 1 and later runs:
+  - lambda_mask default 1 → 3
+  - fg_bias added (0.7)
+  - theta curriculum added
+  - render cache fix
+  - Friend's supervision tuning pass
+
+Something in this list introduced the hang. We haven't bisected.
+
+**Round 6 was running** (K=30 coupled lambda=1 + `--add-hole-axis-views`,
+closest possible replication of phase 1 but with stronger hole
+supervision) when pod died. Partial outputs possibly on disk at
+`/workspace/dualprim_round6/hole/`.
 
 ## Headline numbers
 
