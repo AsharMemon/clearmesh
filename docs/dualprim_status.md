@@ -100,6 +100,40 @@ closest possible replication of phase 1 but with stronger hole
 supervision) when pod died. Partial outputs possibly on disk at
 `/workspace/dualprim_round6/hole/`.
 
+## ⚠️ CRITICAL: Rounds 6-11 produce visually unusable output
+
+Rendered the refit meshes side-by-side with references. All 3 tested
+canaries (hole, stool, dumbbell) produce **scattered blob piles**, not
+coherent structure:
+- hole ref: clean 1×0.6×0.6 box with Y-axis hole. pred: pile of
+  random blobs, no hole, no box structure.
+- stool ref: cylindrical top + 4 legs. pred: blob pile, no legs
+  visible, no clear seat.
+- dumbbell ref: 2 spheres + connecting rod. pred: 3 disconnected
+  blob clusters floating in space.
+
+**Chamfer numbers already told us this (CD×1000 = 250-280) but visual
+confirmation is definitive.** Our DualPrim implementation at K=30/5k
+iters simply does not produce usable output, regardless of NaN-grad
+fixes, loss type (BCE vs MSE), or init strategy.
+
+**Honest root cause**: we're running at ~5% of paper compute (K=30
+vs 100, 5k iters vs 30k) AND our numerical stability is worse (90%
+NaN-skip in most rounds). Primitives end up satisfying individual
+silhouette rays without forming coherent 3D structure — a fundamental
+optimization pathology at under-scaled compute.
+
+## Paths forward (ranked)
+
+1. **Scale to paper config** (K=100, 30k iters, 256px res). With
+   heartbeat active, K=100 runs were likely being killed by stale
+   watchdog — rerun with corrected threshold. ~4-6 hr per canary.
+2. **Consider alternative structurization methods** — PartCrafter
+   does part segmentation directly from mesh features and may give
+   cleaner part decomposition without the optimization pathology.
+3. **Give up on structured refinement for now** and ship Stage 2
+   (TRELLIS.2 + RefinementDiT) alone as the v1 product.
+
 ## Rounds 6-8 stuck in same local minimum
 
 Three different supervision strategies at K=30 coupled + hole-axis views
