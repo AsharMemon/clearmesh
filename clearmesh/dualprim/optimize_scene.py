@@ -423,6 +423,13 @@ class RaySampleBatch:
     """Typed batch of training rays.
 
     All tensors must live on the same device as the scene.
+
+    hole_ray_gt: (R,) bool tensor flagging rays whose pixel lies INSIDE
+    the filled silhouette but OUTSIDE the actual mask — i.e. "this
+    ray should pass through empty space because the ref mesh has a
+    hole here." Used by the open-ray loss (losses.loss_open_ray) to
+    specifically reward NSQ carving on these rays. Default: all False
+    (backward-compatible; the loss term is then zero).
     """
     def __init__(
         self,
@@ -431,12 +438,14 @@ class RaySampleBatch:
         rgb_gt: torch.Tensor,       # (R, 3)
         mask_gt: torch.Tensor,      # (R,)
         normals_gt: torch.Tensor,   # (R, 3)
+        hole_ray_gt: Optional[torch.Tensor] = None,  # (R,) bool
     ):
         self.origins = origins
         self.dirs = dirs
         self.rgb_gt = rgb_gt
         self.mask_gt = mask_gt
         self.normals_gt = normals_gt
+        self.hole_ray_gt = hole_ray_gt
 
 
 def train(
@@ -540,6 +549,8 @@ def train(
             lambda_entropy=config.lambda_entropy,
             lambda_max=config.lambda_max,
             lambda_norm_reg=config.lambda_norm_reg,
+            lambda_open_ray=config.lambda_open_ray,
+            hole_ray_gt=getattr(batch, "hole_ray_gt", None),
         )
         timings["loss"] += time.time() - t0
 

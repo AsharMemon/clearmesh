@@ -102,6 +102,13 @@ class DualPrimConfig:
     lambda_max: float = 0.1                 # NOT SPECIFIED
     lambda_norm_reg: float = 0.1            # NOT SPECIFIED
 
+    # Open-ray loss — NOT IN PAPER. Friend's round-7 addition.
+    # Penalizes predicted mask > 0 on rays that pass through GT holes,
+    # stronger than the per-pixel BCE mask loss. Specifically rewards
+    # NSQ carving (vs PSQ-shrinking) for hole preservation.
+    # Default 0 = off (backward compatible). Round 7 uses ~5.0.
+    lambda_open_ray: float = 0.0
+
     # ================================================================
     # Adaptive pruning (§4.2)
     # ================================================================

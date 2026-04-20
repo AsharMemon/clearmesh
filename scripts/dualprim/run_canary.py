@@ -104,6 +104,12 @@ def main():
                          "weak primitives). Default 1000. Increase to "
                          "2000+ to give primitives more time to find "
                          "positions before being pruned.")
+    ap.add_argument("--lambda-open-ray", type=float, default=None,
+                    help="Weight on the open-ray loss (round-7 addition). "
+                         "Penalizes predicted mask > 0 on rays passing "
+                         "through GT holes, STRONGER than the global BCE "
+                         "mask loss. Specifically rewards NSQ carving. "
+                         "Default off (0). Round 7 recipe: 5.0.")
     args = ap.parse_args()
 
     out_dir = Path(args.out)
@@ -120,11 +126,13 @@ def main():
         seed=args.seed,
         nsq_init_strategy=args.nsq_init,
     )
-    # CLI overrides for round-4 tuning levers
+    # CLI overrides for round-4+ tuning levers
     if args.lambda_mask is not None:
         config.lambda_mask = args.lambda_mask
     if args.pruning_interval is not None:
         config.pruning_interval = args.pruning_interval
+    if args.lambda_open_ray is not None:
+        config.lambda_open_ray = args.lambda_open_ray
     # Write the effective config for reproducibility
     from dataclasses import asdict
     with open(out_dir / "config.json", "w") as f:
@@ -207,6 +215,9 @@ def main():
                 f"rgb={parts['rgb']:.3f} mask={parts['mask']:.3f} "
                 f"norm={parts['norm']:.3f} alive={parts['alive']}"
             )
+            # Open-ray loss (round 7+): only show if >0
+            if parts.get("open", 0) > 0:
+                line += f" open={parts['open']:.4f}"
             # NSQ-health diagnostics (added in review round 3)
             if "theta_p50" in parts:
                 line += (f"  θ[{parts['theta_p10']:.2f}/{parts['theta_p50']:.2f}/"
@@ -386,12 +397,27 @@ def _build_views_sampler(views_dir: Path, device: str, fg_bias: float = 0.7):
     poses_t = torch.from_numpy(poses).to(device)
     cam_dirs_t = torch.from_numpy(cam_dirs).to(device)
 
+    # Pre-compute per-view HOLE masks = binary_fill_holes(mask) & ~mask.
+    # These are the pixels that lie INSIDE the silhouette's convex hull
+    # but OUTSIDE the actual mask — i.e. places where the ref mesh has
+    # a hole. For round 7's open-ray loss we mark rays hitting these
+    # pixels as "hole rays" and reward low predicted opacity on them.
+    from scipy import ndimage
+    hole_masks = np.zeros((V, H, W), dtype=bool)
+    for v in range(V):
+        m = masks[v] > 0.5
+        filled = ndimage.binary_fill_holes(m)
+        hole_masks[v] = filled & ~m
+    hole_masks_t = torch.from_numpy(hole_masks).to(device)
+    n_hole_pixels_total = int(hole_masks.sum())
+    print(f"[sampler] total hole pixels across {V} views: {n_hole_pixels_total:,} "
+          f"({100.0 * n_hole_pixels_total / (V * H * W):.2f}%)")
+
     # Pre-compute "interesting" pixel index sets per view: foreground
     # (mask>0.5) PLUS a few-pixel-wide boundary band around the mask
-    # (extracted via 1-px erosion XOR mask). The boundary captures
-    # silhouette + hole edges, which are where the geometric pressure
-    # for carving lives.
-    from scipy import ndimage
+    # (extracted via 1-px erosion XOR mask). Friend's round-7 addition:
+    # ALSO include hole pixels in the "interesting" pool so fg-biased
+    # sampling actually hits holes with reasonable frequency.
     interesting_per_view = []
     for v in range(V):
         m = masks[v] > 0.5
@@ -400,7 +426,7 @@ def _build_views_sampler(views_dir: Path, device: str, fg_bias: float = 0.7):
         # Also add the inverse boundary (just-outside-mask) so silhouette
         # rays actually hit empty space too.
         outer = ndimage.binary_dilation(m, iterations=2) & ~m
-        interesting = m | boundary | outer
+        interesting = m | boundary | outer | hole_masks[v]
         # Flatten to indices
         idx = np.flatnonzero(interesting.ravel())
         interesting_per_view.append(idx)
@@ -444,6 +470,7 @@ def _build_views_sampler(views_dir: Path, device: str, fg_bias: float = 0.7):
         rgb = rgbs_t[vi, yi, xi]                              # (R, 3)
         mask = masks_t[vi, yi, xi]                             # (R,)
         normal = normals_t[vi, yi, xi]                         # (R, 3)
+        hole_ray = hole_masks_t[vi, yi, xi]                    # (R,) bool
 
         cam_dir = cam_dirs_t[yi, xi]
         rot = poses_t[vi, :3, :3]
@@ -453,6 +480,7 @@ def _build_views_sampler(views_dir: Path, device: str, fg_bias: float = 0.7):
         return RaySampleBatch(
             origins=origin, dirs=world_dir,
             rgb_gt=rgb, mask_gt=mask, normals_gt=normal,
+            hole_ray_gt=hole_ray,
         )
     return sampler
 

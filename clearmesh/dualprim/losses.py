@@ -81,6 +81,37 @@ def loss_norm_reg(
     return (diff * mask_gt).mean()
 
 
+def loss_open_ray(
+    render: RenderOutput,
+    hole_ray_gt: torch.Tensor,     # (R,) bool — True if this ray should pass through
+) -> torch.Tensor:
+    """NOT IN THE PAPER — topology-aware augmentation of the mask loss.
+
+    Problem: the standard mask loss (loss_mask above) penalizes
+    predicted mask > 0 at hole pixels, which the optimizer can satisfy
+    EITHER by:
+      (a) shrinking PSQs so no primitive reaches this ray (reduces
+          mass globally, fights with silhouette)
+      (b) NSQ-carving this ray (what we want)
+
+    Both get equal credit from BCE. Friend's review: "for rays that
+    correspond to GT hole pixels, encourage low predicted opacity /
+    high transmittance." This function gives that signal DIRECTLY by
+    computing the mean predicted mask on exactly those hole rays
+    (squared for strong gradient near zero).
+
+    Returns a scalar loss; zero if `hole_ray_gt` is None or has no
+    True entries. Safe to always-include in the total loss.
+    """
+    if hole_ray_gt is None or hole_ray_gt.sum() == 0:
+        return render.mask.new_zeros(())
+    # Squared instead of BCE: the BCE component already penalizes mask
+    # >0 via loss_mask; we want to ADD pressure, not duplicate it, and
+    # squared loss has a strong gradient exactly at the non-zero values
+    # we need to kill.
+    return (render.mask[hole_ray_gt] ** 2).mean()
+
+
 # ---------------------------------------------------------------------
 # TSDF loss — NOT in the paper
 #
@@ -220,8 +251,10 @@ def total_loss(
     lambda_entropy: float = 0.01,
     lambda_max: float = 0.1,
     lambda_norm_reg: float = 0.1,
+    lambda_open_ray: float = 0.0,
+    hole_ray_gt=None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
-    """Eq 12 — weighted sum of the 6 terms.
+    """Eq 12 — weighted sum of the 6 terms + optional open-ray loss.
 
     Returns (scalar loss, dict for logging).
     """
@@ -231,6 +264,8 @@ def total_loss(
     l_e = loss_entropy(scene)
     l_max = loss_max(scene)
     l_norm = loss_norm_reg(render, normals_pred, mask_gt)
+    # New: topology-aware open-ray loss (zero if no hole rays provided)
+    l_open = loss_open_ray(render, hole_ray_gt) if lambda_open_ray > 0 else render.mask.new_zeros(())
 
     total = (
         l_rgb
@@ -239,6 +274,7 @@ def total_loss(
         + lambda_entropy * l_e
         + lambda_max * l_max
         + lambda_norm_reg * l_norm
+        + lambda_open_ray * l_open
     )
     parts = {
         "rgb": l_rgb.item(),
@@ -247,6 +283,7 @@ def total_loss(
         "entropy": l_e.item(),
         "max": l_max.item(),
         "norm": l_norm.item(),
+        "open": l_open.item(),
         "total": total.item(),
     }
     return total, parts
