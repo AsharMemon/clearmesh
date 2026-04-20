@@ -80,6 +80,61 @@ def paper_view_directions(n_sphere: int = 24) -> list[tuple[float, float, float]
     return sphere + [(0.0, 1.0, 0.0), (0.0, -1.0, 0.0)]
 
 
+def hole_axis_ring_directions(
+    hole_axis: int, n_ring: int = 12, tilt_deg: float = 15.0,
+) -> list[tuple[float, float, float]]:
+    """Directions clustered around a hole axis.
+
+    Same shape as in hole_metric.py: 2*n_ring directions on small cones
+    (±axis, tilt=15°). All see through the hole. Used to augment the
+    paper's 26-view training set when we know a specific axis is
+    topologically important.
+    """
+    import math as _m
+    tilt = _m.radians(tilt_deg)
+    dirs = []
+    for sign in (1.0, -1.0):
+        for i in range(n_ring):
+            phi = 2.0 * _m.pi * i / n_ring
+            d = [0.0, 0.0, 0.0]
+            d[hole_axis] = sign * _m.cos(tilt)
+            perp_axes = [a for a in range(3) if a != hole_axis]
+            d[perp_axes[0]] = _m.sin(tilt) * _m.cos(phi)
+            d[perp_axes[1]] = _m.sin(tilt) * _m.sin(phi)
+            dirs.append(tuple(d))
+    return dirs
+
+
+def detect_hole_axis(mesh: trimesh.Trimesh, probe_res: int = 256) -> int:
+    """Return 0/1/2 for X/Y/Z — the axis exposing the most through-hole.
+
+    Cheap: renders the mesh silhouette from each axis, counts "hole
+    pixels" = (binary_fill_holes(mask) AND NOT mask), picks the max.
+    """
+    import pyrender
+    from scipy.ndimage import binary_fill_holes
+    yfov = math.radians(40.0)
+    m = mesh.copy()
+    m.vertices -= m.centroid
+    s = m.extents.max()
+    if s > 0: m.vertices /= s
+    best_axis, best_count = 0, -1
+    for axis in range(3):
+        d = [0.0, 0.0, 0.0]; d[axis] = 1.0
+        pose = camera_pose_from_direction(d, distance=2.0)
+        sc = pyrender.Scene(ambient_light=(0, 0, 0), bg_color=(0, 0, 0, 0))
+        sc.add(pyrender.Mesh.from_trimesh(m, smooth=False))
+        sc.add(pyrender.PerspectiveCamera(yfov=yfov, aspectRatio=1.0), pose=pose)
+        rr = pyrender.OffscreenRenderer(probe_res, probe_res)
+        _, depth = rr.render(sc); rr.delete()
+        mask = (depth > 0)
+        filled = binary_fill_holes(mask)
+        hole_pixels = int((filled & ~mask).sum())
+        if hole_pixels > best_count:
+            best_count, best_axis = hole_pixels, axis
+    return best_axis
+
+
 def camera_pose_from_direction(direction, distance=2.0):
     """Camera world-space pose looking toward origin from `direction`."""
     direction = np.asarray(direction, dtype=np.float32)
@@ -126,6 +181,9 @@ def render_views(
     n_sphere_views: int = 24,
     render_normals: bool = True,
     bg_color: tuple = (255, 255, 255, 0),
+    add_hole_axis_views: bool = False,
+    n_hole_ring: int = 12,
+    hole_tilt_deg: float = 15.0,
 ):
     """Write rgb/mask/normal PNGs for all 26 views + views.json.
 
@@ -145,6 +203,13 @@ def render_views(
     mesh.fix_normals()   # ensure vertex_normals are present for _render_world_normals
 
     directions = paper_view_directions(n_sphere_views)
+    if add_hole_axis_views:
+        hole_axis = detect_hole_axis(mesh)
+        print(f"[render_views] auto-detected hole axis: {'XYZ'[hole_axis]}, "
+              f"adding {2 * n_hole_ring} ring views at tilt={hole_tilt_deg}°")
+        directions = directions + hole_axis_ring_directions(
+            hole_axis, n_ring=n_hole_ring, tilt_deg=hole_tilt_deg,
+        )
     yfov = math.radians(yfov_deg)
 
     views = []
@@ -237,6 +302,13 @@ def main():
     ap.add_argument("--yfov-deg", type=float, default=40.0)
     ap.add_argument("--n-sphere-views", type=int, default=24)
     ap.add_argument("--no-normals", action="store_true")
+    ap.add_argument("--add-hole-axis-views", action="store_true",
+                    help="Auto-detect the hole axis and append 2*12 "
+                         "extra training views clustered around it "
+                         "(cone tilt 15°). Gives the optimizer much "
+                         "stronger signal for carving through-holes.")
+    ap.add_argument("--n-hole-ring", type=int, default=12)
+    ap.add_argument("--hole-tilt-deg", type=float, default=15.0)
     args = ap.parse_args()
 
     render_views(
@@ -244,6 +316,9 @@ def main():
         resolution=args.resolution, distance=args.distance,
         yfov_deg=args.yfov_deg, n_sphere_views=args.n_sphere_views,
         render_normals=not args.no_normals,
+        add_hole_axis_views=args.add_hole_axis_views,
+        n_hole_ring=args.n_hole_ring,
+        hole_tilt_deg=args.hole_tilt_deg,
     )
 
 
