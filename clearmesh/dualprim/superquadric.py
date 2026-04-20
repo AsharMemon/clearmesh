@@ -70,6 +70,28 @@ def _euler_xyz_to_mat(euler: torch.Tensor) -> torch.Tensor:
 # Superquadric implicit (Eq 2)
 # ---------------------------------------------------------------------
 
+
+def _safe_positive_pow(
+    base: torch.Tensor,
+    exponent: torch.Tensor,
+    *,
+    eps: float = 1e-6,
+    max_log_mag: float = 20.0,
+) -> torch.Tensor:
+    """Positive-base power with log-domain magnitude cap.
+
+    DualPrim spends most of its time far outside many primitives, where
+    normalized coordinates can become large and the SQ exponents can be
+    sharp. Raw ``pow`` then overflows during backward even if the
+    forward result is clamped later. By capping ``exponent * log(base)``
+    before exponentiation, we preserve sign/order near the surface and
+    intentionally saturate far-away values where exact magnitude does
+    not matter to density or gating.
+    """
+    log_base = torch.log(base.clamp(min=eps))
+    log_val = (exponent * log_base).clamp(min=-max_log_mag, max=max_log_mag)
+    return torch.exp(log_val)
+
 def sq_implicit(
     points: torch.Tensor,        # (..., 3) query points
     translation: torch.Tensor,   # (K, 3)
@@ -114,8 +136,12 @@ def sq_implicit(
     # the final f, so the gate still gets a finite (but very large)
     # value and gradients stay finite.
     FCLAMP = 1e6
-    term_xy = (X ** (2.0 / e2) + Y ** (2.0 / e2)).clamp(max=FCLAMP)
-    f = (term_xy ** (e2 / e1)).clamp(max=FCLAMP) + (Z ** (2.0 / e1)).clamp(max=FCLAMP)
+    A = _safe_positive_pow(X, 2.0 / e2, eps=eps)
+    B = _safe_positive_pow(Y, 2.0 / e2, eps=eps)
+    term_xy = (A + B).clamp(max=FCLAMP)
+    outer_xy = _safe_positive_pow(term_xy, e2 / e1, eps=eps)
+    outer_z = _safe_positive_pow(Z, 2.0 / e1, eps=eps)
+    f = outer_xy.clamp(max=FCLAMP) + outer_z.clamp(max=FCLAMP)
     return (f - 1.0).clamp(min=-FCLAMP, max=FCLAMP)   # < 0 inside
 
 
@@ -125,55 +151,68 @@ def sq_implicit_grad(
     eps: float = 1e-6,
     fd_step: float = 1e-3,
 ) -> torch.Tensor:
-    """Finite-difference gradient of sq_implicit w.r.t. points.
+    """Analytic gradient of sq_implicit w.r.t. world-space points.
 
     Returns (..., K, 3). Used in Eq 6 for the surface normal term.
 
-    Replaced torch.autograd.grad (which iterates over K primitives
-    individually) with a vectorised central-difference approximation:
-    6 forward passes of sq_implicit instead of K × autograd calls.
+    The previous implementation used a 6-sample central finite
+    difference. That was fast enough, but numerically ugly: sharp
+    boxy exponents plus FCLAMP saturation produced enormous
+    difference quotients which then blew up the renderer backward
+    pass. The paper only requires f'(p), not a specific method, so
+    using the closed-form derivative is both more faithful and more
+    stable.
 
-    For K=30 primitives × 1024 rays × 64 samples per iteration, this is
-    ~30× faster (the original version took 2+ min per 200 training
-    iters — effectively making the rendered-view path unusable).
-
-    The finite-difference is central-difference with step fd_step
-    (default 1e-3 = 1/1000 of the unit cube). Gradient is
-        ∂f/∂x ≈ (f(x + h·e_i) - f(x - h·e_i)) / (2h)
-    for each of i ∈ {x, y, z}.
+    ``fd_step`` is retained in the signature for backward-compatible
+    call sites, but it is intentionally unused.
     """
-    h = fd_step
-    # Three axis unit vectors broadcast to (..., 3)
-    eye = torch.eye(3, device=points.device, dtype=points.dtype)
+    del fd_step
 
-    # (..., 3) points + h*e_i for each axis → stack along a new dim
-    # so shape is (..., 3, 3) where the new second-to-last dim is axis.
-    pts_fwd = points.unsqueeze(-2) + h * eye        # (..., 3, 3)
-    pts_bwd = points.unsqueeze(-2) - h * eye        # (..., 3, 3)
+    p = points.unsqueeze(-2)                   # (..., 1, 3)
+    R = _euler_xyz_to_mat(rotation)            # (K, 3, 3)
+    R_inv = R.transpose(-2, -1)
+    rel = p - translation                      # (..., K, 3)
+    p_local = torch.einsum("...ki,kij->...kj", rel, R_inv)
 
-    # Evaluate at all 6 offset points in a single call per direction
-    f_fwd = sq_implicit(pts_fwd, translation, rotation, scale, shape, eps=eps)
-    f_bwd = sq_implicit(pts_bwd, translation, rotation, scale, shape, eps=eps)
-    # f_fwd/f_bwd: (..., 3_axes, K)
+    a = scale.clamp(min=eps)
+    e1 = shape[..., 0].clamp(min=0.05, max=2.0)
+    e2 = shape[..., 1].clamp(min=0.05, max=2.0)
 
-    # ∂f/∂x_i = (f(p+h·e_i) - f(p-h·e_i)) / 2h, for i ∈ {0,1,2}
-    # Result: (..., 3_axes, K) → transpose to (..., K, 3)
-    grad = (f_fwd - f_bwd) / (2.0 * h)              # (..., 3, K)
+    x = p_local[..., 0]
+    y = p_local[..., 1]
+    z = p_local[..., 2]
 
-    # Round 10 debug: with boxy ε≈0.2 and large NSQ scale (~0.85), a
-    # point near a primitive edge gets f = FCLAMP=1e6 on one side and
-    # ~0 on the other, giving grad = 1e6 / 2e-3 = 5e8 per axis. With
-    # K=30 primitives summed through the rendering chain, this blows
-    # past float32 safe ranges and produces NaN in backward.
-    #
-    # The DIRECTION of the gradient (sign + relative magnitude across
-    # axes) is what matters for surface normals — the huge absolute
-    # value is noise from the FD discretization at sharp transitions.
-    # Clamp magnitude to a safe range; NaN-replace insurance.
+    X = (x.abs() / a[..., 0] + eps)
+    Y = (y.abs() / a[..., 1] + eps)
+    Z = (z.abs() / a[..., 2] + eps)
+
+    pow_xy = 2.0 / e2
+    pow_z = 2.0 / e1
+    outer = e2 / e1
+
+    A = _safe_positive_pow(X, pow_xy, eps=eps)
+    B = _safe_positive_pow(Y, pow_xy, eps=eps)
+    U = (A + B).clamp(min=eps)
+
+    # Analytic local-frame derivatives:
+    #   d/dx (A + B)^(e2/e1) = (2/e1) * (A + B)^(e2/e1 - 1) * X^(2/e2 - 1) * sign(x) / a_x
+    common_xy = (2.0 / e1) * _safe_positive_pow(U, outer - 1.0, eps=eps)
+    dfdx = common_xy * _safe_positive_pow(X, pow_xy - 1.0, eps=eps) * x.sign() / a[..., 0]
+    dfdy = common_xy * _safe_positive_pow(Y, pow_xy - 1.0, eps=eps) * y.sign() / a[..., 1]
+    dfdz = pow_z * _safe_positive_pow(Z, pow_z - 1.0, eps=eps) * z.sign() / a[..., 2]
+
+    grad_local = torch.stack([dfdx, dfdy, dfdz], dim=-1)   # (..., K, 3)
+
+    # Transform gradient from local to world frame. With row-vector
+    # points p_local = (p_world - T) @ R_inv, so grad_world =
+    # grad_local @ R.
+    grad_world = torch.einsum("...kj,kji->...ki", grad_local, R)
+
     GRAD_CLAMP = 1e3
-    grad = torch.nan_to_num(grad, nan=0.0, posinf=GRAD_CLAMP, neginf=-GRAD_CLAMP)
-    grad = grad.clamp(-GRAD_CLAMP, GRAD_CLAMP)
-    return grad.transpose(-1, -2).contiguous()      # (..., K, 3)
+    grad_world = torch.nan_to_num(
+        grad_world, nan=0.0, posinf=GRAD_CLAMP, neginf=-GRAD_CLAMP,
+    )
+    return grad_world.clamp(-GRAD_CLAMP, GRAD_CLAMP)
 
 
 # ---------------------------------------------------------------------

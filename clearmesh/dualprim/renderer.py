@@ -5,7 +5,7 @@ Paper §3.2 Renderer. Equations implemented:
   (1)  I_render(o, v) = Σ_{i=1..N} ∏_{j<i} (1 − α_j) · α_i · c_i
          standard alpha-composite. α_i = 1 − exp(−σ_i δ_i).
 
-  (7)  σ_S(p) = max( [Φ(f(p+Δp)/θ_S) − Φ(f(p−Δp)/θ_S)] / Φ(f(p)/θ_S), 0 )
+  (7)  σ_S(p) = max( [Φ(f(p+Δp)/θ_S) − Φ(f(p−Δp)/θ_S)] / Φ(f(p+Δp)/θ_S), 0 )
          NeuS-style density from the implicit field. The numerator is
          a finite-difference approximation of the derivative of the
          sigmoid CDF along the ray direction; dividing by the CDF
@@ -113,7 +113,15 @@ def sample_ray_points(
     points = ray_origins.unsqueeze(1) + t_vals.unsqueeze(-1) * ray_dirs.unsqueeze(1)
     # deltas: distance between adjacent samples
     deltas = torch.diff(t_vals, dim=-1)
-    last = torch.full_like(t_vals[:, :1], 1e10)
+    # Paper Eq 1 defines δ_i as adjacent sample spacing. The previous
+    # NeRF-style 1e10 tail distance forces the final alpha to 1 for any
+    # non-zero terminal density, which is especially destructive for
+    # hole rays: a tiny stray sigma at the far sample makes the entire
+    # ray opaque. Reuse the last finite interval instead.
+    if N > 1:
+        last = deltas[:, -1:]
+    else:
+        last = torch.full_like(t_vals[:, :1], far - near)
     deltas = torch.cat([deltas, last], dim=-1)
     return points, t_vals, deltas
 
@@ -149,12 +157,15 @@ def density_from_field(
     The mid-point field is not used in this function; it was removed
     from the signature to prevent it from being accidentally reintroduced.
     """
-    cdf_fwd = _psi(f_fwd, theta, theta_min)
-    cdf_bwd = _psi(f_bwd, theta, theta_min)
-    num = cdf_fwd - cdf_bwd
-    den = cdf_fwd + eps
-    sigma = (num / den).clamp(min=0.0)
-    return sigma
+    cdf_fwd = torch.nan_to_num(_psi(f_fwd, theta, theta_min), nan=0.0, posinf=1.0, neginf=0.0)
+    cdf_bwd = torch.nan_to_num(_psi(f_bwd, theta, theta_min), nan=0.0, posinf=1.0, neginf=0.0)
+    num = torch.nan_to_num(cdf_fwd - cdf_bwd, nan=0.0, posinf=1.0, neginf=0.0)
+    den = cdf_fwd.clamp(min=eps)
+    # Theoretically this ratio lives in [0, 1]. Clamp there explicitly
+    # so numeric junk from saturated implicits does not amplify through
+    # the transmittance chain.
+    sigma = torch.nan_to_num(num / den, nan=0.0, posinf=1.0, neginf=0.0)
+    return sigma.clamp(min=0.0, max=1.0)
 
 
 # ---------------------------------------------------------------------
@@ -210,6 +221,7 @@ def render_rays(
     sigma_k = density_from_field(
         f_fwd, f_bwd, scene.theta(), theta_min=theta_min,
     )  # (R, N, K)
+    sigma_k = torch.nan_to_num(sigma_k, nan=0.0, posinf=1.0, neginf=0.0)
 
     # Apply alpha weighting (pruning via alive mask + learned α)
     alive = scene.alive.to(sigma_k.dtype)                   # (K,)
@@ -217,11 +229,15 @@ def render_rays(
     weight_k = (alpha_k * alive).view(1, 1, -1)             # (1, 1, K)
     sigma_k_weighted = sigma_k * weight_k                    # (R, N, K)
 
-    sigma = sigma_k_weighted.sum(dim=-1)                     # (R, N)
+    sigma = torch.nan_to_num(
+        sigma_k_weighted.sum(dim=-1), nan=0.0, posinf=scene.K, neginf=0.0,
+    )                                                        # (R, N)
 
     # Alpha compositing — Eq 1
-    alpha = 1.0 - torch.exp(-sigma * deltas)                 # (R, N)
-    trans = _accumulated_transmittance(alpha)                # (R, N)
+    optical = torch.nan_to_num(sigma * deltas, nan=0.0, posinf=80.0, neginf=0.0)
+    alpha = 1.0 - torch.exp(-optical.clamp(min=0.0, max=80.0))  # (R, N)
+    alpha = torch.nan_to_num(alpha, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+    trans = torch.nan_to_num(_accumulated_transmittance(alpha), nan=0.0, posinf=1.0, neginf=0.0)
     weights = alpha * trans                                  # (R, N)
 
     # ----- color (Eq 8) -----
@@ -242,20 +258,25 @@ def render_rays(
     # graph. Caching this single result cuts the backward pass cost
     # roughly in half on profiling.
     normals_per_sample = _scene_normal(scene, points, sigma_k_weighted, sigma, mu, theta_min)
+    normals_per_sample = torch.nan_to_num(normals_per_sample, nan=0.0, posinf=0.0, neginf=0.0)
 
     # Lighting residual: MLP on (point, view_dir, weighted_normal)
     if scene.lighting_mlp is not None:
         view_dirs_exp = ray_dirs.unsqueeze(1).expand_as(points)
-        lighting = scene.lighting_mlp(points, view_dirs_exp, normals_per_sample)
+        # The paper specifies an MLP residual C(p), but does not require
+        # geometry gradients to flow through the normal feature input.
+        # Detaching here removes one large and numerically fragile
+        # backward path without changing the forward render.
+        lighting = scene.lighting_mlp(points, view_dirs_exp, normals_per_sample.detach())
         c_per_sample = c_per_sample + lighting
 
-    rgb = (weights.unsqueeze(-1) * c_per_sample).sum(dim=1)   # (R, 3)
+    rgb = torch.nan_to_num((weights.unsqueeze(-1) * c_per_sample).sum(dim=1), nan=0.0)   # (R, 3)
 
     # ----- mask (Eq 9) -----
-    mask = weights.sum(dim=1).clamp(0.0, 1.0)                 # (R,)
+    mask = torch.nan_to_num(weights.sum(dim=1), nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
 
     normals = (weights.unsqueeze(-1) * normals_per_sample).sum(dim=1)
-    normals = F.normalize(normals, dim=-1, eps=1e-8)
+    normals = torch.nan_to_num(F.normalize(normals, dim=-1, eps=1e-8), nan=0.0, posinf=0.0, neginf=0.0)
 
     # Background
     bg = torch.tensor(background, device=rgb.device, dtype=rgb.dtype)

@@ -120,6 +120,13 @@ def main():
                          "BCE mask loss at hole pixels WITHOUT adding a "
                          "new loss path — avoids round-7's NaN-grad "
                          "cascade. Round 8 recipe: 0.3 (30% of rays).")
+    ap.add_argument("--detect-anomaly", action="store_true",
+                    help="Enable torch.autograd.detect_anomaly for the "
+                         "training loop. Slow but useful for identifying "
+                         "the exact backward op that first creates NaN.")
+    ap.add_argument("--abort-on-nan-grad", action="store_true",
+                    help="Abort immediately on the first non-finite "
+                         "gradient instead of continuing with skip logic.")
     args = ap.parse_args()
 
     out_dir = Path(args.out)
@@ -232,6 +239,8 @@ def main():
             # Open-ray loss (round 7+): only show if >0
             if parts.get("open", 0) > 0:
                 line += f" open={parts['open']:.4f}"
+            if parts.get("nan_grad_skip"):
+                line += " [nan_grad]"
             # NSQ-health diagnostics (added in review round 3)
             if "theta_p50" in parts:
                 line += (f"  θ[{parts['theta_p10']:.2f}/{parts['theta_p50']:.2f}/"
@@ -250,6 +259,8 @@ def main():
                     f"  t[r{parts['t_render_ms']:.0f}/l{parts['t_loss_ms']:.0f}"
                     f"/s{parts['t_step_ms']:.0f}/p{parts['t_prune_ms']:.0f}]ms"
                 )
+            if "nan_grad_summary" in parts:
+                line += f" offender={parts['nan_grad_summary']}"
             print(line)
             with open(log_path, "w") as f:
                 json.dump(log_rows, f, indent=2)
@@ -262,6 +273,8 @@ def main():
             log_fn=log_fn,
             checkpoint_path=str(out_dir / "checkpoints"),
             trajectory_dir=args.trajectory_dir,
+            detect_anomaly=args.detect_anomaly,
+            abort_on_nan_grad=args.abort_on_nan_grad,
         )
 
     train_dt = time.time() - t0

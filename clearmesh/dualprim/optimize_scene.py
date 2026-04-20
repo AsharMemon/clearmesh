@@ -21,6 +21,7 @@ DualPrimConfig (mu, lambda_*, lr, etc.).
 from __future__ import annotations
 
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -442,6 +443,73 @@ class TrainingState:
 RaySampler = Callable[[int], "RaySampleBatch"]
 
 
+def _param_col_name(col: int) -> str:
+    if IDX_PSQ_SCALE.start <= col < IDX_PSQ_SCALE.stop:
+        return f"psq_scale[{col - IDX_PSQ_SCALE.start}]"
+    if IDX_NSQ_SCALE.start <= col < IDX_NSQ_SCALE.stop:
+        return f"nsq_scale[{col - IDX_NSQ_SCALE.start}]"
+    if IDX_PSQ_SHAPE.start <= col < IDX_PSQ_SHAPE.stop:
+        return f"psq_shape[{col - IDX_PSQ_SHAPE.start}]"
+    if IDX_NSQ_SHAPE.start <= col < IDX_NSQ_SHAPE.stop:
+        return f"nsq_shape[{col - IDX_NSQ_SHAPE.start}]"
+    if col == IDX_ALPHA:
+        return "alpha"
+    if col == IDX_THETA:
+        return "theta"
+    if IDX_PSQ_TRANSLATION.start <= col < IDX_PSQ_TRANSLATION.stop:
+        return f"psq_translation[{col - IDX_PSQ_TRANSLATION.start}]"
+    if IDX_NSQ_TRANSLATION.start <= col < IDX_NSQ_TRANSLATION.stop:
+        return f"nsq_translation[{col - IDX_NSQ_TRANSLATION.start}]"
+    if IDX_PSQ_ROTATION.start <= col < IDX_PSQ_ROTATION.stop:
+        return f"psq_rotation[{col - IDX_PSQ_ROTATION.start}]"
+    if IDX_NSQ_ROTATION.start <= col < IDX_NSQ_ROTATION.stop:
+        return f"nsq_rotation[{col - IDX_NSQ_ROTATION.start}]"
+    if IDX_COLOR.start <= col < IDX_COLOR.stop:
+        return f"color[{col - IDX_COLOR.start}]"
+    return f"col[{col}]"
+
+
+def _nan_grad_summary(
+    scene: DualPrimScene,
+    opt_named_params: list[tuple[str, torch.Tensor]],
+    *,
+    max_rows: int = 6,
+    max_cols: int = 10,
+) -> str:
+    """Summarize which parameter blocks first went non-finite."""
+    out: list[str] = []
+
+    g = scene.params.grad
+    if g is not None and not torch.isfinite(g).all():
+        bad = ~torch.isfinite(g)
+        rows = bad.any(dim=1).nonzero(as_tuple=True)[0].tolist()
+        cols = bad.any(dim=0).nonzero(as_tuple=True)[0].tolist()
+        col_names = [_param_col_name(c) for c in cols[:max_cols]]
+        out.append(f"scene.params rows={rows[:max_rows]} cols={col_names}")
+
+    for name, p in opt_named_params:
+        if p is scene.params:
+            continue
+        if p.grad is not None and not torch.isfinite(p.grad).all():
+            n_bad = int((~torch.isfinite(p.grad)).sum().item())
+            out.append(f"{name} bad={n_bad}")
+
+    return "; ".join(out) if out else "nonfinite grad but no source summary"
+
+
+def _scene_value_summary(scene: DualPrimScene) -> str:
+    """Compact scalar summary of scene parameter ranges at failure time."""
+    with torch.no_grad():
+        return (
+            f"psq_scale=[{scene.psq_scale().min().item():.3g},{scene.psq_scale().max().item():.3g}] "
+            f"nsq_scale=[{scene.nsq_scale().min().item():.3g},{scene.nsq_scale().max().item():.3g}] "
+            f"psq_shape=[{scene.psq_shape().min().item():.3g},{scene.psq_shape().max().item():.3g}] "
+            f"nsq_shape=[{scene.nsq_shape().min().item():.3g},{scene.nsq_shape().max().item():.3g}] "
+            f"theta=[{scene.theta().min().item():.3g},{scene.theta().max().item():.3g}] "
+            f"alpha=[{scene.alpha().min().item():.3g},{scene.alpha().max().item():.3g}]"
+        )
+
+
 class RaySampleBatch:
     """Typed batch of training rays.
 
@@ -482,6 +550,8 @@ def train(
     checkpoint_path: Optional[str] = None,
     trajectory_dir: Optional[str] = None,
     trajectory_iters: Optional[list[int]] = None,
+    detect_anomaly: bool = False,
+    abort_on_nan_grad: bool = False,
 ) -> TrainingState:
     """Run per-scene optimization.
 
@@ -511,9 +581,13 @@ def train(
         trajectory_iter_set = set(trajectory_iters)
     else:
         trajectory_iter_set = set()
-    opt_params = [scene.params]
+    opt_named_params: list[tuple[str, torch.Tensor]] = [("scene.params", scene.params)]
     if scene.lighting_mlp is not None:
-        opt_params += list(scene.lighting_mlp.parameters())
+        opt_named_params += [
+            (f"lighting_mlp.{name}", p)
+            for name, p in scene.lighting_mlp.named_parameters()
+        ]
+    opt_params = [p for _, p in opt_named_params]
     optimizer = torch.optim.Adam(opt_params, lr=config.learning_rate)
 
     scheduler = None
@@ -549,49 +623,59 @@ def train(
         # that drift outside their PSQs never find their way back.
         theta_min_eff = _theta_min_curriculum(config, it)
 
-        t0 = time.time()
-        render = render_rays(
-            scene,
-            batch.origins, batch.dirs,
-            num_samples=config.num_samples_per_ray,
-            near=config.near_plane,
-            far=config.far_plane,
-            mu=config.mu_gate_offset,
-            theta_min=theta_min_eff,
-            background=config.background_color,
-        )
-        timings["render"] += time.time() - t0
+        anomaly_ctx = torch.autograd.detect_anomaly(check_nan=True) if detect_anomaly else nullcontext()
+        try:
+            with anomaly_ctx:
+                t0 = time.time()
+                render = render_rays(
+                    scene,
+                    batch.origins, batch.dirs,
+                    num_samples=config.num_samples_per_ray,
+                    near=config.near_plane,
+                    far=config.far_plane,
+                    mu=config.mu_gate_offset,
+                    theta_min=theta_min_eff,
+                    background=config.background_color,
+                )
+                timings["render"] += time.time() - t0
 
-        t0 = time.time()
-        loss, parts = total_loss(
-            scene, render,
-            rgb_gt=batch.rgb_gt, mask_gt=batch.mask_gt,
-            normals_pred=batch.normals_gt,
-            lambda_mask=config.lambda_mask,
-            lambda_sparse=config.lambda_sparse,
-            lambda_entropy=config.lambda_entropy,
-            lambda_max=config.lambda_max,
-            lambda_norm_reg=config.lambda_norm_reg,
-            lambda_open_ray=config.lambda_open_ray,
-            hole_ray_gt=getattr(batch, "hole_ray_gt", None),
-            mask_loss_type=getattr(config, "mask_loss_type", "bce"),
-        )
-        timings["loss"] += time.time() - t0
+                t0 = time.time()
+                loss, parts = total_loss(
+                    scene, render,
+                    rgb_gt=batch.rgb_gt, mask_gt=batch.mask_gt,
+                    normals_pred=batch.normals_gt,
+                    lambda_mask=config.lambda_mask,
+                    lambda_sparse=config.lambda_sparse,
+                    lambda_entropy=config.lambda_entropy,
+                    lambda_max=config.lambda_max,
+                    lambda_norm_reg=config.lambda_norm_reg,
+                    lambda_open_ray=config.lambda_open_ray,
+                    hole_ray_gt=getattr(batch, "hole_ray_gt", None),
+                    mask_loss_type=getattr(config, "mask_loss_type", "bce"),
+                )
+                timings["loss"] += time.time() - t0
 
-        t0 = time.time()
-        optimizer.zero_grad()
-        # Skip the step if loss or grads are non-finite (NaN protection).
-        # sq_implicit can still produce huge finite values near ε=0.05
-        # that, combined with the softmin, occasionally overflow. The
-        # value-clamp + this rollback gives us a clean recovery.
-        if not torch.isfinite(loss):
-            timings["step"] += time.time() - t0
-            if it % config.log_interval == 0 and log_fn is not None:
-                parts["iter"] = it; parts["alive"] = scene.num_alive
-                parts["nan_skip"] = 1
-                log_fn(it, parts)
-            continue
-        loss.backward()
+                t0 = time.time()
+                optimizer.zero_grad()
+                # Skip the step if loss or grads are non-finite (NaN protection).
+                # sq_implicit can still produce huge finite values near ε=0.05
+                # that, combined with the softmin, occasionally overflow. The
+                # value-clamp + this rollback gives us a clean recovery.
+                if not torch.isfinite(loss):
+                    timings["step"] += time.time() - t0
+                    if it % config.log_interval == 0 and log_fn is not None:
+                        parts["iter"] = it; parts["alive"] = scene.num_alive
+                        parts["nan_skip"] = 1
+                        log_fn(it, parts)
+                    continue
+                loss.backward()
+        except RuntimeError:
+            print(
+                f"[trace_fail] it={it} theta_min_eff={theta_min_eff:.4f} "
+                f"{_scene_value_summary(scene)}",
+                flush=True,
+            )
+            raise
         # Clip gradients before the Adam step.
         torch.nn.utils.clip_grad_norm_(opt_params, max_norm=1.0)
         # Double-check gradients after clipping (clip doesn't fix NaN)
@@ -600,6 +684,7 @@ def train(
             for p in opt_params
         )
         if any_nan_grad:
+            summary = _nan_grad_summary(scene, opt_named_params)
             # OBSERVABILITY FIX (round 7 debug): previously this branch
             # silently `continue`'d, so repeated NaN gradients would
             # skip thousands of updates without any log signal. Round 7
@@ -612,6 +697,7 @@ def train(
                 parts["iter"] = it
                 parts["alive"] = scene.num_alive
                 parts["nan_grad_skip"] = 1
+                parts["nan_grad_summary"] = summary
                 # Only push to log_rows / call log_fn once per log_interval
                 # to avoid drowning the log file when NaN is persistent.
                 # But always print a brief stderr-visible note so ops
@@ -619,8 +705,10 @@ def train(
                 if it % config.log_interval == 0:
                     log_fn(it, parts)
                 else:
-                    print(f"[nan_grad] it={it:6d} skipping step",
+                    print(f"[nan_grad] it={it:6d} skipping step offender={summary}",
                           flush=True)
+            if abort_on_nan_grad:
+                raise RuntimeError(f"nonfinite gradient at iter {it}: {summary}")
             continue
         optimizer.step()
         if scheduler is not None:
