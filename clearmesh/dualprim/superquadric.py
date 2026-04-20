@@ -159,6 +159,20 @@ def sq_implicit_grad(
     # ∂f/∂x_i = (f(p+h·e_i) - f(p-h·e_i)) / 2h, for i ∈ {0,1,2}
     # Result: (..., 3_axes, K) → transpose to (..., K, 3)
     grad = (f_fwd - f_bwd) / (2.0 * h)              # (..., 3, K)
+
+    # Round 10 debug: with boxy ε≈0.2 and large NSQ scale (~0.85), a
+    # point near a primitive edge gets f = FCLAMP=1e6 on one side and
+    # ~0 on the other, giving grad = 1e6 / 2e-3 = 5e8 per axis. With
+    # K=30 primitives summed through the rendering chain, this blows
+    # past float32 safe ranges and produces NaN in backward.
+    #
+    # The DIRECTION of the gradient (sign + relative magnitude across
+    # axes) is what matters for surface normals — the huge absolute
+    # value is noise from the FD discretization at sharp transitions.
+    # Clamp magnitude to a safe range; NaN-replace insurance.
+    GRAD_CLAMP = 1e3
+    grad = torch.nan_to_num(grad, nan=0.0, posinf=GRAD_CLAMP, neginf=-GRAD_CLAMP)
+    grad = grad.clamp(-GRAD_CLAMP, GRAD_CLAMP)
     return grad.transpose(-1, -2).contiguous()      # (..., K, 3)
 
 
