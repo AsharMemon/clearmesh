@@ -576,8 +576,27 @@ def train(
             for p in opt_params
         )
         if any_nan_grad:
+            # OBSERVABILITY FIX (round 7 debug): previously this branch
+            # silently `continue`'d, so repeated NaN gradients would
+            # skip thousands of updates without any log signal. Round 7
+            # got stuck in exactly this state for 3000+ iters. Now we
+            # always emit a nan_skip log line on any NaN-grad event;
+            # if they persist, we at least see them every iter.
             optimizer.zero_grad()
             timings["step"] += time.time() - t0
+            if log_fn is not None:
+                parts["iter"] = it
+                parts["alive"] = scene.num_alive
+                parts["nan_grad_skip"] = 1
+                # Only push to log_rows / call log_fn once per log_interval
+                # to avoid drowning the log file when NaN is persistent.
+                # But always print a brief stderr-visible note so ops
+                # can see the count grow.
+                if it % config.log_interval == 0:
+                    log_fn(it, parts)
+                else:
+                    print(f"[nan_grad] it={it:6d} skipping step",
+                          flush=True)
             continue
         optimizer.step()
         if scheduler is not None:

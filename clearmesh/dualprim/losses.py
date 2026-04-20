@@ -102,14 +102,30 @@ def loss_open_ray(
 
     Returns a scalar loss; zero if `hole_ray_gt` is None or has no
     True entries. Safe to always-include in the total loss.
+
+    Round 7 debug: observed silently-NaN gradients that caused the
+    optimizer to skip all updates for 3000+ iters. Root cause: the
+    renderer occasionally produces non-finite mask values on rays
+    where sq_implicit saturates, and backward from NaN = NaN grad =
+    silent skip. Guarded now via nan_to_num + clamp.
     """
     if hole_ray_gt is None or hole_ray_gt.sum() == 0:
-        return render.mask.new_zeros(())
+        # Use .sum() * 0 instead of new_zeros(()) so the loss stays
+        # connected to the graph — avoids autograd edge cases when
+        # batch-to-batch the output is sometimes detached.
+        return render.mask.sum() * 0
+    m = render.mask[hole_ray_gt]
+    # Guard against any non-finite values from render-side numerics.
+    # render.mask should naturally be in [0, 1] but we've seen rare
+    # cases where sq_implicit overflow + softmin-weighted-sum produces
+    # NaN that propagates. This clip is cheap insurance.
+    m = torch.nan_to_num(m, nan=0.0, posinf=1.0, neginf=0.0)
+    m = m.clamp(0.0, 1.0)
     # Squared instead of BCE: the BCE component already penalizes mask
     # >0 via loss_mask; we want to ADD pressure, not duplicate it, and
     # squared loss has a strong gradient exactly at the non-zero values
     # we need to kill.
-    return (render.mask[hole_ray_gt] ** 2).mean()
+    return (m ** 2).mean()
 
 
 # ---------------------------------------------------------------------
