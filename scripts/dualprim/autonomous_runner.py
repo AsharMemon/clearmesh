@@ -331,7 +331,7 @@ def main():
     ap.add_argument("--repo-root", default="/workspace/clearmesh",
                     help="Path to git repo for committing results")
     ap.add_argument("--nsq-init", default="coupled",
-                    choices=["coupled", "independent"])
+                    choices=["coupled", "coupled_axial", "independent"])
     ap.add_argument("--union-export", action="store_true")
     ap.add_argument("--fg-bias", type=float, default=0.7,
                     help="Foreground+boundary ray sampling fraction; "

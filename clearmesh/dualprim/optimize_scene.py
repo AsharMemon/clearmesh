@@ -93,6 +93,29 @@ def init_scene(config: DualPrimConfig, device="cuda") -> DualPrimScene:
             + _uniform(-0.05, 0.05, (K, 3))
         )
         params[:, IDX_NSQ_ROTATION] = params[:, IDX_PSQ_ROTATION].clone()
+    elif config.nsq_init_strategy == "coupled_axial":
+        # Round 10 addition: coupled init BUT each NSQ has one
+        # randomly-chosen principal axis elongated 3x. Round 9 at
+        # K=100 produced 4 near-axis carvers but all with isotropic
+        # scale ~0.25 — the local minimum where NSQs poke surface
+        # pits instead of carving through the volume. Axial init
+        # gives a subset of primitives the shape to span through a
+        # 0.6-long hole from the start.
+        nsq_base = params[:, IDX_PSQ_SCALE] * 0.7
+        # Pick one of 3 axes per primitive uniformly
+        axis = torch.randint(0, 3, (K,), generator=g, device=device)
+        elongation = 3.0
+        # Multiply the chosen axis by elongation
+        for i in range(K):
+            nsq_base[i, axis[i]] *= elongation
+        # Clip to config range so we don't exceed scale_range[1]
+        nsq_base = nsq_base.clamp(s_lo, s_hi)
+        params[:, IDX_NSQ_SCALE] = nsq_base
+        params[:, IDX_NSQ_TRANSLATION] = (
+            params[:, IDX_PSQ_TRANSLATION]
+            + _uniform(-0.05, 0.05, (K, 3))
+        )
+        params[:, IDX_NSQ_ROTATION] = params[:, IDX_PSQ_ROTATION].clone()
     elif config.nsq_init_strategy == "independent":
         # Paper-faithful: NSQ random in [-1,1]^3, scale independent.
         params[:, IDX_NSQ_SCALE] = _uniform(s_lo, init_s_hi, (K, 3))

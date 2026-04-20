@@ -71,8 +71,10 @@ def main():
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--nsq-init", default="coupled",
-                    choices=["coupled", "independent"],
-                    help="NSQ init strategy: 'coupled' (NSQ near PSQ) or "
+                    choices=["coupled", "coupled_axial", "independent"],
+                    help="NSQ init strategy: 'coupled' (NSQ near PSQ), "
+                         "'coupled_axial' (coupled + 3x elongated on random "
+                         "axis, round-10 addition), or "
                          "'independent' (NSQ random, paper-faithful)")
     ap.add_argument("--union-export", action="store_true",
                     help="Boolean-union all primitives at export. "
