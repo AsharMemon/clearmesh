@@ -497,6 +497,17 @@ def train(
     prev_t_render = prev_t_loss = prev_t_step = prev_t_prune = 0.0
     t_start = time.time()
 
+    # Heartbeat observability — prints iter + timings every HEARTBEAT_S
+    # seconds REGARDLESS of log_interval. Prevents the "slow vs hung"
+    # ambiguity: a quiet run that's actually just slow now shows a
+    # heartbeat every 60s so watchdogs and humans know it's alive.
+    #
+    # Friend's review (critical): if iter time balloons to ~3s at
+    # K=100 coupled, 200-iter log_interval → 10 min silence → watchdog
+    # labels "slow" as "hung". Heartbeat fixes that categorically.
+    HEARTBEAT_S = 60.0
+    last_heartbeat = time.time()
+
     for it in range(config.num_iterations):
         batch = ray_sampler(rays_per_batch)
 
@@ -562,6 +573,26 @@ def train(
             scheduler.step()
         clip_to_ranges(scene, config)
         timings["step"] += time.time() - t0
+
+        # Heartbeat — unconditional "I'm alive" signal independent of
+        # log_interval. Uses print() straight to stdout so it shows up
+        # even between log steps on slow runs. Fires at most every
+        # HEARTBEAT_S seconds. No cost if log_interval fires faster.
+        #
+        # Friend's critical observability fix: previously, silent runs
+        # of 10+ min (plausible at K=100 coupled ~3s/iter × log_interval=200)
+        # were mis-labeled "hung" by watchdogs. Heartbeat makes "slow
+        # but progressing" visibly distinct from "hung".
+        _now = time.time()
+        if _now - last_heartbeat >= HEARTBEAT_S:
+            n_win = max(it - prev_log_it, 1)
+            r_ms = 1000.0 * (timings["render"] - prev_t_render) / n_win
+            s_ms = 1000.0 * (timings["step"] - prev_t_step) / n_win
+            print(f"[heartbeat] it={it:6d}/{config.num_iterations} "
+                  f"alive={scene.num_alive} elapsed={_now - t_start:.0f}s "
+                  f"avg t[r{r_ms:.0f}/s{s_ms:.0f}]ms since last log",
+                  flush=True)
+            last_heartbeat = _now
 
         if it % config.pruning_interval == 0 and it >= config.warmup_iterations:
             t0 = time.time()

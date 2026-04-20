@@ -154,7 +154,12 @@ class DualPrimConfig:
     # ================================================================
     # Logging
     # ================================================================
-    log_interval: int = 200
+    log_interval: int = 50           # Friend's observability fix: was 200, dropped
+                                     # to 50 so log lines appear at most ~10-20s
+                                     # apart even at K=100 coupled with slow iters.
+                                     # Heartbeat in train() covers gaps longer than
+                                     # 60s. Together: "slow" becomes distinguishable
+                                     # from "hung" in real time.
     checkpoint_interval: int = 5_000
     export_interval: int = 5_000             # intermediate mesh snapshots
 
