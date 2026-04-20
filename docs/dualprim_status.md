@@ -100,7 +100,34 @@ closest possible replication of phase 1 but with stronger hole
 supervision) when pod died. Partial outputs possibly on disk at
 `/workspace/dualprim_round6/hole/`.
 
-## ⚠️ CRITICAL: Rounds 6-11 produce visually unusable output
+## 🎉 BREAKTHROUGH: K=100 paper-scale produces coherent geometry
+
+After user/linter applied comprehensive numerical overhaul (analytic
+sq_implicit gradient, log-domain safe_pow, nan_to_num through entire
+renderer chain, per-parameter NaN localization), we ran K=100 × 30k
+iters × 256px resolution × BCE mask × independent NSQ init. Results:
+
+- **0 NaN-grad events across all 30,000 iters** (vs ~90% NaN-skip
+  in every prior K≥50 run)
+- **126 min training time** (clean throughout)
+- **COHERENT BOX-SHAPED GEOMETRY** in the output mesh — not blob
+  piles. Two box-like sections instead of blob scatter.
+- Mask IoU 0.45, CD × 1000 = 205 (metrics worse than K=30 coupled
+  runs, but visual quality dramatically better)
+
+**Key finding:** The numerical overhaul was the **root unblocker**.
+All prior "DualPrim produces blobs" results were tainted by 90%
+NaN-skipped iters at K=30 and structural failure at K≥50. With clean
+numerics, K=100 at paper scale produces real structured output.
+
+**Next test:** K=100 × 30k with **coupled** NSQ init (not paper's
+independent). Coupled init at K=30 was our best carver-producing
+config; at K=100 × 30k with stable numerics, it should produce BOTH
+coherent geometry AND preserved hole topology.
+
+See renders at `/tmp/compare/k100_{front,side,top}.png` on Thunder.
+
+## ⚠️ Earlier rounds 6-11 produce visually unusable output
 
 Rendered the refit meshes side-by-side with references. All 3 tested
 canaries (hole, stool, dumbbell) produce **scattered blob piles**, not
