@@ -100,6 +100,44 @@ closest possible replication of phase 1 but with stronger hole
 supervision) when pod died. Partial outputs possibly on disk at
 `/workspace/dualprim_round6/hole/`.
 
+## Rounds 6-8 stuck in same local minimum
+
+Three different supervision strategies at K=30 coupled + hole-axis views
+all converge to essentially the same state:
+
+| | Mask IoU | Through-hole | Carvers | Near-axis |
+|---|---|---|---|---|
+| Round 6 (baseline + hole-axis views) | 0.64 | 0% | 25/28 | 1 |
+| Round 7 (open-ray loss) | NaN-grad cascade | — | — | — |
+| Round 8 (30% hole-ray oversample) | 0.63 | 0% | 26/27 | 1 |
+
+**Key finding:** BCE mask loss has a **fundamental ambiguity** for
+hole pixels. `pred_mask → 0` can be satisfied two ways:
+  (a) PSQ shrinks / avoids the pixel region
+  (b) NSQ carves the region
+Both get equal credit. Supervision weight adjustments (views, loss,
+sampling) don't distinguish them — the optimizer picks (a) because
+it's locally easier. Topology is not preserved regardless.
+
+**Known NaN-grad pitfall discovered:** heavy supervision on hole
+rays (either via open-ray loss OR oversampling) pushes BCE gradients
+toward -1/(1-p) ≈ -1e6 per ray. At 230 hole rays/batch × 1e6,
+sq_implicit's FD-grad chain overflows. Round 8 had 91% iters
+NaN-skipped.
+
+## Next directions (ranked)
+
+1. **K=100 coupled + heartbeat** (same as round 3/4 but with
+   observability proven). Round 3 iter-1000 had 54 carvers / 3 near
+   axis vs K=30's 1 near axis. Primitive density may itself solve
+   the local-minimum problem even without loss changes. ~1.5 hr.
+2. **NSQ-axial-elongation init**: initialize NSQs with random axis
+   elongated 3x (e.g. scale=(0.1, 0.3, 0.1) random axis). Forces
+   NSQs to be shaped for through-carving from the start.
+3. **Volume-conservation loss**: penalize PSQ-union-volume deviation
+   from ref volume. Forces optimizer to CARVE (keep mass, cut holes)
+   rather than SHRINK (remove mass).
+
 ## Headline numbers
 
 | Run | K | iters | Mask IoU | Through-hole open | Carvers | NSQs-inside-PSQ |
