@@ -109,7 +109,15 @@ def main():
                          "Penalizes predicted mask > 0 on rays passing "
                          "through GT holes, STRONGER than the global BCE "
                          "mask loss. Specifically rewards NSQ carving. "
-                         "Default off (0). Round 7 recipe: 5.0.")
+                         "Default off (0). Round 7 recipe: 5.0. "
+                         "NOTE: superseded by --hole-ray-oversample which "
+                         "avoids the NaN-grad cascade this loss triggers.")
+    ap.add_argument("--hole-ray-oversample", type=float, default=0.0,
+                    help="Fraction of rays per batch drawn specifically "
+                         "from GT hole pixels. Upweights the existing "
+                         "BCE mask loss at hole pixels WITHOUT adding a "
+                         "new loss path — avoids round-7's NaN-grad "
+                         "cascade. Round 8 recipe: 0.3 (30% of rays).")
     args = ap.parse_args()
 
     out_dir = Path(args.out)
@@ -170,7 +178,11 @@ def main():
                 resolution=config.view_resolution,
                 render_normals=True,
             )
-        sampler = _build_views_sampler(views_dir, device=device, fg_bias=args.fg_bias)
+        sampler = _build_views_sampler(
+            views_dir, device=device,
+            fg_bias=args.fg_bias,
+            hole_ray_oversample=args.hole_ray_oversample,
+        )
     elif args.mode == "paper":
         raise NotImplementedError(
             "mode=paper requires real source images + StableNormal — "
@@ -341,20 +353,26 @@ def _build_mesh_fit_tsdf(
     )
 
 
-def _build_views_sampler(views_dir: Path, device: str, fg_bias: float = 0.7):
-    """Sample rays from the 26 rendered views in `views_dir`.
-
-    Friend's tuning input: uniform pixel sampling wastes most rays on
-    background. For shape supervision (especially for hole/concavity
-    detection), the foreground silhouette and its boundary are where
-    the geometry signal lives. Bias sampling toward foreground +
-    boundary pixels.
+def _build_views_sampler(views_dir: Path, device: str,
+                          fg_bias: float = 0.7,
+                          hole_ray_oversample: float = 0.0):
+    """Sample rays from the rendered views in `views_dir`.
 
     fg_bias: fraction of rays drawn from "interesting" pixels (mask
-    foreground OR mask-boundary). Remaining (1 - fg_bias) drawn
-    uniformly across the full image.
+    foreground OR mask-boundary OR near-silhouette hole pixels).
+    Remaining (1 - fg_bias) drawn uniformly.
 
-    Pre-computes per-view boundary masks once (mask XOR eroded mask).
+    hole_ray_oversample: fraction of rays specifically drawn from
+    GT hole pixels (binary_fill_holes(mask) & ~mask). These pixels
+    lie inside the projected silhouette but are empty in the ref —
+    i.e. where the ref mesh has a hole. Oversampling them
+    effectively upweights the existing BCE mask loss at hole pixels
+    WITHOUT adding a new loss term (avoids the NaN-grad cascade
+    seen when adding loss_open_ray). Friend's point 3: "weight
+    hole/boundary rays higher in sampling, not in loss weight."
+
+    Final ratio: n_hole + n_fg + n_uniform = n_rays, where
+    n_hole = n_rays * hole_ray_oversample, n_fg = remaining * fg_bias.
     """
     from PIL import Image
     from clearmesh.dualprim import RaySampleBatch
@@ -443,15 +461,61 @@ def _build_views_sampler(views_dir: Path, device: str, fg_bias: float = 0.7):
         interesting_padded[v] = ix
     interesting_padded_t = torch.from_numpy(interesting_padded).to(device)
 
+    # Dedicated hole-ray pool: views with ANY hole pixels get a
+    # padded index array of those pixels only. Views without hole
+    # pixels are excluded from this pool. hole_ray_oversample fraction
+    # of rays are drawn from this pool uniformly across valid views.
+    hole_views = [v for v in range(V) if hole_masks[v].any()]
+    hole_pool_padded = None
+    hole_pool_max_len = 0
+    hole_views_t = None
+    if hole_views and hole_ray_oversample > 0:
+        hole_per_view = []
+        for v in hole_views:
+            idx = np.flatnonzero(hole_masks[v].ravel())
+            hole_per_view.append(idx)
+        hole_pool_max_len = max(len(ix) for ix in hole_per_view)
+        padded = np.zeros((len(hole_views), hole_pool_max_len), dtype=np.int64)
+        for i, ix in enumerate(hole_per_view):
+            if len(ix) < hole_pool_max_len:
+                reps = (hole_pool_max_len + len(ix) - 1) // len(ix)
+                ix = np.tile(ix, reps)[:hole_pool_max_len]
+            padded[i] = ix
+        hole_pool_padded = torch.from_numpy(padded).to(device)
+        hole_views_t = torch.tensor(hole_views, dtype=torch.long, device=device)
+        print(f"[sampler] {len(hole_views)}/{V} views have hole pixels; "
+              f"max pool size {hole_pool_max_len}. "
+              f"hole_ray_oversample={hole_ray_oversample:.2f}")
+
     rng = torch.Generator(device=device).manual_seed(42)
 
     def sampler(n_rays: int) -> RaySampleBatch:
-        n_fg = int(n_rays * fg_bias)
-        n_uniform = n_rays - n_fg
+        # Split ray budget: hole → fg → uniform
+        if hole_pool_padded is not None and hole_ray_oversample > 0:
+            n_hole = int(n_rays * hole_ray_oversample)
+        else:
+            n_hole = 0
+        remaining = n_rays - n_hole
+        n_fg = int(remaining * fg_bias)
+        n_uniform = remaining - n_fg
+
+        # Hole rays — oversample from GT hole pixels
+        if n_hole > 0:
+            vi_h_idx = torch.randint(0, hole_views_t.shape[0], (n_hole,),
+                                      generator=rng, device=device)
+            vi_h = hole_views_t[vi_h_idx]
+            col_h = torch.randint(0, hole_pool_max_len, (n_hole,),
+                                   generator=rng, device=device)
+            flat_h = hole_pool_padded[vi_h_idx, col_h]
+            yi_h = flat_h // W
+            xi_h = flat_h % W
+        else:
+            vi_h = torch.empty(0, dtype=torch.long, device=device)
+            yi_h = torch.empty(0, dtype=torch.long, device=device)
+            xi_h = torch.empty(0, dtype=torch.long, device=device)
 
         # Foreground+boundary biased rays
         vi_f = torch.randint(0, V, (n_fg,), generator=rng, device=device)
-        # Pick from each view's interesting pool
         col = torch.randint(0, max_len, (n_fg,), generator=rng, device=device)
         flat = interesting_padded_t[vi_f, col]
         yi_f = flat // W
@@ -462,10 +526,10 @@ def _build_views_sampler(views_dir: Path, device: str, fg_bias: float = 0.7):
         yi_u = torch.randint(0, H, (n_uniform,), generator=rng, device=device)
         xi_u = torch.randint(0, W, (n_uniform,), generator=rng, device=device)
 
-        # Concatenate
-        vi = torch.cat([vi_f, vi_u])
-        yi = torch.cat([yi_f, yi_u])
-        xi = torch.cat([xi_f, xi_u])
+        # Concatenate — hole rays first, then fg, then uniform
+        vi = torch.cat([vi_h, vi_f, vi_u])
+        yi = torch.cat([yi_h, yi_f, yi_u])
+        xi = torch.cat([xi_h, xi_f, xi_u])
 
         rgb = rgbs_t[vi, yi, xi]                              # (R, 3)
         mask = masks_t[vi, yi, xi]                             # (R,)
