@@ -3,7 +3,21 @@
 TL;DR of where we are. Updated whenever something changes. For the
 full plan see [dualprim_plan.md](dualprim_plan.md).
 
-## ⛔ STOPPED: credit exhausted
+## ✅ PIVOTED: now on Thunder Compute
+
+- Thunder instance 0 (A100-80GB) running, SSH alias `tnr-0`
+- clearmesh cloned at `/home/ubuntu/clearmesh` (symlinked to
+  `/workspace/clearmesh`)
+- Canaries regenerated via `scripts/dualprim/make_canaries.py` (5 GLBs
+  in `/workspace/`)
+- **Round 6 in flight on Thunder** — phase-1 reproducer (K=30,
+  coupled, λ=1) + hole-axis training views
+- Monitor task `bm6os5ba2` tracks terminal state
+- Old vast.ai pods remain exited — disk state preserved but not in use
+
+---
+
+## ⛔ HISTORY: Vast.ai credit exhausted earlier
 
 **Vast.ai balance: -$0.18** (as of end-of-session). Both pods auto-exited:
 - 35076678 (A100 DualPrim work) — exited mid-round-6
