@@ -76,6 +76,11 @@ def main():
                          "'coupled_axial' (coupled + 3x elongated on random "
                          "axis, round-10 addition), or "
                          "'independent' (NSQ random, paper-faithful)")
+    ap.add_argument("--init-profile", default=None,
+                    choices=["biased", "paper_random"],
+                    help="Primitive parameter init profile. 'biased' keeps "
+                         "our tuned small/boxy init; 'paper_random' samples "
+                         "broadly across the paper ranges.")
     ap.add_argument("--union-export", action="store_true",
                     help="Boolean-union all primitives at export. "
                          "Slow (~minutes for K>=20) but produces a single "
@@ -101,11 +106,22 @@ def main():
                     help="Override lambda_mask in config. Friend's initial "
                          "tuning bumped this 1->3; round 4 fallback may "
                          "try 5+ if round 3 still fails.")
+    ap.add_argument("--mask-loss-type", default=None,
+                    choices=["bce", "mse"],
+                    help="Override the mask loss used in Eq. 14. "
+                         "'bce' matches the paper exactly; 'mse' is the "
+                         "stability fallback branch we used while tracking "
+                         "the NaN issue.")
     ap.add_argument("--pruning-interval", type=int, default=None,
                     help="Override pruning_interval (how often to kill "
                          "weak primitives). Default 1000. Increase to "
                          "2000+ to give primitives more time to find "
                          "positions before being pruned.")
+    ap.add_argument("--opacity-reset-interval", type=int, default=None,
+                    help="Override periodic opacity reset cadence. "
+                         "3DGS-inspired: resetting alpha keeps alive "
+                         "primitives competing instead of all saturating "
+                         "to 1. Set 0 to disable.")
     ap.add_argument("--lambda-open-ray", type=float, default=None,
                     help="Weight on the open-ray loss (round-7 addition). "
                          "Penalizes predicted mask > 0 on rays passing "
@@ -143,11 +159,17 @@ def main():
         seed=args.seed,
         nsq_init_strategy=args.nsq_init,
     )
+    if args.init_profile is not None:
+        config.init_profile = args.init_profile
     # CLI overrides for round-4+ tuning levers
     if args.lambda_mask is not None:
         config.lambda_mask = args.lambda_mask
+    if args.mask_loss_type is not None:
+        config.mask_loss_type = args.mask_loss_type
     if args.pruning_interval is not None:
         config.pruning_interval = args.pruning_interval
+    if args.opacity_reset_interval is not None:
+        config.opacity_reset_interval = args.opacity_reset_interval
     if args.lambda_open_ray is not None:
         config.lambda_open_ray = args.lambda_open_ray
     # Write the effective config for reproducibility

@@ -28,6 +28,7 @@ class DualPrimConfig:
     num_primitives_init: int = 100           # K, paper: "initialize K=100"
     init_space: Tuple[float, float] = (-1.0, 1.0)  # paper: "[-1,1] space"
     seed: int = 0
+    init_profile: str = "biased"             # "biased" | "paper_random"
 
     # NSQ initialisation strategy:
     #   "coupled"     — NSQ starts at PSQ position with smaller scale
@@ -113,7 +114,7 @@ class DualPrimConfig:
     # Round 11 discovery: BCE gradient -1/(1-m) at m→1 cascades into
     # NaN through the rendering backward chain at K=30+. MSE bounded
     # gradient ±2 is NaN-safe and gets ~100% effective iters.
-    mask_loss_type: str = "mse"
+    mask_loss_type: str = "bce"
 
     # ================================================================
     # Adaptive pruning (§4.2)
@@ -122,6 +123,8 @@ class DualPrimConfig:
     prune_scale_threshold: float = 0.01     # paper: "t_a = 0.01"
     export_alpha_threshold: float = 0.5     # paper: "α < T_export = 0.5"
     pruning_interval: int = 1000            # NOT SPECIFIED IN PAPER (in steps)
+    opacity_reset_interval: int = 3000      # 3DGS-inspired; DualPrim cites similar pruning
+    opacity_reset_value: float = 0.01       # matches 3DGS reset_opacity() cap
 
     # ================================================================
     # Optimizer (NOT SPECIFIED IN PAPER — typical NeuS-family defaults)

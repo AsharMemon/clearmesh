@@ -61,23 +61,34 @@ def init_scene(config: DualPrimConfig, device="cuda") -> DualPrimScene:
     def _uniform(lo, hi, shape):
         return torch.rand(*shape, generator=g, device=device) * (hi - lo) + lo
 
-    # PSQ / NSQ scale — from config range, biased small initially
     s_lo, s_hi = config.scale_range
-    init_s_hi = min(s_hi, 0.3)  # start compact so they don't cover the whole cube
-    params[:, IDX_PSQ_SCALE] = _uniform(s_lo, init_s_hi, (K, 3))
+    if config.init_profile == "paper_random":
+        init_s_hi = s_hi
+        params[:, IDX_PSQ_SCALE] = _uniform(s_lo, init_s_hi, (K, 3))
+        params[:, IDX_PSQ_SHAPE] = _uniform(*config.shape_range, (K, 2))
+        params[:, IDX_NSQ_SHAPE] = _uniform(*config.shape_range, (K, 2))
+        params[:, IDX_ALPHA] = _uniform(*config.alpha_range, (K,))
+        theta_lo = max(config.theta_min, 0.05)
+        params[:, IDX_THETA] = _uniform(theta_lo, config.sharpness_range[1], (K,))
+    elif config.init_profile == "biased":
+        # PSQ / NSQ scale — from config range, biased small initially
+        init_s_hi = min(s_hi, 0.3)  # start compact so they don't cover the whole cube
+        params[:, IDX_PSQ_SCALE] = _uniform(s_lo, init_s_hi, (K, 3))
 
-    # Shape — friend's tuning: bias init toward boxier shapes (lower ε
-    # = more box-like; ε=1 is sphere). Manmade objects like a hole-box
-    # tend to want sharp primitives, and the optimizer rarely pushes ε
-    # downward from a sphere init.
-    params[:, IDX_PSQ_SHAPE] = _uniform(0.2, 0.8, (K, 2))
-    params[:, IDX_NSQ_SHAPE] = _uniform(0.2, 0.8, (K, 2))
+        # Shape — friend's tuning: bias init toward boxier shapes (lower ε
+        # = more box-like; ε=1 is sphere). Manmade objects like a hole-box
+        # tend to want sharp primitives, and the optimizer rarely pushes ε
+        # downward from a sphere init.
+        params[:, IDX_PSQ_SHAPE] = _uniform(0.2, 0.8, (K, 2))
+        params[:, IDX_NSQ_SHAPE] = _uniform(0.2, 0.8, (K, 2))
 
-    # α — start small (sparse) so the sparsity loss has room to work
-    params[:, IDX_ALPHA] = _uniform(0.3, 0.5, (K,))
+        # α — start small (sparse) so the sparsity loss has room to work
+        params[:, IDX_ALPHA] = _uniform(0.3, 0.5, (K,))
 
-    # θ (render sharpness) — mid-range
-    params[:, IDX_THETA] = _uniform(0.3, 0.7, (K,))
+        # θ (render sharpness) — mid-range
+        params[:, IDX_THETA] = _uniform(0.3, 0.7, (K,))
+    else:
+        raise ValueError(f"unknown init_profile: {config.init_profile}")
 
     # Translation + NSQ scale — depends on init strategy
     t_lo, t_hi = config.init_space
@@ -211,6 +222,34 @@ def prune(
         print(f"[prune] killed {n_killed} primitives (α<{config.prune_alpha_threshold} "
               f"or scale<{config.prune_scale_threshold}); {scene.num_alive} alive")
     return n_killed
+
+
+def reset_opacity(
+    scene: DualPrimScene,
+    config: DualPrimConfig,
+    verbose: bool = False,
+) -> int:
+    """3DGS-style opacity reset to re-open alpha competition.
+
+    DualPrim says its adaptive pruning follows a strategy similar to
+    3DGS. In the official 3DGS implementation, pruning/densification is
+    paired with periodic opacity resets. We do not import 3DGS
+    densification here, but we do adopt the alpha reset itself to keep
+    the primitive competition from freezing once all survivors saturate
+    to α≈1.
+
+    Returns the number of alive primitives whose alpha was reduced.
+    """
+    with torch.no_grad():
+        alive = scene.alive
+        alpha = scene.params[:, IDX_ALPHA]
+        capped = alpha[alive].clamp(min=0.0, max=config.opacity_reset_value)
+        changed = int((alpha[alive] > config.opacity_reset_value).sum().item())
+        alpha[alive] = capped
+    if verbose and changed > 0:
+        print(f"[opacity_reset] capped {changed} alive primitives to α<={config.opacity_reset_value}; "
+              f"{scene.num_alive} alive")
+    return changed
 
 
 def _theta_min_curriculum(config: DualPrimConfig, iteration: int) -> float:
@@ -749,6 +788,13 @@ def train(
                     verbose=(log_fn is not None),
                 )
             timings["prune"] += time.time() - t0
+
+        if (
+            config.opacity_reset_interval > 0
+            and it % config.opacity_reset_interval == 0
+            and it >= config.warmup_iterations
+        ):
+            reset_opacity(scene, config, verbose=(log_fn is not None))
 
         if it % config.log_interval == 0:
             parts["iter"] = it
