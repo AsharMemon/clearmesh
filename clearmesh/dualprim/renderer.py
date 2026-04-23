@@ -130,9 +130,42 @@ def sample_ray_points(
 # Density (Eq 7)
 # ---------------------------------------------------------------------
 
-def _psi(f: torch.Tensor, theta: torch.Tensor, theta_min: float = 0.01) -> torch.Tensor:
+def _delta_p_offsets(
+    ray_dirs: torch.Tensor,
+    deltas: torch.Tensor,
+    *,
+    delta_p: float = 0.01,
+    delta_p_mode: str = "fixed",
+    delta_p_scale: float = 0.5,
+) -> torch.Tensor:
+    """Build per-sample finite-difference offsets for Eq. 7.
+
+    `fixed`:
+      legacy implementation, uses a constant scalar step everywhere.
+
+    `half_delta`:
+      uses half the local ray spacing at each sample, which is the
+      more paper-literal centered-difference interpretation of
+      `p ± Δp` when the renderer already has a sampled ray grid.
+    """
+    if delta_p_mode == "half_delta":
+        step = (deltas * delta_p_scale).unsqueeze(-1)
+    else:
+        step = torch.full_like(deltas.unsqueeze(-1), delta_p)
+    return ray_dirs.unsqueeze(1) * step
+
+def _psi(
+    f: torch.Tensor,
+    theta: torch.Tensor,
+    theta_min: float = 0.01,
+    gate_mode: str = "stabilized",
+    paper_literal_theta_eps: float = 1e-6,
+) -> torch.Tensor:
     """Sigmoid of f/θ — the CDF used in Eq 7."""
-    t = theta.clamp(min=theta_min)
+    if gate_mode == "paper_literal":
+        t = theta.clamp(min=paper_literal_theta_eps)
+    else:
+        t = theta.clamp(min=theta_min)
     return torch.sigmoid(f / t)
 
 
@@ -142,6 +175,8 @@ def density_from_field(
     theta: torch.Tensor,     # (K,)
     eps: float = 1e-8,
     theta_min: float = 0.01,
+    gate_mode: str = "stabilized",
+    paper_literal_theta_eps: float = 1e-6,
 ):
     """Paper Eq 7 — NeuS-style SDF → density.
 
@@ -157,8 +192,22 @@ def density_from_field(
     The mid-point field is not used in this function; it was removed
     from the signature to prevent it from being accidentally reintroduced.
     """
-    cdf_fwd = torch.nan_to_num(_psi(f_fwd, theta, theta_min), nan=0.0, posinf=1.0, neginf=0.0)
-    cdf_bwd = torch.nan_to_num(_psi(f_bwd, theta, theta_min), nan=0.0, posinf=1.0, neginf=0.0)
+    cdf_fwd = torch.nan_to_num(
+        _psi(
+            f_fwd, theta, theta_min,
+            gate_mode=gate_mode,
+            paper_literal_theta_eps=paper_literal_theta_eps,
+        ),
+        nan=0.0, posinf=1.0, neginf=0.0,
+    )
+    cdf_bwd = torch.nan_to_num(
+        _psi(
+            f_bwd, theta, theta_min,
+            gate_mode=gate_mode,
+            paper_literal_theta_eps=paper_literal_theta_eps,
+        ),
+        nan=0.0, posinf=1.0, neginf=0.0,
+    )
     num = torch.nan_to_num(cdf_fwd - cdf_bwd, nan=0.0, posinf=1.0, neginf=0.0)
     den = cdf_fwd.clamp(min=eps)
     # Theoretically this ratio lives in [0, 1]. Clamp there explicitly
@@ -188,8 +237,15 @@ def render_rays(
     near: float = 0.1,
     far: float = 4.0,
     delta_p: float = 0.01,      # Eq 7 finite-diff step; NOT SPECIFIED IN PAPER
+    delta_p_mode: str = "fixed",
+    delta_p_scale: float = 0.5,
+    color_weight_mode: str = "alpha_density",
+    point_normal_weight_mode: str = "alpha_density",
+    final_normal_normalize: bool = True,
     mu: float = 0.0,
     theta_min: float = 0.01,
+    gate_mode: str = "stabilized",
+    paper_literal_theta_eps: float = 1e-6,
     background: tuple = (1.0, 1.0, 1.0),
     perturb: bool = True,
 ) -> RenderOutput:
@@ -210,16 +266,31 @@ def render_rays(
     # Forward/backward for Eq 7 finite diff along ray.
     # Paper's Eq 7 denominator is the FORWARD point, not the midpoint,
     # so we don't need to evaluate the field at the midpoint here.
-    dp = ray_dirs.unsqueeze(1) * delta_p  # (R, 1, 3) → broadcast to (R, N, 3)
+    dp = _delta_p_offsets(
+        ray_dirs, deltas,
+        delta_p=delta_p,
+        delta_p_mode=delta_p_mode,
+        delta_p_scale=delta_p_scale,
+    )
     pts_fwd = points + dp
     pts_bwd = points - dp
 
-    f_fwd = _scene_field(scene, pts_fwd, mu, theta_min)   # (R, N, K)
-    f_bwd = _scene_field(scene, pts_bwd, mu, theta_min)
+    f_fwd = _scene_field(
+        scene, pts_fwd, mu, theta_min,
+        gate_mode=gate_mode,
+        paper_literal_theta_eps=paper_literal_theta_eps,
+    )   # (R, N, K)
+    f_bwd = _scene_field(
+        scene, pts_bwd, mu, theta_min,
+        gate_mode=gate_mode,
+        paper_literal_theta_eps=paper_literal_theta_eps,
+    )
 
     # Per-primitive density from Eq 7
     sigma_k = density_from_field(
         f_fwd, f_bwd, scene.theta(), theta_min=theta_min,
+        gate_mode=gate_mode,
+        paper_literal_theta_eps=paper_literal_theta_eps,
     )  # (R, N, K)
     sigma_k = torch.nan_to_num(sigma_k, nan=0.0, posinf=1.0, neginf=0.0)
 
@@ -232,6 +303,9 @@ def render_rays(
     sigma = torch.nan_to_num(
         sigma_k_weighted.sum(dim=-1), nan=0.0, posinf=scene.K, neginf=0.0,
     )                                                        # (R, N)
+    sigma_plain = torch.nan_to_num(
+        sigma_k.sum(dim=-1), nan=0.0, posinf=scene.K, neginf=0.0,
+    )                                                        # (R, N)
 
     # Alpha compositing — Eq 1
     optical = torch.nan_to_num(sigma * deltas, nan=0.0, posinf=80.0, neginf=0.0)
@@ -242,11 +316,19 @@ def render_rays(
 
     # ----- color (Eq 8) -----
     c_basic = scene.color()                                  # (K, 3)
+    if color_weight_mode == "density_only":
+        color_sigma = sigma_k
+        color_denom = sigma_plain
+    else:
+        color_sigma = sigma_k_weighted
+        color_denom = sigma
     # per-sample basic color = Σ_k c_basic_k · σ_k / σ
-    # (with α weights baked into σ_k already)
-    denom = sigma.unsqueeze(-1) + 1e-8
+    # Hostile-audit switch:
+    #   alpha_density = current implementation with α baked in
+    #   density_only  = more literal reading of Eq. 8 notation
+    denom = color_denom.unsqueeze(-1) + 1e-8
     c_per_sample = torch.einsum(
-        "rnk,kc->rnc", sigma_k_weighted, c_basic,
+        "rnk,kc->rnc", color_sigma, c_basic,
     ) / denom                                                # (R, N, 3)
 
     # ----- composited normal (Eq 10-11) — compute ONCE -----
@@ -257,7 +339,12 @@ def render_rays(
     # adding 28 extra sq_implicit evaluations per iter to the autograd
     # graph. Caching this single result cuts the backward pass cost
     # roughly in half on profiling.
-    normals_per_sample = _scene_normal(scene, points, sigma_k_weighted, sigma, mu, theta_min)
+    normals_per_sample = _scene_normal(
+        scene, points, sigma_k, sigma_k_weighted, sigma_plain, sigma, mu, theta_min,
+        point_normal_weight_mode=point_normal_weight_mode,
+        gate_mode=gate_mode,
+        paper_literal_theta_eps=paper_literal_theta_eps,
+    )
     normals_per_sample = torch.nan_to_num(normals_per_sample, nan=0.0, posinf=0.0, neginf=0.0)
 
     # Lighting residual: MLP on (point, view_dir, weighted_normal)
@@ -276,7 +363,10 @@ def render_rays(
     mask = torch.nan_to_num(weights.sum(dim=1), nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
 
     normals = (weights.unsqueeze(-1) * normals_per_sample).sum(dim=1)
-    normals = torch.nan_to_num(F.normalize(normals, dim=-1, eps=1e-8), nan=0.0, posinf=0.0, neginf=0.0)
+    if final_normal_normalize:
+        normals = torch.nan_to_num(F.normalize(normals, dim=-1, eps=1e-8), nan=0.0, posinf=0.0, neginf=0.0)
+    else:
+        normals = torch.nan_to_num(normals, nan=0.0, posinf=0.0, neginf=0.0)
 
     # Background
     bg = torch.tensor(background, device=rgb.device, dtype=rgb.dtype)
@@ -289,7 +379,15 @@ def render_rays(
 # Helpers
 # ---------------------------------------------------------------------
 
-def _scene_field(scene, points, mu, theta_min):
+def _scene_field(
+    scene,
+    points,
+    mu,
+    theta_min,
+    *,
+    gate_mode: str = "stabilized",
+    paper_literal_theta_eps: float = 1e-6,
+):
     f_psq = sq_implicit(
         points, scene.psq_translation(), scene.psq_rotation(),
         scene.psq_scale(), scene.psq_shape(),
@@ -298,11 +396,28 @@ def _scene_field(scene, points, mu, theta_min):
         points, scene.nsq_translation(), scene.nsq_rotation(),
         scene.nsq_scale(), scene.nsq_shape(),
     )
-    p_e = effectiveness_probability(f_psq, f_nsq, scene.theta(), mu=mu, theta_min=theta_min)
+    p_e = effectiveness_probability(
+        f_psq, f_nsq, scene.theta(), mu=mu, theta_min=theta_min,
+        gate_mode=gate_mode,
+        paper_literal_theta_eps=paper_literal_theta_eps,
+    )
     return combined_field(f_psq, f_nsq, p_e)
 
 
-def _scene_normal(scene, points, sigma_k_weighted, sigma, mu, theta_min):
+def _scene_normal(
+    scene,
+    points,
+    sigma_k,
+    sigma_k_weighted,
+    sigma_plain,
+    sigma,
+    mu,
+    theta_min,
+    *,
+    point_normal_weight_mode: str = "alpha_density",
+    gate_mode: str = "stabilized",
+    paper_literal_theta_eps: float = 1e-6,
+):
     """Per-sample weighted normal from the combined field (Eq 11)."""
     grad_psq = sq_implicit_grad(
         points, scene.psq_translation(), scene.psq_rotation(),
@@ -320,12 +435,24 @@ def _scene_normal(scene, points, sigma_k_weighted, sigma, mu, theta_min):
         points, scene.nsq_translation(), scene.nsq_rotation(),
         scene.nsq_scale(), scene.nsq_shape(),
     )
-    p_e = effectiveness_probability(f_psq, f_nsq, scene.theta(), mu=mu, theta_min=theta_min)
+    p_e = effectiveness_probability(
+        f_psq, f_nsq, scene.theta(), mu=mu, theta_min=theta_min,
+        gate_mode=gate_mode,
+        paper_literal_theta_eps=paper_literal_theta_eps,
+    )
     n_k = combined_normal(grad_psq, grad_nsq, p_e)        # (..., K, 3)
 
-    # Eq 11: weight by sigma_k / sigma
-    denom = sigma.unsqueeze(-1) + 1e-8
-    weighted = torch.einsum("rnk,rnkc->rnc", sigma_k_weighted, n_k) / denom
+    if point_normal_weight_mode == "density_only":
+        blend_sigma = sigma_k
+        blend_denom = sigma_plain
+    else:
+        blend_sigma = sigma_k_weighted
+        blend_denom = sigma
+    # Eq 11 hostile-audit switch:
+    #   alpha_density = current implementation with α baked in
+    #   density_only  = more literal reading of Eq. 11 notation
+    denom = blend_denom.unsqueeze(-1) + 1e-8
+    weighted = torch.einsum("rnk,rnkc->rnc", blend_sigma, n_k) / denom
     return weighted
 
 

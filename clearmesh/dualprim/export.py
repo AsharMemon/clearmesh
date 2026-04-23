@@ -31,6 +31,7 @@ from typing import List, Optional
 import numpy as np
 import torch
 import trimesh
+from trimesh.smoothing import filter_taubin
 
 from clearmesh.dualprim.params import DualPrimConfig
 from clearmesh.dualprim.types import DualPrimitive, DualPrimScene
@@ -211,4 +212,62 @@ def export_scene(
     else:
         scene_mesh = trimesh.util.concatenate(per_prim)
 
+    scene_mesh = cleanup_scene_mesh(scene_mesh, config)
+
     return scene_mesh, per_prim
+
+
+def cleanup_scene_mesh(
+    scene_mesh: trimesh.Trimesh,
+    config: DualPrimConfig,
+) -> trimesh.Trimesh:
+    """Budgeted post-export cleanup that preserves DualPrim compactness."""
+    if len(scene_mesh.faces) == 0:
+        return scene_mesh
+
+    mesh = scene_mesh.copy()
+    try:
+        mesh.remove_duplicate_faces()
+        mesh.remove_degenerate_faces()
+        mesh.remove_unreferenced_vertices()
+    except Exception:
+        pass
+
+    min_faces = max(int(config.export_cleanup_min_component_faces), 0)
+    min_area_ratio = max(float(config.export_cleanup_min_component_area_ratio), 0.0)
+    if min_faces > 0 or min_area_ratio > 0.0:
+        components = list(mesh.split(only_watertight=False))
+        if components:
+            max_area = max((float(c.area) for c in components), default=0.0)
+            keep = []
+            for comp in components:
+                if min_faces > 0 and len(comp.faces) < min_faces:
+                    continue
+                if max_area > 0.0 and min_area_ratio > 0.0:
+                    if float(comp.area) < max_area * min_area_ratio:
+                        continue
+                keep.append(comp)
+            if keep:
+                mesh = trimesh.util.concatenate(keep)
+            else:
+                return trimesh.Trimesh()
+
+    if len(mesh.faces) == 0:
+        return mesh
+
+    if config.export_smoothing_iterations > 0:
+        try:
+            filter_taubin(
+                mesh,
+                lamb=float(config.export_smoothing_lambda),
+                nu=float(config.export_smoothing_nu),
+                iterations=int(config.export_smoothing_iterations),
+            )
+        except Exception as e:
+            warnings.warn(f"[dualprim/export] smoothing failed: {e}")
+
+    try:
+        mesh.remove_unreferenced_vertices()
+    except Exception:
+        pass
+    return mesh

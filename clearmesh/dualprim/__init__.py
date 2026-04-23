@@ -25,6 +25,16 @@ from clearmesh.dualprim.export import (
     export_dual_primitive, export_scene,
     tessellate_superquadric, boolean_difference,
 )
+from clearmesh.dualprim.detail_refine import (
+    DetailRefineConfig, DetailRefineBudget,
+    PrimitiveLocalRefineConfig,
+    prepare_detail_refine_artifacts,
+    prepare_primitive_local_refine_artifacts,
+)
+from clearmesh.dualprim.local_refine import (
+    LocalRefineConfig,
+    train_primitive_local_refiners,
+)
 
 __all__ = [
     "DualPrimConfig",
@@ -34,4 +44,10 @@ __all__ = [
     "RaySampleBatch", "TrainingState",
     "export_dual_primitive", "export_scene",
     "tessellate_superquadric", "boolean_difference",
+    "DetailRefineConfig", "DetailRefineBudget",
+    "PrimitiveLocalRefineConfig",
+    "prepare_detail_refine_artifacts",
+    "prepare_primitive_local_refine_artifacts",
+    "LocalRefineConfig",
+    "train_primitive_local_refiners",
 ]

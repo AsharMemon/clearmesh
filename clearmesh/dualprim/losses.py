@@ -26,14 +26,29 @@ from clearmesh.dualprim.renderer import RenderOutput
 from clearmesh.dualprim.types import DualPrimScene
 
 
+def _masked_reduce(
+    values: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    mode: str = "global_mean",
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    weighted = values * mask
+    if mode == "fg_mean":
+        return weighted.sum() / (mask.sum() + eps)
+    return weighted.mean()
+
+
 def loss_rgb(
     render: RenderOutput,
     rgb_gt: torch.Tensor,          # (R, 3)
     mask_gt: torch.Tensor,         # (R,) in [0, 1]
+    *,
+    norm_mode: str = "global_mean",
 ) -> torch.Tensor:
     """Eq 13 — masked L1 on RGB."""
     diff = (render.rgb - rgb_gt).abs().sum(dim=-1)    # (R,)
-    return (diff * mask_gt).mean()
+    return _masked_reduce(diff, mask_gt, mode=norm_mode)
 
 
 def loss_mask(
@@ -61,39 +76,60 @@ def loss_mask(
     return F.binary_cross_entropy(m, mask_gt)
 
 
-def loss_sparsity(scene: DualPrimScene) -> torch.Tensor:
+def loss_sparsity(
+    scene: DualPrimScene,
+    *,
+    average_mode: str = "alive",
+) -> torch.Tensor:
     """Eq 15 — mean per-primitive α. Drives pruning.
 
     Only counts alive primitives so dead rows don't contribute.
     """
     alpha = scene.alpha().clamp(0.0, 1.0)
     alive = scene.alive.to(alpha.dtype)
-    return (alpha * alive).sum() / (alive.sum() + 1e-8)
+    num = (alpha * alive).sum()
+    den = scene.K if average_mode == "fixed_k" else alive.sum() + 1e-8
+    return num / den
 
 
-def loss_entropy(scene: DualPrimScene, eps: float = 1e-6) -> torch.Tensor:
+def loss_entropy(
+    scene: DualPrimScene,
+    eps: float = 1e-6,
+    *,
+    average_mode: str = "alive",
+) -> torch.Tensor:
     """Eq 16 — binary entropy on per-primitive α, pushing to {0, 1}."""
     alpha = scene.alpha().clamp(eps, 1.0 - eps)
     alive = scene.alive.to(alpha.dtype)
     h = -(alpha * torch.log(alpha) + (1.0 - alpha) * torch.log(1.0 - alpha))
-    return (h * alive).sum() / (alive.sum() + 1e-8)
+    num = (h * alive).sum()
+    den = scene.K if average_mode == "fixed_k" else alive.sum() + 1e-8
+    return num / den
 
 
-def loss_max(scene: DualPrimScene) -> torch.Tensor:
+def loss_max(
+    scene: DualPrimScene,
+    *,
+    average_mode: str = "alive",
+) -> torch.Tensor:
     """Eq 17 — soft cap α ≤ 1 via ReLU(α − 1)."""
     alpha = scene.alpha()
     alive = scene.alive.to(alpha.dtype)
-    return (F.relu(alpha - 1.0) * alive).sum() / (alive.sum() + 1e-8)
+    num = (F.relu(alpha - 1.0) * alive).sum()
+    den = scene.K if average_mode == "fixed_k" else alive.sum() + 1e-8
+    return num / den
 
 
 def loss_norm_reg(
     render: RenderOutput,
     normals_pred: torch.Tensor,    # (R, 3) — from StableNormal or analytic
     mask_gt: torch.Tensor,         # (R,)
+    *,
+    norm_mode: str = "global_mean",
 ) -> torch.Tensor:
     """Eq 18 — masked L1 on surface normals."""
     diff = (render.normals - normals_pred).abs().sum(dim=-1)
-    return (diff * mask_gt).mean()
+    return _masked_reduce(diff, mask_gt, mode=norm_mode)
 
 
 def loss_open_ray(
@@ -240,6 +276,7 @@ def total_loss_tsdf(
     mu: float = 0.0,
     theta_min: float = 0.01,
     truncation: float = 0.1,
+    primitive_reg_average_mode: str = "alive",
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Total loss for mesh_fit mode.
 
@@ -252,9 +289,9 @@ def total_loss_tsdf(
         scene, query_points, target_sdf,
         mu=mu, theta_min=theta_min, truncation=truncation,
     )
-    l_sp = loss_sparsity(scene)
-    l_e = loss_entropy(scene)
-    l_max = loss_max(scene)
+    l_sp = loss_sparsity(scene, average_mode=primitive_reg_average_mode)
+    l_e = loss_entropy(scene, average_mode=primitive_reg_average_mode)
+    l_max = loss_max(scene, average_mode=primitive_reg_average_mode)
 
     total = (
         l_tsdf
@@ -291,17 +328,19 @@ def total_loss(
     lambda_open_ray: float = 0.0,
     hole_ray_gt=None,
     mask_loss_type: str = "bce",
+    masked_loss_norm_mode: str = "global_mean",
+    primitive_reg_average_mode: str = "alive",
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Eq 12 — weighted sum of the 6 terms + optional open-ray loss.
 
     Returns (scalar loss, dict for logging).
     """
-    l_rgb = loss_rgb(render, rgb_gt, mask_gt)
+    l_rgb = loss_rgb(render, rgb_gt, mask_gt, norm_mode=masked_loss_norm_mode)
     l_mask = loss_mask(render, mask_gt, loss_type=mask_loss_type)
-    l_sp = loss_sparsity(scene)
-    l_e = loss_entropy(scene)
-    l_max = loss_max(scene)
-    l_norm = loss_norm_reg(render, normals_pred, mask_gt)
+    l_sp = loss_sparsity(scene, average_mode=primitive_reg_average_mode)
+    l_e = loss_entropy(scene, average_mode=primitive_reg_average_mode)
+    l_max = loss_max(scene, average_mode=primitive_reg_average_mode)
+    l_norm = loss_norm_reg(render, normals_pred, mask_gt, norm_mode=masked_loss_norm_mode)
     # New: topology-aware open-ray loss (zero if no hole rays provided)
     l_open = loss_open_ray(render, hole_ray_gt) if lambda_open_ray > 0 else render.mask.new_zeros(())
 

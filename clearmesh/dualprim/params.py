@@ -61,7 +61,11 @@ class DualPrimConfig:
     # give a value. Sensible default below; needs sweep.
     # ================================================================
     mu_gate_offset: float = 0.0    # NOT SPECIFIED IN PAPER
+    mu_gate_offset_final: float | None = None
+    mu_gate_ramp_start_fraction: float = 0.7
+    gate_mode: str = "stabilized"   # "stabilized" | "paper_literal"
     theta_min: float = 0.01         # floor on per-primitive θ to avoid div-by-zero
+    paper_literal_theta_eps: float = 1e-6
 
     # θ curriculum — a review-driven fix for the P_E-gate collapse mode
     # observed on the hole canary. Without this, θ drifts to its floor
@@ -79,6 +83,12 @@ class DualPrimConfig:
     # Same formulation as NeuS.
     # ================================================================
     num_samples_per_ray: int = 64          # N in Eq 1. NOT SPECIFIED IN PAPER
+    delta_p_mode: str = "fixed"             # "fixed" | "half_delta"
+    delta_p_value: float = 0.01
+    delta_p_scale: float = 0.5
+    color_weight_mode: str = "alpha_density"         # "alpha_density" | "density_only"
+    point_normal_weight_mode: str = "alpha_density"  # "alpha_density" | "density_only"
+    final_normal_normalize: bool = True
     near_plane: float = 0.1                 # NOT SPECIFIED
     far_plane: float = 4.0                  # NOT SPECIFIED
     background_color: Tuple[float, float, float] = (1.0, 1.0, 1.0)  # white
@@ -102,6 +112,11 @@ class DualPrimConfig:
     lambda_entropy: float = 0.01            # NOT SPECIFIED
     lambda_max: float = 0.1                 # NOT SPECIFIED
     lambda_norm_reg: float = 0.1            # NOT SPECIFIED
+    masked_loss_norm_mode: str = "global_mean"   # "global_mean" | "fg_mean"
+    primitive_reg_average_mode: str = "alive"    # "alive" | "fixed_k"
+    lambda_norm_reg_final: float | None = None
+    norm_reg_ramp_start_fraction: float = 0.5
+    norm_reg_ramp_end_fraction: float = 1.0
 
     # Open-ray loss — NOT IN PAPER. Friend's round-7 addition.
     # Penalizes predicted mask > 0 on rays that pass through GT holes,
@@ -123,6 +138,11 @@ class DualPrimConfig:
     prune_scale_threshold: float = 0.01     # paper: "t_a = 0.01"
     export_alpha_threshold: float = 0.5     # paper: "α < T_export = 0.5"
     pruning_interval: int = 1000            # NOT SPECIFIED IN PAPER (in steps)
+    view_prune_every_multiplier: int = 3    # view-prune cadence relative to pruning_interval
+    view_prune_probe_rays: int = 8192
+    view_prune_weight_threshold: float = 1e-3
+    view_prune_min_foreground_rays: int = 256
+    view_prune_min_distinct_views: int = 8
     opacity_reset_interval: int = 3000      # 3DGS-inspired; DualPrim cites similar pruning
     opacity_reset_value: float = 0.01       # matches 3DGS reset_opacity() cap
 
@@ -166,6 +186,12 @@ class DualPrimConfig:
     # - "stablenormal": run StableNormal on rendered RGBs (paper)
     # - "analytic":     compute from mesh (only valid in mesh_* modes)
     normal_source: str = "analytic"
+    stablenormal_use_turbo: bool = False
+    stablenormal_cache_dir: str | None = None
+    stablenormal_blend_strength: float = 1.0
+    stablenormal_agreement_floor: float = 0.5
+    stablenormal_agreement_ceil: float = 0.95
+    stablenormal_edge_boost: float = 0.0
 
     # ================================================================
     # Logging
@@ -179,10 +205,21 @@ class DualPrimConfig:
     checkpoint_interval: int = 5_000
     export_interval: int = 5_000             # intermediate mesh snapshots
 
+    # ================================================================
+    # Export cleanup / final refinement
+    # ================================================================
+    export_cleanup_min_component_faces: int = 0
+    export_cleanup_min_component_area_ratio: float = 0.0
+    export_smoothing_iterations: int = 0
+    export_smoothing_lambda: float = 0.5
+    export_smoothing_nu: float = -0.53
+
 
 # Known deviations from the paper when using this config as-is:
 #   - lambda_* weights are educated guesses
 #   - mu_gate_offset default = 0 (paper says "small offset")
+#   - gate_mode defaults to the stabilized branch, not the literal paper gate
+#   - delta_p_mode defaults to a fixed Δp rather than per-sample spacing
 #   - num_samples_per_ray = 64 (not specified)
 #   - learning_rate schedule not specified
 #   - pruning_interval not specified

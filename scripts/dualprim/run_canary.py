@@ -68,6 +68,44 @@ def main():
     ap.add_argument("--rays", type=int, default=1024)
     ap.add_argument("--resolution", type=int, default=256,
                     help="view render resolution")
+    ap.add_argument("--tessellation-resolution", type=int, default=None,
+                    help="Override export tessellation resolution")
+    ap.add_argument("--num-samples-per-ray", type=int, default=None,
+                    help="Override volumetric samples per ray")
+    ap.add_argument("--shape-range-lo", type=float, default=None,
+                    help="Override lower bound of the superquadric shape range")
+    ap.add_argument("--shape-range-hi", type=float, default=None,
+                    help="Override upper bound of the superquadric shape range")
+    ap.add_argument("--export-cleanup-min-faces", type=int, default=None,
+                    help="Drop tiny disconnected export components below this face count.")
+    ap.add_argument("--export-cleanup-min-area-ratio", type=float, default=None,
+                    help="Drop export components smaller than this fraction of the "
+                         "largest component area.")
+    ap.add_argument("--export-smoothing-iters", type=int, default=None,
+                    help="Apply Taubin smoothing for this many iterations after export.")
+    ap.add_argument("--export-smoothing-lambda", type=float, default=None,
+                    help="Taubin smoothing lambda.")
+    ap.add_argument("--export-smoothing-nu", type=float, default=None,
+                    help="Taubin smoothing nu.")
+    ap.add_argument("--normal-source", default=None,
+                    choices=["analytic", "stablenormal"],
+                    help="Normal supervision source. 'analytic' uses the "
+                         "rendered mesh normals; 'stablenormal' runs the "
+                         "official StableNormal predictor on the rendered RGBs.")
+    ap.add_argument("--stablenormal-turbo", action="store_true",
+                    help="Use StableNormal_turbo for faster normal prediction.")
+    ap.add_argument("--stablenormal-cache-dir", default=None,
+                    help="Optional cache dir passed to StableNormal torch.hub.")
+    ap.add_argument("--stablenormal-blend-strength", type=float, default=None,
+                    help="When using StableNormal, blend amount vs analytic normals. "
+                         "1.0 preserves raw StableNormal targets; lower values keep "
+                         "more of the analytic scaffold.")
+    ap.add_argument("--stablenormal-agreement-floor", type=float, default=None,
+                    help="Cosine-agreement floor for StableNormal/analytic blending.")
+    ap.add_argument("--stablenormal-agreement-ceil", type=float, default=None,
+                    help="Cosine-agreement ceil for StableNormal/analytic blending.")
+    ap.add_argument("--stablenormal-edge-boost", type=float, default=None,
+                    help="Extra StableNormal weight near silhouette boundaries.")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--nsq-init", default="coupled",
@@ -106,22 +144,87 @@ def main():
                     help="Override lambda_mask in config. Friend's initial "
                          "tuning bumped this 1->3; round 4 fallback may "
                          "try 5+ if round 3 still fails.")
+    ap.add_argument("--lambda-sparse", type=float, default=None,
+                    help="Override lambda_sparse in config.")
+    ap.add_argument("--lambda-entropy", type=float, default=None,
+                    help="Override lambda_entropy in config.")
+    ap.add_argument("--lambda-max", type=float, default=None,
+                    help="Override lambda_max in config.")
+    ap.add_argument("--lambda-norm-reg", type=float, default=None,
+                    help="Override lambda_norm_reg in config.")
+    ap.add_argument("--lambda-norm-reg-final", type=float, default=None,
+                    help="Late-stage target for lambda_norm_reg.")
+    ap.add_argument("--norm-reg-ramp-start-fraction", type=float, default=None,
+                    help="Start fraction for the lambda_norm_reg ramp.")
+    ap.add_argument("--norm-reg-ramp-end-fraction", type=float, default=None,
+                    help="End fraction for the lambda_norm_reg ramp.")
+    ap.add_argument("--masked-loss-norm-mode", default=None,
+                    choices=["global_mean", "fg_mean"],
+                    help="Hostile-audit switch for Eq. 13 / Eq. 18 masked reduction.")
+    ap.add_argument("--primitive-reg-average-mode", default=None,
+                    choices=["alive", "fixed_k"],
+                    help="Hostile-audit switch for Eq. 15–17 averaging denominator.")
     ap.add_argument("--mask-loss-type", default=None,
                     choices=["bce", "mse"],
                     help="Override the mask loss used in Eq. 14. "
                          "'bce' matches the paper exactly; 'mse' is the "
                          "stability fallback branch we used while tracking "
                          "the NaN issue.")
+    ap.add_argument("--prune-alpha-threshold", type=float, default=None,
+                    help="Override alpha prune threshold.")
     ap.add_argument("--pruning-interval", type=int, default=None,
                     help="Override pruning_interval (how often to kill "
                          "weak primitives). Default 1000. Increase to "
                          "2000+ to give primitives more time to find "
                          "positions before being pruned.")
+    ap.add_argument("--view-prune-weight-threshold", type=float, default=None,
+                    help="Override view-dependent prune threshold.")
+    ap.add_argument("--view-prune-every-multiplier", type=int, default=None,
+                    help="Run view-dependent pruning every N alpha-prune cycles.")
     ap.add_argument("--opacity-reset-interval", type=int, default=None,
                     help="Override periodic opacity reset cadence. "
                          "3DGS-inspired: resetting alpha keeps alive "
                          "primitives competing instead of all saturating "
                          "to 1. Set 0 to disable.")
+    ap.add_argument("--mu-gate-offset", type=float, default=None,
+                    help="Override Eq. 4 gate offset μ.")
+    ap.add_argument("--mu-gate-offset-final", type=float, default=None,
+                    help="Late-stage target value for μ; ramps from --mu-gate-offset.")
+    ap.add_argument("--mu-gate-ramp-start-fraction", type=float, default=None,
+                    help="Start fraction for late-stage μ ramp.")
+    ap.add_argument("--gate-mode", default=None,
+                    choices=["stabilized", "paper_literal"],
+                    help="Gate handling mode around Eq. 4 / Eq. 7. "
+                         "'stabilized' keeps the current theta-floor "
+                         "curriculum; 'paper_literal' disables the "
+                         "curriculum and uses only a tiny theta safety eps.")
+    ap.add_argument("--theta-min", type=float, default=None,
+                    help="Override the minimum effective theta floor.")
+    ap.add_argument("--paper-literal-theta-eps", type=float, default=None,
+                    help="Tiny theta epsilon used only in --gate-mode paper_literal.")
+    ap.add_argument("--delta-p-mode", default=None,
+                    choices=["fixed", "half_delta"],
+                    help="Eq. 7 finite-difference step mode. "
+                         "'fixed' uses a global constant; 'half_delta' "
+                         "uses half the local ray spacing per sample.")
+    ap.add_argument("--delta-p-value", type=float, default=None,
+                    help="Fixed Δp used when --delta-p-mode fixed.")
+    ap.add_argument("--delta-p-scale", type=float, default=None,
+                    help="Multiplier on the local ray spacing when "
+                         "--delta-p-mode half_delta.")
+    ap.add_argument("--color-weight-mode", default=None,
+                    choices=["alpha_density", "density_only"],
+                    help="Eq. 8 hostile-audit switch for per-sample color blending.")
+    ap.add_argument("--point-normal-weight-mode", default=None,
+                    choices=["alpha_density", "density_only"],
+                    help="Eq. 11 hostile-audit switch for point-normal blending.")
+    ap.add_argument("--final-normal-normalize", default=None,
+                    choices=["true", "false"],
+                    help="Whether to normalize the final composited normal map after Eq. 10.")
+    ap.add_argument("--theta-curriculum-start", type=float, default=None,
+                    help="Override the initial theta curriculum floor.")
+    ap.add_argument("--theta-curriculum-fraction", type=float, default=None,
+                    help="Override the fraction of training used by the theta curriculum.")
     ap.add_argument("--lambda-open-ray", type=float, default=None,
                     help="Weight on the open-ray loss (round-7 addition). "
                          "Penalizes predicted mask > 0 on rays passing "
@@ -143,6 +246,17 @@ def main():
     ap.add_argument("--abort-on-nan-grad", action="store_true",
                     help="Abort immediately on the first non-finite "
                          "gradient instead of continuing with skip logic.")
+    ap.add_argument("--prepare-detail-refine", action="store_true",
+                    help="After export, prepare narrow-band detail-refinement "
+                         "artifacts from the DualPrim mesh and a target mesh. "
+                         "This keeps DualPrim as the coarse scaffold and emits "
+                         "a constrained manifest for a later detail stage.")
+    ap.add_argument("--detail-target-mesh", default=None,
+                    help="Reference mesh used to prepare detail-refinement "
+                         "artifacts. Required with --prepare-detail-refine.")
+    ap.add_argument("--detail-out", default=None,
+                    help="Output dir for detail-refinement artifacts. "
+                         "Defaults to <out>/detail_refine.")
     args = ap.parse_args()
 
     out_dir = Path(args.out)
@@ -164,12 +278,99 @@ def main():
     # CLI overrides for round-4+ tuning levers
     if args.lambda_mask is not None:
         config.lambda_mask = args.lambda_mask
+    if args.lambda_sparse is not None:
+        config.lambda_sparse = args.lambda_sparse
+    if args.lambda_entropy is not None:
+        config.lambda_entropy = args.lambda_entropy
+    if args.lambda_max is not None:
+        config.lambda_max = args.lambda_max
+    if args.lambda_norm_reg is not None:
+        config.lambda_norm_reg = args.lambda_norm_reg
+    if args.lambda_norm_reg_final is not None:
+        config.lambda_norm_reg_final = args.lambda_norm_reg_final
+    if args.norm_reg_ramp_start_fraction is not None:
+        config.norm_reg_ramp_start_fraction = args.norm_reg_ramp_start_fraction
+    if args.norm_reg_ramp_end_fraction is not None:
+        config.norm_reg_ramp_end_fraction = args.norm_reg_ramp_end_fraction
+    if args.masked_loss_norm_mode is not None:
+        config.masked_loss_norm_mode = args.masked_loss_norm_mode
+    if args.primitive_reg_average_mode is not None:
+        config.primitive_reg_average_mode = args.primitive_reg_average_mode
     if args.mask_loss_type is not None:
         config.mask_loss_type = args.mask_loss_type
+    if args.tessellation_resolution is not None:
+        config.tessellation_resolution = args.tessellation_resolution
+    if args.num_samples_per_ray is not None:
+        config.num_samples_per_ray = args.num_samples_per_ray
+    if args.shape_range_lo is not None or args.shape_range_hi is not None:
+        lo, hi = config.shape_range
+        if args.shape_range_lo is not None:
+            lo = args.shape_range_lo
+        if args.shape_range_hi is not None:
+            hi = args.shape_range_hi
+        config.shape_range = (lo, hi)
+    if args.export_cleanup_min_faces is not None:
+        config.export_cleanup_min_component_faces = args.export_cleanup_min_faces
+    if args.export_cleanup_min_area_ratio is not None:
+        config.export_cleanup_min_component_area_ratio = args.export_cleanup_min_area_ratio
+    if args.export_smoothing_iters is not None:
+        config.export_smoothing_iterations = args.export_smoothing_iters
+    if args.export_smoothing_lambda is not None:
+        config.export_smoothing_lambda = args.export_smoothing_lambda
+    if args.export_smoothing_nu is not None:
+        config.export_smoothing_nu = args.export_smoothing_nu
+    if args.normal_source is not None:
+        config.normal_source = args.normal_source
+    if args.stablenormal_turbo:
+        config.stablenormal_use_turbo = True
+    if args.stablenormal_cache_dir is not None:
+        config.stablenormal_cache_dir = args.stablenormal_cache_dir
+    if args.stablenormal_blend_strength is not None:
+        config.stablenormal_blend_strength = args.stablenormal_blend_strength
+    if args.stablenormal_agreement_floor is not None:
+        config.stablenormal_agreement_floor = args.stablenormal_agreement_floor
+    if args.stablenormal_agreement_ceil is not None:
+        config.stablenormal_agreement_ceil = args.stablenormal_agreement_ceil
+    if args.stablenormal_edge_boost is not None:
+        config.stablenormal_edge_boost = args.stablenormal_edge_boost
+    if args.prune_alpha_threshold is not None:
+        config.prune_alpha_threshold = args.prune_alpha_threshold
     if args.pruning_interval is not None:
         config.pruning_interval = args.pruning_interval
+    if args.view_prune_weight_threshold is not None:
+        config.view_prune_weight_threshold = args.view_prune_weight_threshold
+    if args.view_prune_every_multiplier is not None:
+        config.view_prune_every_multiplier = args.view_prune_every_multiplier
     if args.opacity_reset_interval is not None:
         config.opacity_reset_interval = args.opacity_reset_interval
+    if args.mu_gate_offset is not None:
+        config.mu_gate_offset = args.mu_gate_offset
+    if args.mu_gate_offset_final is not None:
+        config.mu_gate_offset_final = args.mu_gate_offset_final
+    if args.mu_gate_ramp_start_fraction is not None:
+        config.mu_gate_ramp_start_fraction = args.mu_gate_ramp_start_fraction
+    if args.gate_mode is not None:
+        config.gate_mode = args.gate_mode
+    if args.theta_min is not None:
+        config.theta_min = args.theta_min
+    if args.paper_literal_theta_eps is not None:
+        config.paper_literal_theta_eps = args.paper_literal_theta_eps
+    if args.delta_p_mode is not None:
+        config.delta_p_mode = args.delta_p_mode
+    if args.delta_p_value is not None:
+        config.delta_p_value = args.delta_p_value
+    if args.delta_p_scale is not None:
+        config.delta_p_scale = args.delta_p_scale
+    if args.color_weight_mode is not None:
+        config.color_weight_mode = args.color_weight_mode
+    if args.point_normal_weight_mode is not None:
+        config.point_normal_weight_mode = args.point_normal_weight_mode
+    if args.final_normal_normalize is not None:
+        config.final_normal_normalize = (args.final_normal_normalize == "true")
+    if args.theta_curriculum_start is not None:
+        config.theta_curriculum_start = args.theta_curriculum_start
+    if args.theta_curriculum_fraction is not None:
+        config.theta_curriculum_fraction = args.theta_curriculum_fraction
     if args.lambda_open_ray is not None:
         config.lambda_open_ray = args.lambda_open_ray
     # Write the effective config for reproducibility
@@ -209,10 +410,23 @@ def main():
                 resolution=config.view_resolution,
                 render_normals=True,
             )
+        if config.normal_source == "stablenormal":
+            print(f"[canary] predicting StableNormal maps in {views_dir}")
+            _ensure_stablenormal_views(
+                views_dir,
+                device=device,
+                use_turbo=config.stablenormal_use_turbo,
+                cache_dir=config.stablenormal_cache_dir,
+            )
         sampler = _build_views_sampler(
             views_dir, device=device,
             fg_bias=args.fg_bias,
             hole_ray_oversample=args.hole_ray_oversample,
+            normal_source=config.normal_source,
+            stablenormal_blend_strength=config.stablenormal_blend_strength,
+            stablenormal_agreement_floor=config.stablenormal_agreement_floor,
+            stablenormal_agreement_ceil=config.stablenormal_agreement_ceil,
+            stablenormal_edge_boost=config.stablenormal_edge_boost,
         )
     elif args.mode == "paper":
         raise NotImplementedError(
@@ -269,6 +483,10 @@ def main():
                          f"{parts['theta_p90']:.2f}]")
             if "theta_min_eff" in parts:
                 line += f" θ_min_eff={parts['theta_min_eff']:.2f}"
+            if "mu_gate_eff" in parts:
+                line += f" μ={parts['mu_gate_eff']:.2f}"
+            if "lambda_norm_eff" in parts:
+                line += f" λn={parts['lambda_norm_eff']:.2f}"
             if "nsq_overlap_pct" in parts:
                 line += f" NSQ∩PSQ={parts['nsq_overlap_pct']:.0f}%"
             if "pe_mean_fg" in parts:
@@ -320,6 +538,20 @@ def main():
         extra_metadata={"training_s": train_dt},
     )
 
+    detail_manifest = None
+    if args.prepare_detail_refine:
+        if not args.detail_target_mesh:
+            raise ValueError("--prepare-detail-refine requires --detail-target-mesh")
+        from clearmesh.dualprim import DetailRefineConfig, prepare_detail_refine_artifacts
+        detail_out = Path(args.detail_out) if args.detail_out else (out_dir / "detail_refine")
+        detail_manifest = prepare_detail_refine_artifacts(
+            out_dir / "refit.glb",
+            args.detail_target_mesh,
+            detail_out,
+            DetailRefineConfig(),
+        )
+        print(f"[canary] detail-refine manifest: {detail_out / 'detail_refine_manifest.json'}")
+
     print()
     print("=" * 60)
     print(f"CANARY DONE")
@@ -330,6 +562,12 @@ def main():
     print(f"  scene_v:  {len(scene_mesh.vertices):,}")
     print(f"  scene_f:  {len(scene_mesh.faces):,}")
     print(f"  out:      {out_dir}")
+    if detail_manifest is not None:
+        detail = detail_manifest["detail_signal"]
+        budget = detail_manifest["budget"]
+        print(f"  detail:   band={detail['detail_band_ratio']:.3f} "
+              f"chamfer≈{detail['chamfer_proxy']:.4f} "
+              f"budget_v≤{budget['max_vertices']:,}")
     print("=" * 60)
 
 
@@ -392,7 +630,12 @@ def _build_mesh_fit_tsdf(
 
 def _build_views_sampler(views_dir: Path, device: str,
                           fg_bias: float = 0.7,
-                          hole_ray_oversample: float = 0.0):
+                          hole_ray_oversample: float = 0.0,
+                          normal_source: str = "analytic",
+                          stablenormal_blend_strength: float = 1.0,
+                          stablenormal_agreement_floor: float = 0.5,
+                          stablenormal_agreement_ceil: float = 0.95,
+                          stablenormal_edge_boost: float = 0.0):
     """Sample rays from the rendered views in `views_dir`.
 
     fg_bias: fraction of rays drawn from "interesting" pixels (mask
@@ -422,13 +665,20 @@ def _build_views_sampler(views_dir: Path, device: str,
     rgbs = np.zeros((V, H, W, 3), dtype=np.float32)
     masks = np.zeros((V, H, W), dtype=np.float32)
     normals = np.zeros((V, H, W, 3), dtype=np.float32)
+    analytic_normals = np.zeros((V, H, W, 3), dtype=np.float32)
+    stable_normals = np.zeros((V, H, W, 3), dtype=np.float32)
     poses = np.zeros((V, 4, 4), dtype=np.float32)
     for i in range(V):
         rgbs[i] = np.asarray(Image.open(views_dir / f"{i:02d}_rgb.png").convert("RGB")) / 255.0
         m = np.asarray(Image.open(views_dir / f"{i:02d}_mask.png").convert("L"))
         masks[i] = (m > 127).astype(np.float32)
-        n = np.asarray(Image.open(views_dir / f"{i:02d}_normal.png").convert("RGB")) / 255.0
-        normals[i] = n * 2.0 - 1.0
+        analytic_n = np.asarray(Image.open(views_dir / f"{i:02d}_normal.png").convert("RGB")) / 255.0
+        analytic_normals[i] = analytic_n * 2.0 - 1.0
+        if normal_source == "stablenormal":
+            stable_n = np.asarray(Image.open(views_dir / f"{i:02d}_normal_stablenormal.png").convert("RGB")) / 255.0
+            stable_normals[i] = stable_n * 2.0 - 1.0
+        else:
+            normals[i] = analytic_normals[i]
         poses[i] = np.asarray(meta["views"][i]["pose_world_from_camera"], dtype=np.float32)
 
     yfov = meta["camera"]["yfov_rad"]
@@ -459,10 +709,45 @@ def _build_views_sampler(views_dir: Path, device: str,
     # pixels as "hole rays" and reward low predicted opacity on them.
     from scipy import ndimage
     hole_masks = np.zeros((V, H, W), dtype=bool)
+    boundary_masks = np.zeros((V, H, W), dtype=bool)
     for v in range(V):
         m = masks[v] > 0.5
         filled = ndimage.binary_fill_holes(m)
         hole_masks[v] = filled & ~m
+        eroded = ndimage.binary_erosion(m, iterations=2)
+        boundary = m & ~eroded
+        outer = ndimage.binary_dilation(m, iterations=2) & ~m
+        boundary_masks[v] = boundary | outer
+
+    if normal_source == "stablenormal":
+        analytic_unit = analytic_normals / np.clip(
+            np.linalg.norm(analytic_normals, axis=-1, keepdims=True), 1e-6, None,
+        )
+        stable_unit = stable_normals / np.clip(
+            np.linalg.norm(stable_normals, axis=-1, keepdims=True), 1e-6, None,
+        )
+        if stablenormal_blend_strength >= 1.0 and stablenormal_edge_boost <= 0.0:
+            normals = stable_unit.astype(np.float32)
+        else:
+            denom = max(stablenormal_agreement_ceil - stablenormal_agreement_floor, 1e-6)
+            cosine = np.clip((analytic_unit * stable_unit).sum(axis=-1), -1.0, 1.0)
+            agreement = np.clip(
+                (cosine - stablenormal_agreement_floor) / denom,
+                0.0,
+                1.0,
+            )
+            blend = np.clip(stablenormal_blend_strength, 0.0, 1.0) * agreement
+            if stablenormal_edge_boost > 0.0:
+                blend = np.clip(
+                    blend * (1.0 + stablenormal_edge_boost * boundary_masks.astype(np.float32)),
+                    0.0,
+                    1.0,
+                )
+            blended = analytic_unit * (1.0 - blend[..., None]) + stable_unit * blend[..., None]
+            normals = blended / np.clip(
+                np.linalg.norm(blended, axis=-1, keepdims=True), 1e-6, None,
+            )
+            normals = normals.astype(np.float32)
     hole_masks_t = torch.from_numpy(hole_masks).to(device)
     n_hole_pixels_total = int(hole_masks.sum())
     print(f"[sampler] total hole pixels across {V} views: {n_hole_pixels_total:,} "
@@ -474,14 +759,12 @@ def _build_views_sampler(views_dir: Path, device: str,
     # ALSO include hole pixels in the "interesting" pool so fg-biased
     # sampling actually hits holes with reasonable frequency.
     interesting_per_view = []
+    foreground_per_view = []
     for v in range(V):
         m = masks[v] > 0.5
-        eroded = ndimage.binary_erosion(m, iterations=2)
-        boundary = m & ~eroded
-        # Also add the inverse boundary (just-outside-mask) so silhouette
-        # rays actually hit empty space too.
-        outer = ndimage.binary_dilation(m, iterations=2) & ~m
-        interesting = m | boundary | outer | hole_masks[v]
+        fg_idx = np.flatnonzero(m.ravel())
+        foreground_per_view.append(fg_idx if len(fg_idx) > 0 else np.flatnonzero(hole_masks[v].ravel()))
+        interesting = m | boundary_masks[v] | hole_masks[v]
         # Flatten to indices
         idx = np.flatnonzero(interesting.ravel())
         interesting_per_view.append(idx)
@@ -497,6 +780,17 @@ def _build_views_sampler(views_dir: Path, device: str,
             ix = np.tile(ix, reps)[:max_len]
         interesting_padded[v] = ix
     interesting_padded_t = torch.from_numpy(interesting_padded).to(device)
+    foreground_max_len = max(max(len(ix), 1) for ix in foreground_per_view)
+    foreground_padded = np.zeros((V, foreground_max_len), dtype=np.int64)
+    for v in range(V):
+        ix = foreground_per_view[v]
+        if len(ix) == 0:
+            ix = np.arange(H * W, dtype=np.int64)
+        if len(ix) < foreground_max_len:
+            reps = (foreground_max_len + len(ix) - 1) // len(ix)
+            ix = np.tile(ix, reps)[:foreground_max_len]
+        foreground_padded[v] = ix
+    foreground_padded_t = torch.from_numpy(foreground_padded).to(device)
 
     # Dedicated hole-ray pool: views with ANY hole pixels get a
     # padded index array of those pixels only. Views without hole
@@ -525,6 +819,31 @@ def _build_views_sampler(views_dir: Path, device: str,
               f"hole_ray_oversample={hole_ray_oversample:.2f}")
 
     rng = torch.Generator(device=device).manual_seed(42)
+
+    def sample_view_probe(n_rays: int, foreground_only: bool = True) -> RaySampleBatch:
+        rays_per_view = max(1, math.ceil(n_rays / V))
+        vi = torch.arange(V, device=device).repeat_interleave(rays_per_view)
+        vi = vi[:n_rays]
+        if foreground_only:
+            col = torch.randint(0, foreground_max_len, (vi.shape[0],), generator=rng, device=device)
+            flat = foreground_padded_t[vi, col]
+        else:
+            flat = torch.randint(0, H * W, (vi.shape[0],), generator=rng, device=device)
+        yi = flat // W
+        xi = flat % W
+        rgb = rgbs_t[vi, yi, xi]
+        mask = masks_t[vi, yi, xi]
+        normal = normals_t[vi, yi, xi]
+        hole_ray = hole_masks_t[vi, yi, xi]
+        cam_dir = cam_dirs_t[yi, xi]
+        rot = poses_t[vi, :3, :3]
+        world_dir = torch.einsum("rij,rj->ri", rot, cam_dir)
+        origin = poses_t[vi, :3, 3]
+        return RaySampleBatch(
+            origins=origin, dirs=world_dir,
+            rgb_gt=rgb, mask_gt=mask, normals_gt=normal,
+            hole_ray_gt=hole_ray, view_idx=vi,
+        )
 
     def sampler(n_rays: int) -> RaySampleBatch:
         # Split ray budget: hole → fg → uniform
@@ -581,9 +900,76 @@ def _build_views_sampler(views_dir: Path, device: str,
         return RaySampleBatch(
             origins=origin, dirs=world_dir,
             rgb_gt=rgb, mask_gt=mask, normals_gt=normal,
-            hole_ray_gt=hole_ray,
+            hole_ray_gt=hole_ray, view_idx=vi,
         )
+    sampler.sample_view_probe = sample_view_probe
     return sampler
+
+
+def _ensure_stablenormal_views(
+    views_dir: Path,
+    *,
+    device: str,
+    use_turbo: bool = False,
+    cache_dir: str | None = None,
+) -> None:
+    """Predict StableNormal normal maps for rendered RGB views.
+
+    Uses the official StableNormal torch.hub entrypoint:
+    https://github.com/Stable-X/StableNormal
+    """
+    from PIL import Image
+
+    with open(views_dir / "views.json") as f:
+        meta = json.load(f)
+    n_views = len(meta["views"])
+    out_paths = [views_dir / f"{i:02d}_normal_stablenormal.png" for i in range(n_views)]
+    if all(p.exists() for p in out_paths):
+        return
+
+    model_name = "StableNormal_turbo" if use_turbo else "StableNormal"
+    kwargs = {"trust_repo": True}
+    if cache_dir and Path(cache_dir).exists():
+        kwargs["local_cache_dir"] = cache_dir
+    predictor = torch.hub.load("Stable-X/StableNormal", model_name, **kwargs)
+    if hasattr(predictor, "to"):
+        try:
+            predictor = predictor.to(device if torch.cuda.is_available() else "cpu")
+        except Exception:
+            predictor = predictor.to("cpu")
+    if hasattr(predictor, "eval"):
+        predictor.eval()
+
+    for i, out_path in enumerate(out_paths):
+        if out_path.exists():
+            continue
+        input_image = Image.open(views_dir / f"{i:02d}_rgb.png").convert("RGB")
+        pred = predictor(input_image, data_type="object")
+        if isinstance(pred, Image.Image):
+            normal_image = pred
+        elif torch.is_tensor(pred):
+            arr = pred.detach().float().cpu()
+            if arr.ndim == 3 and arr.shape[0] in (1, 3):
+                arr = arr.permute(1, 2, 0)
+            if arr.ndim == 2:
+                arr = arr.unsqueeze(-1)
+            if arr.min().item() < 0.0:
+                arr = (arr + 1.0) * 0.5
+            arr = arr.clamp(0.0, 1.0)
+            if arr.shape[-1] == 1:
+                arr = arr.repeat(1, 1, 3)
+            normal_image = Image.fromarray((arr.numpy() * 255.0).astype(np.uint8))
+        else:
+            arr = np.asarray(pred)
+            if arr.ndim == 2:
+                arr = arr[..., None]
+            if arr.min() < 0:
+                arr = (arr + 1.0) * 0.5
+            arr = np.clip(arr, 0.0, 1.0)
+            if arr.shape[-1] == 1:
+                arr = np.repeat(arr, 3, axis=-1)
+            normal_image = Image.fromarray((arr * 255.0).astype(np.uint8))
+        normal_image.save(out_path)
 
 
 # scripts/dualprim/render_views.py imports math; keep it here too

@@ -2,8 +2,8 @@
 
 Equations implemented (paper §3.1 Formulation, §3.2 Renderer):
 
-  (2)  f(p, Q) = (|p'_x / a_x|^(2/ε2) + |p'_y / a_y|^(2/ε2))^(ε2/ε1)
-                 + |p'_z / a_z|^(2/ε1) − 1
+  (2)  f(p, Q) = [ (|p'_x / a_x|^(2/ε2) + |p'_y / a_y|^(2/ε2))^(ε2/ε1)
+                   + |p'_z / a_z|^(2/ε1) ]^(ε1/2) − 1
           where p' = R_Q^-1 (p − T_Q)  is the point in the SQ's local frame
           The "−1" makes f(p,Q) < 0 inside, 0 on surface, > 0 outside.
 
@@ -141,7 +141,8 @@ def sq_implicit(
     term_xy = (A + B).clamp(max=FCLAMP)
     outer_xy = _safe_positive_pow(term_xy, e2 / e1, eps=eps)
     outer_z = _safe_positive_pow(Z, 2.0 / e1, eps=eps)
-    f = outer_xy.clamp(max=FCLAMP) + outer_z.clamp(max=FCLAMP)
+    inner = outer_xy.clamp(max=FCLAMP) + outer_z.clamp(max=FCLAMP)
+    f = _safe_positive_pow(inner.clamp(min=eps), e1 / 2.0, eps=eps)
     return (f - 1.0).clamp(min=-FCLAMP, max=FCLAMP)   # < 0 inside
 
 
@@ -194,12 +195,17 @@ def sq_implicit_grad(
     B = _safe_positive_pow(Y, pow_xy, eps=eps)
     U = (A + B).clamp(min=eps)
 
-    # Analytic local-frame derivatives:
-    #   d/dx (A + B)^(e2/e1) = (2/e1) * (A + B)^(e2/e1 - 1) * X^(2/e2 - 1) * sign(x) / a_x
-    common_xy = (2.0 / e1) * _safe_positive_pow(U, outer - 1.0, eps=eps)
+    inner = _safe_positive_pow(U, outer, eps=eps) + _safe_positive_pow(Z, pow_z, eps=eps)
+    inner = inner.clamp(min=eps)
+    outer_factor = _safe_positive_pow(inner, e1 / 2.0 - 1.0, eps=eps)
+
+    # With the paper's full Eq. 2, the outer (ε1/2) and inner
+    # SQ-chain-rule factors simplify cleanly:
+    #   d/dx f = inner^(ε1/2 - 1) * U^(ε2/ε1 - 1) * X^(2/ε2 - 1) * sign(x)/a_x
+    common_xy = outer_factor * _safe_positive_pow(U, outer - 1.0, eps=eps)
     dfdx = common_xy * _safe_positive_pow(X, pow_xy - 1.0, eps=eps) * x.sign() / a[..., 0]
     dfdy = common_xy * _safe_positive_pow(Y, pow_xy - 1.0, eps=eps) * y.sign() / a[..., 1]
-    dfdz = pow_z * _safe_positive_pow(Z, pow_z - 1.0, eps=eps) * z.sign() / a[..., 2]
+    dfdz = outer_factor * _safe_positive_pow(Z, pow_z - 1.0, eps=eps) * z.sign() / a[..., 2]
 
     grad_local = torch.stack([dfdx, dfdy, dfdz], dim=-1)   # (..., K, 3)
 
@@ -225,6 +231,8 @@ def effectiveness_probability(
     theta: torch.Tensor,    # (K,) — per-primitive sharpness
     mu: float = 0.0,
     theta_min: float = 0.01,
+    gate_mode: str = "stabilized",
+    paper_literal_theta_eps: float = 1e-6,
 ) -> torch.Tensor:
     """Paper Eq 4 — smooth gated activation of the NSQ.
 
@@ -237,7 +245,10 @@ def effectiveness_probability(
     Returns (..., K) in [0, 1].
     """
     # theta broadcasts as (K,) → (..., K) automatically
-    t = theta.clamp(min=theta_min)
+    if gate_mode == "paper_literal":
+        t = theta.clamp(min=paper_literal_theta_eps)
+    else:
+        t = theta.clamp(min=theta_min)
     term_psq = torch.sigmoid(-f_psq / t - mu)
     term_nsq = torch.sigmoid(-f_nsq / t - mu)
     return term_psq * term_nsq
@@ -289,6 +300,8 @@ def scene_combined_field(
     scene: DualPrimScene,
     mu: float = 0.0,
     theta_min: float = 0.01,
+    gate_mode: str = "stabilized",
+    paper_literal_theta_eps: float = 1e-6,
     with_normals: bool = False,
 ):
     """One-shot evaluation of the combined field per primitive.
@@ -314,6 +327,8 @@ def scene_combined_field(
     )
     p_e = effectiveness_probability(
         f_psq, f_nsq, scene.theta(), mu=mu, theta_min=theta_min,
+        gate_mode=gate_mode,
+        paper_literal_theta_eps=paper_literal_theta_eps,
     )
     f_combined = combined_field(f_psq, f_nsq, p_e)
 

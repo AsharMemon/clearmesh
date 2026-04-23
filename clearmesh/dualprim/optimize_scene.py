@@ -260,6 +260,9 @@ def _theta_min_curriculum(config: DualPrimConfig, iteration: int) -> float:
     config.theta_min over the first config.theta_curriculum_fraction
     of training, then holding at config.theta_min.
     """
+    if getattr(config, "gate_mode", "stabilized") == "paper_literal":
+        return config.theta_min
+
     tot = max(config.num_iterations, 1)
     frac = iteration / tot
     stop = config.theta_curriculum_fraction
@@ -269,12 +272,61 @@ def _theta_min_curriculum(config: DualPrimConfig, iteration: int) -> float:
     return (1.0 - alpha) * config.theta_curriculum_start + alpha * config.theta_min
 
 
+def _mu_gate_schedule(config: DualPrimConfig, iteration: int) -> float:
+    """Optional late-stage μ ramp for a sharper P_E gate.
+
+    Defaults to the constant paper-style behavior when
+    ``mu_gate_offset_final`` is unset or equal to ``mu_gate_offset``.
+    """
+    mu_start = config.mu_gate_offset
+    mu_final = (
+        config.mu_gate_offset
+        if config.mu_gate_offset_final is None
+        else config.mu_gate_offset_final
+    )
+    if mu_final == mu_start:
+        return mu_start
+
+    tot = max(config.num_iterations, 1)
+    frac = iteration / tot
+    start = config.mu_gate_ramp_start_fraction
+    if frac <= start:
+        return mu_start
+    alpha = min(1.0, (frac - start) / max(1.0 - start, 1e-9))
+    return (1.0 - alpha) * mu_start + alpha * mu_final
+
+
+def _norm_reg_schedule(config: DualPrimConfig, iteration: int) -> float:
+    """Optional late-stage ramp for the normal consistency weight."""
+    lam_start = config.lambda_norm_reg
+    lam_final = (
+        config.lambda_norm_reg
+        if config.lambda_norm_reg_final is None
+        else config.lambda_norm_reg_final
+    )
+    if lam_final == lam_start:
+        return lam_start
+
+    tot = max(config.num_iterations, 1)
+    frac = iteration / tot
+    start = config.norm_reg_ramp_start_fraction
+    end = max(start, config.norm_reg_ramp_end_fraction)
+    if frac <= start:
+        return lam_start
+    if frac >= end:
+        return lam_final
+    alpha = (frac - start) / max(end - start, 1e-9)
+    return (1.0 - alpha) * lam_start + alpha * lam_final
+
+
 def _dp_diagnostics(
     scene: DualPrimScene,
     ray_sampler: Optional["RaySampler"] = None,
     n_probe: int = 1024,
     theta_min_eff: float = 0.01,
     mu: float = 0.0,
+    gate_mode: str = "stabilized",
+    paper_literal_theta_eps: float = 1e-6,
 ) -> dict:
     """Diagnostics to catch P_E-gate collapse and NSQ inactivity.
 
@@ -344,6 +396,8 @@ def _dp_diagnostics(
                 p_e = effectiveness_probability(
                     f_psq, f_nsq, scene.theta(),
                     mu=mu, theta_min=theta_min_eff,
+                    gate_mode=gate_mode,
+                    paper_literal_theta_eps=paper_literal_theta_eps,
                 )
                 out["pe_mean_fg"] = float(p_e.mean().item())
                 out["pe_max_fg"] = float(p_e.max().item())
@@ -355,10 +409,13 @@ def prune_view_dependent(
     ray_sampler: "RaySampler",
     config: DualPrimConfig,
     *,
-    num_probe_rays: int = 8192,
-    weight_threshold: float = 1e-3,
+    num_probe_rays: int | None = None,
+    weight_threshold: float | None = None,
     foreground_only: bool = True,
-    min_foreground_rays: int = 256,
+    min_foreground_rays: int | None = None,
+    min_distinct_views: int | None = None,
+    mu: float | None = None,
+    theta_min: float | None = None,
     verbose: bool = False,
 ) -> int:
     """Kill primitives with negligible rendering weight across viewpoints.
@@ -391,12 +448,33 @@ def prune_view_dependent(
     from clearmesh.dualprim.renderer import (
         sample_ray_points,
         _scene_field,
+        _delta_p_offsets,
         density_from_field,
         _accumulated_transmittance,
     )
 
     with torch.no_grad():
-        batch = ray_sampler(num_probe_rays)
+        if num_probe_rays is None:
+            num_probe_rays = config.view_prune_probe_rays
+        if weight_threshold is None:
+            weight_threshold = config.view_prune_weight_threshold
+        if min_foreground_rays is None:
+            min_foreground_rays = config.view_prune_min_foreground_rays
+        if min_distinct_views is None:
+            min_distinct_views = config.view_prune_min_distinct_views
+        if mu is None:
+            mu = config.mu_gate_offset
+        if theta_min is None:
+            theta_min = config.theta_min
+
+        if hasattr(ray_sampler, "sample_view_probe"):
+            batch = ray_sampler.sample_view_probe(
+                num_probe_rays,
+                foreground_only=foreground_only,
+            )
+        else:
+            batch = ray_sampler(num_probe_rays)
+        view_idx = getattr(batch, "view_idx", None)
 
         # Foreground filter — the critical fix. Without this, thin
         # primitives in pixel-sparse regions get pruned just because
@@ -411,10 +489,14 @@ def prune_view_dependent(
                 return 0
             origins = batch.origins[fg_mask]
             dirs = batch.dirs[fg_mask]
+            if view_idx is not None:
+                view_idx = view_idx[fg_mask]
             R_eff = n_fg
         else:
             origins = batch.origins
             dirs = batch.dirs
+            if view_idx is not None:
+                view_idx = view_idx
             R_eff = num_probe_rays
 
         points, t_vals, deltas = sample_ray_points(
@@ -424,15 +506,26 @@ def prune_view_dependent(
             perturb=False, device=scene.params.device,
         )
 
-        dp = dirs.unsqueeze(1) * 0.01  # same default Δp
+        dp = _delta_p_offsets(
+            dirs, deltas,
+            delta_p=config.delta_p_value,
+            delta_p_mode=config.delta_p_mode,
+            delta_p_scale=config.delta_p_scale,
+        )
         f_fwd = _scene_field(
-            scene, points + dp, config.mu_gate_offset, config.theta_min,
+            scene, points + dp, mu, theta_min,
+            gate_mode=config.gate_mode,
+            paper_literal_theta_eps=config.paper_literal_theta_eps,
         )
         f_bwd = _scene_field(
-            scene, points - dp, config.mu_gate_offset, config.theta_min,
+            scene, points - dp, mu, theta_min,
+            gate_mode=config.gate_mode,
+            paper_literal_theta_eps=config.paper_literal_theta_eps,
         )
         sigma_k = density_from_field(
-            f_fwd, f_bwd, scene.theta(), theta_min=config.theta_min,
+            f_fwd, f_bwd, scene.theta(), theta_min=theta_min,
+            gate_mode=config.gate_mode,
+            paper_literal_theta_eps=config.paper_literal_theta_eps,
         )
 
         alive = scene.alive.to(sigma_k.dtype)
@@ -448,12 +541,29 @@ def prune_view_dependent(
         w_ray = alpha_ray * trans                            # (R_eff, N)
 
         denom = sigma.unsqueeze(-1) + 1e-8
-        per_prim_contrib = (
+        per_ray_prim_contrib = (
             (sigma_k_weighted / denom) * w_ray.unsqueeze(-1)
-        ).sum(dim=(0, 1))                                     # (K,)
+        ).sum(dim=1)                                          # (R_eff, K)
 
-        # Normalize by foreground-hit-ray count, NOT total probe rays.
-        per_prim_contrib = per_prim_contrib / max(R_eff, 1)
+        if view_idx is not None:
+            uniq_views = torch.unique(view_idx)
+            if uniq_views.numel() < min_distinct_views:
+                if verbose:
+                    print(f"[prune/view] only {uniq_views.numel()} distinct views "
+                          f"(< {min_distinct_views}); skipping prune cycle")
+                return 0
+            per_view_contrib = []
+            for v in uniq_views:
+                mask_v = view_idx == v
+                per_view_contrib.append(
+                    per_ray_prim_contrib[mask_v].sum(dim=0) / max(int(mask_v.sum().item()), 1)
+                )
+            per_prim_contrib = torch.stack(per_view_contrib, dim=0).mean(dim=0)
+            n_views_eff = int(uniq_views.numel())
+        else:
+            # Fallback: normalize by foreground-hit-ray count, NOT total probe rays.
+            per_prim_contrib = per_ray_prim_contrib.sum(dim=0) / max(R_eff, 1)
+            n_views_eff = 1
 
         kill = scene.alive & (per_prim_contrib < weight_threshold)
         n_killed = int(kill.sum().item())
@@ -462,7 +572,7 @@ def prune_view_dependent(
 
     if verbose and n_killed > 0:
         print(f"[prune/view] killed {n_killed} primitives "
-              f"(contribution<{weight_threshold}, over {R_eff} fg rays); "
+              f"(contribution<{weight_threshold}, over {R_eff} fg rays / {n_views_eff} views); "
               f"{scene.num_alive} alive")
     return n_killed
 
@@ -569,6 +679,7 @@ class RaySampleBatch:
         mask_gt: torch.Tensor,      # (R,)
         normals_gt: torch.Tensor,   # (R, 3)
         hole_ray_gt: Optional[torch.Tensor] = None,  # (R,) bool
+        view_idx: Optional[torch.Tensor] = None,     # (R,) long
     ):
         self.origins = origins
         self.dirs = dirs
@@ -576,6 +687,7 @@ class RaySampleBatch:
         self.mask_gt = mask_gt
         self.normals_gt = normals_gt
         self.hole_ray_gt = hole_ray_gt
+        self.view_idx = view_idx
 
 
 def train(
@@ -661,6 +773,8 @@ def train(
         # every primitive and the P_E gate becomes razor-thin, so NSQs
         # that drift outside their PSQs never find their way back.
         theta_min_eff = _theta_min_curriculum(config, it)
+        mu_eff = _mu_gate_schedule(config, it)
+        lambda_norm_eff = _norm_reg_schedule(config, it)
 
         anomaly_ctx = torch.autograd.detect_anomaly(check_nan=True) if detect_anomaly else nullcontext()
         try:
@@ -672,8 +786,16 @@ def train(
                     num_samples=config.num_samples_per_ray,
                     near=config.near_plane,
                     far=config.far_plane,
-                    mu=config.mu_gate_offset,
+                    delta_p=config.delta_p_value,
+                    delta_p_mode=config.delta_p_mode,
+                    delta_p_scale=config.delta_p_scale,
+                    color_weight_mode=config.color_weight_mode,
+                    point_normal_weight_mode=config.point_normal_weight_mode,
+                    final_normal_normalize=config.final_normal_normalize,
+                    mu=mu_eff,
                     theta_min=theta_min_eff,
+                    gate_mode=config.gate_mode,
+                    paper_literal_theta_eps=config.paper_literal_theta_eps,
                     background=config.background_color,
                 )
                 timings["render"] += time.time() - t0
@@ -687,10 +809,12 @@ def train(
                     lambda_sparse=config.lambda_sparse,
                     lambda_entropy=config.lambda_entropy,
                     lambda_max=config.lambda_max,
-                    lambda_norm_reg=config.lambda_norm_reg,
+                    lambda_norm_reg=lambda_norm_eff,
                     lambda_open_ray=config.lambda_open_ray,
                     hole_ray_gt=getattr(batch, "hole_ray_gt", None),
                     mask_loss_type=getattr(config, "mask_loss_type", "bce"),
+                    masked_loss_norm_mode=getattr(config, "masked_loss_norm_mode", "global_mean"),
+                    primitive_reg_average_mode=getattr(config, "primitive_reg_average_mode", "alive"),
                 )
                 timings["loss"] += time.time() - t0
 
@@ -781,10 +905,15 @@ def train(
             # View-dependent pruning (paper §4.2): runs at a coarser
             # cadence than the fast α/scale prune because it requires
             # a full-scene render pass.
-            if it % (config.pruning_interval * 3) == 0:
+            if it % (config.pruning_interval * config.view_prune_every_multiplier) == 0:
                 prune_view_dependent(
                     scene, ray_sampler, config,
-                    num_probe_rays=min(8192, rays_per_batch * 8),
+                    num_probe_rays=min(config.view_prune_probe_rays, rays_per_batch * 8),
+                    weight_threshold=config.view_prune_weight_threshold,
+                    min_foreground_rays=config.view_prune_min_foreground_rays,
+                    min_distinct_views=config.view_prune_min_distinct_views,
+                    mu=mu_eff,
+                    theta_min=theta_min_eff,
                     verbose=(log_fn is not None),
                 )
             timings["prune"] += time.time() - t0
@@ -800,6 +929,8 @@ def train(
             parts["iter"] = it
             parts["alive"] = scene.num_alive
             parts["theta_min_eff"] = theta_min_eff
+            parts["mu_gate_eff"] = mu_eff
+            parts["lambda_norm_eff"] = lambda_norm_eff
             # Cheap diagnostics at every log step; expensive P_E probe
             # only every 4th log step.
             probe_this_step = (it % (config.log_interval * 4) == 0)
@@ -807,7 +938,9 @@ def train(
                 scene,
                 ray_sampler=ray_sampler if probe_this_step else None,
                 theta_min_eff=theta_min_eff,
-                mu=config.mu_gate_offset,
+                mu=mu_eff,
+                gate_mode=config.gate_mode,
+                paper_literal_theta_eps=config.paper_literal_theta_eps,
             )
             parts.update(diag)
             # Stage timings — average per-iter for the just-completed window.
@@ -910,6 +1043,7 @@ def train_mesh_fit(
             lambda_max=config.lambda_max,
             mu=config.mu_gate_offset,
             theta_min=theta_min_eff,
+            primitive_reg_average_mode=getattr(config, "primitive_reg_average_mode", "alive"),
         )
         timings["loss"] += time.time() - t0
 
