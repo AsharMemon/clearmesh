@@ -1,0 +1,26 @@
+[
+  {
+    "id": "0",
+    "ip": "64.247.206.140",
+    "name": "j6h0jrtl",
+    "status": "RUNNING",
+    "createdAt": "2026-04-26T15:55:35Z",
+    "uuid": "j6h0jrtl",
+    "storage": 100,
+    "cpuCores": "4",
+    "template": "base",
+    "gpuType": "A100XL",
+    "numGpus": "1",
+    "memory": "32",
+    "promoted": false,
+    "mode": "prototyping",
+    "port": 32390,
+    "k8s": true,
+    "provisioningTime": "2026-04-26T20:47:12.217152799Z",
+    "restoringTime": "2026-04-26T20:47:12.217152862Z",
+    "sshPublicKeys": [
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILuDk55nKbFtCewCNMSd/1EZMXdSNrOB1h0I1lf3q54X\n",
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINSK657zaiN6NoU6nz7VzjZ9V3eAq7IV70YziLAoDppJ\n"
+    ]
+  }
+]

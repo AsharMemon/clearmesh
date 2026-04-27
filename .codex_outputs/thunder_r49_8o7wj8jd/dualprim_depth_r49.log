@@ -1,0 +1,215 @@
+[r49] start 2026-04-26T05:02:06+00:00 host=instance-8o7wj8jd-main
+[canary] device=cuda
+[canary] mode=mesh_rendered_views, K=8, iters=6000
+[canary] rendering 26 views to /workspace/dualprim_k008_depth_camera_r49/views
+[render_views] wrote 26 views to /workspace/dualprim_k008_depth_camera_r49/views
+[sampler] total hole pixels across 26 views: 0 (0.00%)
+[canary] training for 6000 iters
+[canary] it=     0 total=19.9386 rgb=0.496 mask=3.690 norm=0.914 alive=8 depth=0.8364  θ[0.50/0.50/0.50] εpsq[1.00/1.00/1.00] θ_min_eff=0.20 μ=0.00 λn=0.00 NSQ∩PSQ=0% P_E_fg=0.000/0.00  t[r272/l29/s442/p0]ms
+[canary] it=    50 total=15.7771 rgb=0.458 mask=2.916 norm=0.907 alive=8 depth=0.6562  θ[0.52/0.52/0.52] εpsq[0.98/0.98/0.98] θ_min_eff=0.20 μ=0.00 λn=0.00 NSQ∩PSQ=0%  t[r21/l6/s152/p0]ms
+[canary] it=   100 total=14.0397 rgb=0.383 mask=2.532 norm=0.967 alive=8 depth=0.6052  θ[0.51/0.54/0.55] εpsq[0.95/0.96/0.98] θ_min_eff=0.19 μ=0.00 λn=0.00 NSQ∩PSQ=0%  t[r17/l6/s155/p0]ms
+[canary] it=   150 total=12.2998 rgb=0.304 mask=2.049 norm=0.927 alive=8 depth=0.5837  θ[0.52/0.56/0.57] εpsq[0.91/0.93/0.99] θ_min_eff=0.19 μ=0.00 λn=0.00 NSQ∩PSQ=12%  t[r65/l11/s603/p0]ms
+[heartbeat] it=   155/6000 alive=8 elapsed=65s avg t[r267/s1860]ms since last log
+[heartbeat] it=   188/6000 alive=8 elapsed=127s avg t[r484/s1320]ms since last log
+[canary] it=   200 total=11.2385 rgb=0.253 mask=1.849 norm=0.945 alive=8 depth=0.5428  θ[0.52/0.58/0.59] εpsq[0.88/0.89/0.99] θ_min_eff=0.19 μ=0.00 λn=0.00 NSQ∩PSQ=12% P_E_fg=0.001/0.31  t[r451/l93/s1667/p0]ms
+[heartbeat] it=   208/6000 alive=8 elapsed=191s avg t[r141/s2148]ms since last log
+[heartbeat] it=   225/6000 alive=8 elapsed=255s avg t[r358/s2816]ms since last log
+[canary] it=   250 total=10.9237 rgb=0.213 mask=1.703 norm=0.941 alive=8 depth=0.5592  θ[0.53/0.58/0.62] εpsq[0.85/0.87/0.99] θ_min_eff=0.18 μ=0.00 λn=0.00 NSQ∩PSQ=25%  t[r195/l69/s1508/p0]ms
+[heartbeat] it=   268/6000 alive=8 elapsed=317s avg t[r816/s2157]ms since last log
+[canary] it=   300 total=10.2780 rgb=0.170 mask=1.543 norm=0.932 alive=8 depth=0.5467  θ[0.54/0.57/0.64] εpsq[0.83/0.86/0.99] θ_min_eff=0.18 μ=0.00 λn=0.00 NSQ∩PSQ=25%  t[r315/l85/s1312/p0]ms
+[heartbeat] it=   308/6000 alive=8 elapsed=379s avg t[r140/s3521]ms since last log
+[heartbeat] it=   341/6000 alive=8 elapsed=445s avg t[r180/s2081]ms since last log
+[canary] it=   350 total=10.1012 rgb=0.148 mask=1.567 norm=0.993 alive=8 depth=0.5242  θ[0.52/0.57/0.65] εpsq[0.82/0.84/0.99] θ_min_eff=0.18 μ=0.00 λn=0.00 NSQ∩PSQ=25%  t[r157/l54/s2012/p0]ms
+[heartbeat] it=   400/6000 alive=8 elapsed=508s avg t[r297/s561]ms since last log
+[canary] it=   400 total=9.1188 rgb=0.135 mask=1.441 norm=0.936 alive=8 depth=0.4651  θ[0.50/0.55/0.68] εpsq[0.80/0.84/0.99] θ_min_eff=0.17 μ=0.00 λn=0.00 NSQ∩PSQ=25% P_E_fg=0.002/0.41  t[r297/l35/s561/p0]ms
+[heartbeat] it=   437/6000 alive=8 elapsed=573s avg t[r347/s1227]ms since last log
+[canary] it=   450 total=9.1402 rgb=0.111 mask=1.479 norm=0.986 alive=8 depth=0.4583  θ[0.49/0.53/0.72] εpsq[0.79/0.83/1.00] θ_min_eff=0.17 μ=0.00 λn=0.00 NSQ∩PSQ=25%  t[r282/l109/s1228/p0]ms
+[heartbeat] it=   463/6000 alive=8 elapsed=636s avg t[r613/s2144]ms since last log
+[heartbeat] it=   483/6000 alive=8 elapsed=701s avg t[r589/s2315]ms since last log
+[canary] it=   500 total=8.7534 rgb=0.106 mask=1.408 norm=0.953 alive=8 depth=0.4412  θ[0.48/0.52/0.75] εpsq[0.76/0.82/1.00] θ_min_eff=0.17 μ=0.00 λn=0.00 NSQ∩PSQ=38%  t[r455/l31/s1867/p0]ms
+[heartbeat] it=   540/6000 alive=8 elapsed=762s avg t[r394/s467]ms since last log
+[canary] it=   550 total=8.4575 rgb=0.110 mask=1.380 norm=0.934 alive=8 depth=0.4197  θ[0.46/0.51/0.77] εpsq[0.73/0.82/1.02] θ_min_eff=0.17 μ=0.00 λn=0.00 NSQ∩PSQ=38%  t[r569/l16/s966/p0]ms
+[heartbeat] it=   563/6000 alive=8 elapsed=831s avg t[r349/s1184]ms since last log
+[heartbeat] it=   594/6000 alive=8 elapsed=897s avg t[r390/s1386]ms since last log
+[canary] it=   600 total=8.0239 rgb=0.107 mask=1.331 norm=0.933 alive=8 depth=0.3912  θ[0.44/0.50/0.79] εpsq[0.71/0.81/1.02] θ_min_eff=0.16 μ=0.00 λn=0.00 NSQ∩PSQ=38% P_E_fg=0.001/0.56  t[r471/l23/s1530/p0]ms
+[canary] it=   650 total=7.8227 rgb=0.102 mask=1.333 norm=0.943 alive=8 depth=0.3710  θ[0.43/0.50/0.81] εpsq[0.68/0.81/1.02] θ_min_eff=0.16 μ=0.00 λn=0.00 NSQ∩PSQ=38%  t[r141/l6/s286/p0]ms
+[canary] it=   700 total=7.7231 rgb=0.103 mask=1.336 norm=0.954 alive=8 depth=0.3603  θ[0.42/0.49/0.82] εpsq[0.66/0.81/1.03] θ_min_eff=0.16 μ=0.00 λn=0.00 NSQ∩PSQ=38%  t[r18/l6/s149/p0]ms
+[heartbeat] it=   705/6000 alive=8 elapsed=957s avg t[r17/s150]ms since last log
+[canary] it=   750 total=7.6755 rgb=0.104 mask=1.361 norm=0.984 alive=8 depth=0.3480  θ[0.41/0.49/0.83] εpsq[0.64/0.81/1.04] θ_min_eff=0.15 μ=0.00 λn=0.00 NSQ∩PSQ=38%  t[r18/l6/s149/p0]ms
+[heartbeat] it=   796/6000 alive=8 elapsed=1019s avg t[r128/s786]ms since last log
+[canary] it=   800 total=7.2469 rgb=0.092 mask=1.240 norm=0.934 alive=8 depth=0.3423  θ[0.41/0.49/0.84] εpsq[0.62/0.82/1.06] θ_min_eff=0.15 μ=0.00 λn=0.00 NSQ∩PSQ=25% P_E_fg=0.001/0.62  t[r212/l75/s843/p0]ms
+[heartbeat] it=   827/6000 alive=8 elapsed=1082s avg t[r268/s1372]ms since last log
+[canary] it=   850 total=7.1815 rgb=0.090 mask=1.224 norm=0.919 alive=8 depth=0.3408  θ[0.40/0.49/0.84] εpsq[0.60/0.82/1.06] θ_min_eff=0.15 μ=0.00 λn=0.00 NSQ∩PSQ=25%  t[r462/l52/s1217/p0]ms
+[heartbeat] it=   863/6000 alive=8 elapsed=1146s avg t[r27/s1320]ms since last log
+[heartbeat] it=   892/6000 alive=8 elapsed=1208s avg t[r300/s1448]ms since last log
+[canary] it=   900 total=7.4386 rgb=0.087 mask=1.256 norm=0.939 alive=8 depth=0.3574  θ[0.40/0.50/0.84] εpsq[0.59/0.83/1.07] θ_min_eff=0.14 μ=0.00 λn=0.00 NSQ∩PSQ=25%  t[r273/l35/s1284/p0]ms
+[heartbeat] it=   946/6000 alive=8 elapsed=1271s avg t[r181/s973]ms since last log
+[canary] it=   950 total=7.0664 rgb=0.093 mask=1.220 norm=0.937 alive=8 depth=0.3305  θ[0.39/0.50/0.84] εpsq[0.58/0.83/1.08] θ_min_eff=0.14 μ=0.00 λn=0.00 NSQ∩PSQ=25%  t[r169/l11/s957/p0]ms
+[heartbeat] it=   971/6000 alive=8 elapsed=1332s avg t[r432/s2020]ms since last log
+[heartbeat] it=   992/6000 alive=8 elapsed=1394s avg t[r444/s2113]ms since last log
+[canary] it=  1000 total=6.8572 rgb=0.096 mask=1.220 norm=0.939 alive=8 depth=0.3091  θ[0.40/0.50/0.84] εpsq[0.58/0.83/1.09] θ_min_eff=0.14 μ=0.00 λn=0.00 NSQ∩PSQ=25% P_E_fg=0.001/0.27  t[r416/l17/s1829/p1]ms
+[canary] it=  1050 total=6.9365 rgb=0.098 mask=1.196 norm=0.918 alive=8 depth=0.3239  θ[0.40/0.50/0.84] εpsq[0.57/0.83/1.10] θ_min_eff=0.13 μ=0.00 λn=0.00 NSQ∩PSQ=25%  t[r206/l13/s621/p0]ms
+[heartbeat] it=  1060/6000 alive=8 elapsed=1461s avg t[r965/s358]ms since last log
+[heartbeat] it=  1083/6000 alive=8 elapsed=1522s avg t[r925/s1159]ms since last log
+[canary] it=  1100 total=6.7977 rgb=0.091 mask=1.211 norm=0.959 alive=8 depth=0.3062  θ[0.40/0.50/0.84] εpsq[0.56/0.83/1.10] θ_min_eff=0.13 μ=0.00 λn=0.00 NSQ∩PSQ=38%  t[r814/l14/s1390/p0]ms
+[heartbeat] it=  1114/6000 alive=8 elapsed=1584s avg t[r318/s927]ms since last log
+[heartbeat] it=  1144/6000 alive=8 elapsed=1644s avg t[r552/s1154]ms since last log
+[canary] it=  1150 total=6.8942 rgb=0.083 mask=1.133 norm=0.896 alive=8 depth=0.3400  θ[0.39/0.50/0.84] εpsq[0.56/0.83/1.11] θ_min_eff=0.13 μ=0.00 λn=0.00 NSQ∩PSQ=38%  t[r528/l12/s1118/p0]ms
+[canary] it=  1200 total=7.1544 rgb=0.094 mask=1.225 norm=0.982 alive=8 depth=0.3376  θ[0.38/0.50/0.84] εpsq[0.55/0.84/1.11] θ_min_eff=0.12 μ=0.00 λn=0.00 NSQ∩PSQ=38% P_E_fg=0.001/0.18  t[r103/l7/s379/p0]ms
+[heartbeat] it=  1220/6000 alive=8 elapsed=1705s avg t[r407/s756]ms since last log
+[canary] it=  1250 total=6.7315 rgb=0.085 mask=1.108 norm=0.885 alive=8 depth=0.3312  θ[0.37/0.50/0.83] εpsq[0.54/0.84/1.12] θ_min_eff=0.12 μ=0.00 λn=0.00 NSQ∩PSQ=38%  t[r519/l29/s1104/p0]ms
+[heartbeat] it=  1254/6000 alive=8 elapsed=1765s avg t[r23/s172]ms since last log
+[heartbeat] it=  1281/6000 alive=8 elapsed=1827s avg t[r469/s1302]ms since last log
+[canary] it=  1300 total=6.7081 rgb=0.074 mask=1.114 norm=0.923 alive=8 depth=0.3283  θ[0.36/0.49/0.83] εpsq[0.54/0.85/1.12] θ_min_eff=0.12 μ=0.00 λn=0.00 NSQ∩PSQ=38%  t[r550/l15/s1458/p0]ms
+[heartbeat] it=  1344/6000 alive=8 elapsed=1887s avg t[r28/s168]ms since last log
+[canary] it=  1350 total=6.6106 rgb=0.081 mask=1.165 norm=0.954 alive=8 depth=0.3026  θ[0.35/0.49/0.83] εpsq[0.53/0.86/1.13] θ_min_eff=0.11 μ=0.00 λn=0.00 NSQ∩PSQ=38%  t[r26/l6/s166/p0]ms
+[canary] it=  1400 total=6.6334 rgb=0.083 mask=1.147 norm=0.949 alive=8 depth=0.3099  θ[0.34/0.50/0.83] εpsq[0.53/0.86/1.13] θ_min_eff=0.11 μ=0.00 λn=0.00 NSQ∩PSQ=38% P_E_fg=0.001/0.56  t[r23/l6/s156/p0]ms
+[canary] it=  1450 total=6.4344 rgb=0.075 mask=1.108 norm=0.933 alive=8 depth=0.3026  θ[0.32/0.50/0.82] εpsq[0.52/0.87/1.14] θ_min_eff=0.11 μ=0.00 λn=0.00 NSQ∩PSQ=38%  t[r224/l7/s312/p0]ms
+[heartbeat] it=  1479/6000 alive=8 elapsed=1948s avg t[r109/s556]ms since last log
+[canary] it=  1500 total=6.8061 rgb=0.083 mask=1.173 norm=1.011 alive=8 depth=0.3195  θ[0.31/0.50/0.82] εpsq[0.51/0.88/1.15] θ_min_eff=0.11 μ=0.00 λn=0.00 NSQ∩PSQ=38%  t[r580/l39/s852/p0]ms
+[heartbeat] it=  1501/6000 alive=8 elapsed=2011s avg t[r24/s4414]ms since last log
+[heartbeat] it=  1543/6000 alive=8 elapsed=2071s avg t[r708/s754]ms since last log
+[canary] it=  1550 total=6.4044 rgb=0.082 mask=1.150 norm=1.004 alive=8 depth=0.2863  θ[0.29/0.50/0.83] εpsq[0.51/0.88/1.15] θ_min_eff=0.10 μ=0.00 λn=0.00 NSQ∩PSQ=25%  t[r714/l12/s828/p0]ms
+[heartbeat] it=  1567/6000 alive=8 elapsed=2131s avg t[r553/s1694]ms since last log
+[canary] it=  1600 total=6.2967 rgb=0.071 mask=1.042 norm=0.916 alive=8 depth=0.3090  θ[0.27/0.50/0.83] εpsq[0.50/0.88/1.15] θ_min_eff=0.10 μ=0.00 λn=0.00 NSQ∩PSQ=25% P_E_fg=0.001/0.42  t[r324/l9/s1007/p0]ms
+[heartbeat] it=  1637/6000 alive=8 elapsed=2194s avg t[r400/s432]ms since last log
+[canary] it=  1650 total=6.4842 rgb=0.083 mask=1.043 norm=0.914 alive=8 depth=0.3263  θ[0.25/0.50/0.83] εpsq[0.50/0.88/1.15] θ_min_eff=0.10 μ=0.00 λn=0.00 NSQ∩PSQ=25%  t[r446/l23/s1006/p0]ms
+[heartbeat] it=  1662/6000 alive=8 elapsed=2254s avg t[r525/s491]ms since last log
+[heartbeat] it=  1699/6000 alive=8 elapsed=2315s avg t[r786/s613]ms since last log
+[canary] it=  1700 total=6.2365 rgb=0.074 mask=1.006 norm=0.902 alive=8 depth=0.3136  θ[0.22/0.49/0.83] εpsq[0.49/0.89/1.15] θ_min_eff=0.09 μ=0.00 λn=0.00 NSQ∩PSQ=25%  t[r816/l18/s678/p0]ms
+[heartbeat] it=  1730/6000 alive=8 elapsed=2381s avg t[r767/s1013]ms since last log
+[canary] it=  1750 total=6.5627 rgb=0.077 mask=1.064 norm=0.975 alive=8 depth=0.3282  θ[0.20/0.49/0.83] εpsq[0.49/0.90/1.15] θ_min_eff=0.09 μ=0.00 λn=0.00 NSQ∩PSQ=25%  t[r518/l10/s759/p0]ms
+[heartbeat] it=  1792/6000 alive=8 elapsed=2441s avg t[r646/s497]ms since last log
+[canary] it=  1800 total=6.1123 rgb=0.075 mask=0.968 norm=0.878 alive=8 depth=0.3123  θ[0.18/0.49/0.84] εpsq[0.48/0.90/1.15] θ_min_eff=0.09 μ=0.00 λn=0.00 NSQ∩PSQ=25% P_E_fg=0.001/0.58  t[r669/l10/s515/p0]ms
+[heartbeat] it=  1822/6000 alive=8 elapsed=2501s avg t[r602/s1351]ms since last log
+[canary] it=  1850 total=6.2663 rgb=0.078 mask=0.998 norm=0.943 alive=8 depth=0.3184  θ[0.16/0.48/0.84] εpsq[0.47/0.91/1.15] θ_min_eff=0.08 μ=0.00 λn=0.00 NSQ∩PSQ=25%  t[r595/l9/s1207/p0]ms
+[heartbeat] it=  1863/6000 alive=8 elapsed=2571s avg t[r198/s1216]ms since last log
+[canary] it=  1900 total=6.3426 rgb=0.079 mask=1.040 norm=0.992 alive=8 depth=0.3134  θ[0.15/0.48/0.84] εpsq[0.47/0.91/1.15] θ_min_eff=0.08 μ=0.00 λn=0.00 NSQ∩PSQ=25%  t[r443/l15/s850/p0]ms
+[heartbeat] it=  1932/6000 alive=8 elapsed=2633s avg t[r141/s199]ms since last log
+[canary] it=  1950 total=6.1148 rgb=0.066 mask=0.976 norm=0.931 alive=8 depth=0.3111  θ[0.13/0.47/0.84] εpsq[0.46/0.92/1.15] θ_min_eff=0.08 μ=0.00 λn=0.00 NSQ∩PSQ=25%  t[r244/l95/s333/p0]ms
+[heartbeat] it=  1969/6000 alive=8 elapsed=2693s avg t[r1167/s742]ms since last log
+[canary] it=  2000 total=6.2022 rgb=0.076 mask=1.025 norm=0.977 alive=8 depth=0.3040  θ[0.11/0.47/0.84] εpsq[0.46/0.92/1.15] θ_min_eff=0.07 μ=0.00 λn=0.00 NSQ∩PSQ=25% P_E_fg=0.001/0.54  t[r662/l10/s722/p0]ms
+[heartbeat] it=  2028/6000 alive=8 elapsed=2753s avg t[r274/s496]ms since last log
+[canary] it=  2050 total=6.3080 rgb=0.069 mask=1.020 norm=0.991 alive=8 depth=0.3169  θ[0.10/0.46/0.84] εpsq[0.45/0.92/1.15] θ_min_eff=0.07 μ=0.00 λn=0.00 NSQ∩PSQ=25%  t[r567/l16/s717/p0]ms
+[heartbeat] it=  2063/6000 alive=8 elapsed=2816s avg t[r666/s604]ms since last log
+[canary] it=  2100 total=6.1204 rgb=0.068 mask=0.942 norm=0.929 alive=8 depth=0.3216  θ[0.10/0.45/0.84] εpsq[0.44/0.93/1.15] θ_min_eff=0.07 μ=0.00 λn=0.00 NSQ∩PSQ=25%  t[r192/l7/s275/p0]ms
+[canary] it=  2150 total=6.1996 rgb=0.070 mask=0.976 norm=0.970 alive=8 depth=0.3193  θ[0.10/0.44/0.84] εpsq[0.44/0.93/1.15] θ_min_eff=0.06 μ=0.00 λn=0.00 NSQ∩PSQ=25%  t[r20/l6/s150/p0]ms
+[canary] it=  2200 total=6.0578 rgb=0.072 mask=0.970 norm=0.951 alive=8 depth=0.3065  θ[0.09/0.43/0.84] εpsq[0.43/0.94/1.16] θ_min_eff=0.06 μ=0.00 λn=0.00 NSQ∩PSQ=25% P_E_fg=0.001/0.60  t[r15/l5/s150/p0]ms
+[heartbeat] it=  2214/6000 alive=8 elapsed=2876s avg t[r1096/s1265]ms since last log
+[canary] it=  2250 total=5.9788 rgb=0.069 mask=0.941 norm=0.948 alive=8 depth=0.3078  θ[0.09/0.42/0.84] εpsq[0.43/0.94/1.16] θ_min_eff=0.06 μ=0.00 λn=0.00 NSQ∩PSQ=25%  t[r329/l39/s465/p0]ms
+[canary] it=  2300 total=6.0692 rgb=0.070 mask=0.962 norm=0.972 alive=8 depth=0.3104  θ[0.08/0.41/0.84] εpsq[0.42/0.95/1.17] θ_min_eff=0.05 μ=0.00 λn=0.00 NSQ∩PSQ=25%  t[r322/l45/s526/p0]ms
+[heartbeat] it=  2306/6000 alive=8 elapsed=2938s avg t[r561/s905]ms since last log
+[canary] it=  2350 total=5.8127 rgb=0.068 mask=0.909 norm=0.939 alive=8 depth=0.3009  θ[0.08/0.39/0.84] εpsq[0.42/0.95/1.18] θ_min_eff=0.05 μ=0.00 λn=0.00 NSQ∩PSQ=25%  t[r600/l58/s552/p0]ms
+[heartbeat] it=  2359/6000 alive=8 elapsed=2998s avg t[r417/s466]ms since last log
+[canary] it=  2400 total=5.9534 rgb=0.064 mask=0.905 norm=0.964 alive=8 depth=0.3163  θ[0.08/0.38/0.84] εpsq[0.41/0.96/1.18] θ_min_eff=0.05 μ=0.00 λn=0.00 NSQ∩PSQ=25% P_E_fg=0.001/0.89  t[r521/l44/s529/p0]ms
+[heartbeat] it=  2408/6000 alive=8 elapsed=3059s avg t[r606/s360]ms since last log
+[canary] it=  2450 total=5.8938 rgb=0.066 mask=0.906 norm=0.943 alive=8 depth=0.3099  θ[0.07/0.37/0.84] εpsq[0.41/0.96/1.19] θ_min_eff=0.04 μ=0.00 λn=0.00 NSQ∩PSQ=25%  t[r332/l44/s408/p0]ms
+[canary] it=  2500 total=5.7613 rgb=0.061 mask=0.872 norm=0.954 alive=8 depth=0.3074  θ[0.07/0.35/0.84] εpsq[0.40/0.96/1.20] θ_min_eff=0.04 μ=0.00 λn=0.00 NSQ∩PSQ=25%  t[r218/l6/s167/p0]ms
+[heartbeat] it=  2505/6000 alive=8 elapsed=3119s avg t[r227/s228]ms since last log
+[canary] it=  2550 total=5.6436 rgb=0.068 mask=0.860 norm=0.947 alive=8 depth=0.2985  θ[0.07/0.33/0.84] εpsq[0.40/0.96/1.20] θ_min_eff=0.04 μ=0.00 λn=0.00 NSQ∩PSQ=25%  t[r219/l10/s188/p0]ms
+[canary] it=  2600 total=5.7108 rgb=0.069 mask=0.870 norm=0.951 alive=8 depth=0.3021  θ[0.07/0.31/0.84] εpsq[0.39/0.97/1.21] θ_min_eff=0.04 μ=0.00 λn=0.00 NSQ∩PSQ=25% P_E_fg=0.001/0.97  t[r96/l7/s212/p0]ms
+[canary] it=  2650 total=5.8111 rgb=0.066 mask=0.834 norm=0.922 alive=8 depth=0.3234  θ[0.07/0.29/0.84] εpsq[0.39/0.97/1.22] θ_min_eff=0.03 μ=0.00 λn=0.00 NSQ∩PSQ=25%  t[r140/l9/s302/p0]ms
+[heartbeat] it=  2661/6000 alive=8 elapsed=3183s avg t[r38/s589]ms since last log
+[canary] it=  2700 total=5.6986 rgb=0.064 mask=0.847 norm=0.946 alive=8 depth=0.3084  θ[0.07/0.27/0.84] εpsq[0.38/0.97/1.22] θ_min_eff=0.03 μ=0.00 λn=0.00 NSQ∩PSQ=38%  t[r182/l8/s405/p0]ms
+[canary] it=  2750 total=5.2575 rgb=0.058 mask=0.785 norm=0.867 alive=8 depth=0.2834  θ[0.07/0.24/0.84] εpsq[0.38/0.98/1.23] θ_min_eff=0.03 μ=0.00 λn=0.00 NSQ∩PSQ=38%  t[r170/l46/s235/p0]ms
+[heartbeat] it=  2779/6000 alive=8 elapsed=3244s avg t[r258/s222]ms since last log
+[canary] it=  2800 total=5.5156 rgb=0.066 mask=0.833 norm=0.948 alive=8 depth=0.2940  θ[0.07/0.22/0.83] εpsq[0.38/0.98/1.24] θ_min_eff=0.02 μ=0.00 λn=0.00 NSQ∩PSQ=38% P_E_fg=0.001/0.95  t[r193/l60/s208/p0]ms
+[canary] it=  2850 total=5.5522 rgb=0.061 mask=0.806 norm=0.946 alive=8 depth=0.3062  θ[0.07/0.20/0.83] εpsq[0.37/0.98/1.24] θ_min_eff=0.02 μ=0.00 λn=0.00 NSQ∩PSQ=38%  t[r188/l18/s267/p0]ms
+[canary] it=  2900 total=5.6408 rgb=0.066 mask=0.843 norm=0.988 alive=8 depth=0.3035  θ[0.07/0.18/0.83] εpsq[0.37/0.98/1.24] θ_min_eff=0.02 μ=0.00 λn=0.00 NSQ∩PSQ=38%  t[r108/l9/s245/p0]ms
+[heartbeat] it=  2907/6000 alive=8 elapsed=3306s avg t[r325/s380]ms since last log
+[canary] it=  2950 total=5.4894 rgb=0.071 mask=0.790 norm=0.955 alive=8 depth=0.3039  θ[0.07/0.16/0.83] εpsq[0.37/0.98/1.24] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=38%  t[r167/l23/s269/p0]ms
+[prune/view] killed 1 primitives (contribution<0.001, over 8192 fg rays / 26 views); 7 alive
+[canary] it=  3000 total=5.4808 rgb=0.077 mask=0.789 norm=0.995 alive=7 depth=0.3026  θ[0.05/0.13/0.83] εpsq[0.35/0.83/1.26] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=43% P_E_fg=0.002/0.96  t[r44/l7/s166/p6]ms
+[canary] it=  3050 total=5.3606 rgb=0.069 mask=0.706 norm=0.943 alive=7 depth=0.3166  θ[0.04/0.09/0.83] εpsq[0.35/0.82/1.26] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=43%  t[r40/l8/s168/p0]ms
+[heartbeat] it=  3099/6000 alive=7 elapsed=3366s avg t[r157/s205]ms since last log
+[canary] it=  3100 total=5.4898 rgb=0.073 mask=0.689 norm=0.932 alive=7 depth=0.3340  θ[0.04/0.07/0.83] εpsq[0.35/0.82/1.26] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=43%  t[r154/l8/s205/p0]ms
+[canary] it=  3150 total=5.4050 rgb=0.082 mask=0.716 norm=0.990 alive=7 depth=0.3166  θ[0.04/0.07/0.83] εpsq[0.35/0.82/1.26] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=43%  t[r117/l8/s225/p0]ms
+[canary] it=  3200 total=5.3122 rgb=0.072 mask=0.714 norm=1.036 alive=7 depth=0.3090  θ[0.04/0.06/0.82] εpsq[0.34/0.82/1.26] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=43% P_E_fg=0.001/1.00  t[r102/l12/s213/p0]ms
+[canary] it=  3250 total=5.1835 rgb=0.065 mask=0.675 norm=0.946 alive=7 depth=0.3084  θ[0.04/0.06/0.82] εpsq[0.34/0.82/1.27] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r122/l8/s182/p0]ms
+[heartbeat] it=  3261/6000 alive=7 elapsed=3426s avg t[r296/s199]ms since last log
+[canary] it=  3300 total=5.4488 rgb=0.073 mask=0.690 norm=1.005 alive=7 depth=0.3296  θ[0.04/0.06/0.82] εpsq[0.34/0.82/1.28] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r233/l52/s174/p0]ms
+[canary] it=  3350 total=5.1291 rgb=0.073 mask=0.688 norm=0.987 alive=7 depth=0.2983  θ[0.04/0.06/0.82] εpsq[0.34/0.82/1.29] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r198/l10/s203/p0]ms
+[canary] it=  3400 total=5.1219 rgb=0.066 mask=0.680 norm=0.988 alive=7 depth=0.3007  θ[0.04/0.06/0.82] εpsq[0.33/0.82/1.30] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57% P_E_fg=0.001/1.00  t[r64/l8/s230/p0]ms
+[heartbeat] it=  3411/6000 alive=7 elapsed=3486s avg t[r307/s328]ms since last log
+[canary] it=  3450 total=5.2242 rgb=0.066 mask=0.700 norm=1.015 alive=7 depth=0.3048  θ[0.04/0.06/0.81] εpsq[0.33/0.83/1.30] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r97/l7/s202/p0]ms
+[canary] it=  3500 total=4.9101 rgb=0.061 mask=0.653 norm=0.940 alive=7 depth=0.2880  θ[0.04/0.05/0.81] εpsq[0.33/0.83/1.31] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r184/l13/s224/p0]ms
+[canary] it=  3550 total=5.0951 rgb=0.058 mask=0.646 norm=0.954 alive=7 depth=0.3090  θ[0.04/0.05/0.81] εpsq[0.32/0.83/1.32] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r179/l17/s218/p0]ms
+[heartbeat] it=  3555/6000 alive=7 elapsed=3548s avg t[r762/s167]ms since last log
+[canary] it=  3600 total=5.1370 rgb=0.060 mask=0.639 norm=0.944 alive=7 depth=0.3152  θ[0.04/0.05/0.81] εpsq[0.32/0.83/1.33] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57% P_E_fg=0.001/1.00  t[r180/l14/s221/p0]ms
+[canary] it=  3650 total=5.0959 rgb=0.060 mask=0.654 norm=0.967 alive=7 depth=0.3067  θ[0.03/0.05/0.81] εpsq[0.32/0.84/1.34] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r20/l6/s157/p0]ms
+[canary] it=  3700 total=5.2483 rgb=0.065 mask=0.668 norm=0.972 alive=7 depth=0.3171  θ[0.04/0.05/0.81] εpsq[0.32/0.84/1.35] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r107/l8/s225/p0]ms
+[heartbeat] it=  3741/6000 alive=7 elapsed=3609s avg t[r65/s232]ms since last log
+[canary] it=  3750 total=5.1484 rgb=0.065 mask=0.679 norm=1.031 alive=7 depth=0.3036  θ[0.04/0.05/0.81] εpsq[0.31/0.84/1.35] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r114/l8/s221/p0]ms
+[canary] it=  3800 total=5.0897 rgb=0.065 mask=0.683 norm=1.001 alive=7 depth=0.2967  θ[0.04/0.05/0.80] εpsq[0.31/0.85/1.36] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57% P_E_fg=0.001/0.99  t[r191/l10/s224/p0]ms
+[canary] it=  3850 total=5.1730 rgb=0.058 mask=0.638 norm=0.923 alive=7 depth=0.3193  θ[0.04/0.05/0.80] εpsq[0.31/0.85/1.37] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r110/l35/s194/p0]ms
+[canary] it=  3900 total=5.2309 rgb=0.069 mask=0.691 norm=1.008 alive=7 depth=0.3080  θ[0.04/0.05/0.80] εpsq[0.30/0.86/1.38] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r30/l7/s204/p0]ms
+[heartbeat] it=  3909/6000 alive=7 elapsed=3669s avg t[r23/s160]ms since last log
+[canary] it=  3950 total=5.1058 rgb=0.063 mask=0.675 norm=0.968 alive=7 depth=0.3008  θ[0.04/0.05/0.80] εpsq[0.30/0.86/1.39] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r55/l8/s208/p0]ms
+[canary] it=  4000 total=5.1025 rgb=0.054 mask=0.612 norm=0.904 alive=7 depth=0.3205  θ[0.04/0.05/0.80] εpsq[0.30/0.86/1.39] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57% P_E_fg=0.001/1.00  t[r82/l14/s220/p0]ms
+[canary] it=  4050 total=5.0305 rgb=0.056 mask=0.631 norm=0.939 alive=7 depth=0.3072  θ[0.04/0.05/0.80] εpsq[0.30/0.87/1.40] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r43/l7/s165/p0]ms
+[heartbeat] it=  4091/6000 alive=7 elapsed=3729s avg t[r125/s206]ms since last log
+[canary] it=  4100 total=4.9675 rgb=0.060 mask=0.643 norm=0.931 alive=7 depth=0.2970  θ[0.04/0.05/0.80] εpsq[0.30/0.87/1.41] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r116/l10/s199/p0]ms
+[canary] it=  4150 total=5.1200 rgb=0.064 mask=0.664 norm=0.992 alive=7 depth=0.3056  θ[0.04/0.05/0.80] εpsq[0.29/0.87/1.42] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r49/l7/s166/p0]ms
+[canary] it=  4200 total=5.1921 rgb=0.060 mask=0.659 norm=0.999 alive=7 depth=0.3147  θ[0.04/0.05/0.79] εpsq[0.29/0.87/1.42] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57% P_E_fg=0.001/0.99  t[r84/l7/s166/p0]ms
+[canary] it=  4250 total=5.0221 rgb=0.059 mask=0.636 norm=0.938 alive=7 depth=0.3047  θ[0.04/0.05/0.79] εpsq[0.29/0.88/1.43] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r22/l6/s161/p0]ms
+[canary] it=  4300 total=5.1545 rgb=0.065 mask=0.693 norm=1.057 alive=7 depth=0.3003  θ[0.04/0.05/0.79] εpsq[0.29/0.88/1.43] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r16/l6/s150/p0]ms
+[canary] it=  4350 total=5.1194 rgb=0.056 mask=0.648 norm=0.959 alive=7 depth=0.3110  θ[0.04/0.05/0.79] εpsq[0.29/0.88/1.44] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r18/l6/s150/p0]ms
+[heartbeat] it=  4359/6000 alive=7 elapsed=3789s avg t[r305/s199]ms since last log
+[canary] it=  4400 total=5.0360 rgb=0.053 mask=0.616 norm=0.923 alive=7 depth=0.3127  θ[0.04/0.05/0.79] εpsq[0.29/0.89/1.44] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57% P_E_fg=0.001/1.00  t[r167/l30/s172/p0]ms
+[canary] it=  4450 total=4.9024 rgb=0.051 mask=0.619 norm=0.925 alive=7 depth=0.2987  θ[0.04/0.05/0.79] εpsq[0.28/0.89/1.45] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r96/l9/s171/p0]ms
+[canary] it=  4500 total=4.9374 rgb=0.053 mask=0.626 norm=0.938 alive=7 depth=0.2997  θ[0.04/0.05/0.79] εpsq[0.28/0.89/1.45] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r64/l7/s201/p0]ms
+[canary] it=  4550 total=4.9523 rgb=0.058 mask=0.637 norm=0.935 alive=7 depth=0.2976  θ[0.04/0.05/0.79] εpsq[0.28/0.89/1.46] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r48/l9/s162/p0]ms
+[heartbeat] it=  4565/6000 alive=7 elapsed=3849s avg t[r44/s159]ms since last log
+[canary] it=  4600 total=5.2945 rgb=0.058 mask=0.664 norm=1.009 alive=7 depth=0.3236  θ[0.04/0.05/0.79] εpsq[0.28/0.89/1.46] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57% P_E_fg=0.001/1.00  t[r70/l7/s165/p0]ms
+[canary] it=  4650 total=5.0391 rgb=0.054 mask=0.633 norm=0.956 alive=7 depth=0.3077  θ[0.04/0.05/0.79] εpsq[0.28/0.90/1.47] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r160/l12/s183/p0]ms
+[canary] it=  4700 total=5.0235 rgb=0.056 mask=0.626 norm=0.932 alive=7 depth=0.3082  θ[0.04/0.05/0.79] εpsq[0.28/0.90/1.47] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r122/l7/s166/p0]ms
+[heartbeat] it=  4743/6000 alive=7 elapsed=3909s avg t[r116/s186]ms since last log
+[canary] it=  4750 total=4.8300 rgb=0.053 mask=0.612 norm=0.935 alive=7 depth=0.2933  θ[0.04/0.05/0.78] εpsq[0.28/0.90/1.47] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r115/l45/s293/p0]ms
+[canary] it=  4800 total=5.1495 rgb=0.062 mask=0.657 norm=0.983 alive=7 depth=0.3107  θ[0.04/0.05/0.78] εpsq[0.28/0.90/1.48] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57% P_E_fg=0.001/0.98  t[r105/l12/s204/p0]ms
+[canary] it=  4850 total=5.0000 rgb=0.059 mask=0.621 norm=0.942 alive=7 depth=0.3069  θ[0.04/0.05/0.78] εpsq[0.28/0.90/1.48] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r77/l11/s225/p0]ms
+[canary] it=  4900 total=4.9578 rgb=0.058 mask=0.635 norm=0.924 alive=7 depth=0.2987  θ[0.04/0.05/0.78] εpsq[0.28/0.91/1.49] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r94/l20/s175/p0]ms
+[heartbeat] it=  4902/6000 alive=7 elapsed=3971s avg t[r84/s1838]ms since last log
+[canary] it=  4950 total=5.1735 rgb=0.060 mask=0.664 norm=0.998 alive=7 depth=0.3113  θ[0.04/0.05/0.78] εpsq[0.28/0.91/1.49] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r187/l37/s241/p0]ms
+[canary] it=  5000 total=5.1226 rgb=0.059 mask=0.666 norm=0.999 alive=7 depth=0.3057  θ[0.04/0.05/0.78] εpsq[0.28/0.91/1.49] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57% P_E_fg=0.001/1.00  t[r131/l47/s293/p0]ms
+[canary] it=  5050 total=4.8490 rgb=0.049 mask=0.611 norm=0.915 alive=7 depth=0.2959  θ[0.04/0.05/0.78] εpsq[0.27/0.91/1.49] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r96/l8/s171/p0]ms
+[heartbeat] it=  5061/6000 alive=7 elapsed=4031s avg t[r67/s184]ms since last log
+[canary] it=  5100 total=4.9755 rgb=0.054 mask=0.625 norm=0.928 alive=7 depth=0.3036  θ[0.04/0.05/0.78] εpsq[0.27/0.91/1.50] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r46/l8/s176/p0]ms
+[canary] it=  5150 total=5.0067 rgb=0.058 mask=0.649 norm=0.970 alive=7 depth=0.2993  θ[0.04/0.04/0.78] εpsq[0.27/0.91/1.50] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r79/l8/s238/p0]ms
+[canary] it=  5200 total=5.0251 rgb=0.056 mask=0.649 norm=0.978 alive=7 depth=0.3014  θ[0.04/0.04/0.78] εpsq[0.27/0.91/1.50] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57% P_E_fg=0.001/0.45  t[r28/l6/s169/p0]ms
+[canary] it=  5250 total=4.8215 rgb=0.052 mask=0.594 norm=0.867 alive=7 depth=0.2979  θ[0.04/0.05/0.78] εpsq[0.27/0.92/1.51] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r117/l10/s258/p0]ms
+[heartbeat] it=  5254/6000 alive=7 elapsed=4092s avg t[r22/s166]ms since last log
+[canary] it=  5300 total=4.8582 rgb=0.054 mask=0.628 norm=0.950 alive=7 depth=0.2910  θ[0.04/0.05/0.77] εpsq[0.27/0.92/1.51] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r69/l12/s181/p0]ms
+[canary] it=  5350 total=4.9968 rgb=0.054 mask=0.640 norm=0.967 alive=7 depth=0.3013  θ[0.04/0.05/0.77] εpsq[0.27/0.92/1.51] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r69/l7/s165/p0]ms
+[canary] it=  5400 total=4.9769 rgb=0.058 mask=0.660 norm=0.984 alive=7 depth=0.2931  θ[0.04/0.05/0.77] εpsq[0.27/0.92/1.51] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57% P_E_fg=0.001/1.00  t[r44/l7/s167/p0]ms
+[canary] it=  5450 total=5.0598 rgb=0.056 mask=0.646 norm=0.978 alive=7 depth=0.3057  θ[0.04/0.05/0.77] εpsq[0.27/0.92/1.51] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r57/l7/s170/p0]ms
+[heartbeat] it=  5478/6000 alive=7 elapsed=4152s avg t[r199/s179]ms since last log
+[canary] it=  5500 total=5.0241 rgb=0.053 mask=0.614 norm=0.958 alive=7 depth=0.3121  θ[0.04/0.05/0.77] εpsq[0.27/0.92/1.52] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r175/l12/s172/p0]ms
+[canary] it=  5550 total=4.8677 rgb=0.052 mask=0.607 norm=0.909 alive=7 depth=0.2986  θ[0.04/0.05/0.77] εpsq[0.27/0.92/1.52] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r156/l8/s169/p0]ms
+[canary] it=  5600 total=5.0856 rgb=0.054 mask=0.648 norm=1.003 alive=7 depth=0.3077  θ[0.04/0.05/0.77] εpsq[0.27/0.92/1.52] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57% P_E_fg=0.001/0.99  t[r86/l9/s194/p0]ms
+[canary] it=  5650 total=4.9325 rgb=0.050 mask=0.609 norm=0.926 alive=7 depth=0.3048  θ[0.04/0.05/0.77] εpsq[0.27/0.93/1.52] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r37/l8/s210/p0]ms
+[heartbeat] it=  5694/6000 alive=7 elapsed=4212s avg t[r22/s167]ms since last log
+[canary] it=  5700 total=4.8477 rgb=0.057 mask=0.627 norm=0.922 alive=7 depth=0.2900  θ[0.04/0.05/0.77] εpsq[0.27/0.93/1.52] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r26/l7/s167/p0]ms
+[canary] it=  5750 total=5.0766 rgb=0.048 mask=0.601 norm=0.895 alive=7 depth=0.3217  θ[0.04/0.05/0.77] εpsq[0.27/0.93/1.53] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r102/l8/s166/p0]ms
+[canary] it=  5800 total=5.0664 rgb=0.061 mask=0.670 norm=1.026 alive=7 depth=0.2986  θ[0.04/0.04/0.77] εpsq[0.27/0.93/1.53] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57% P_E_fg=0.001/0.98  t[r86/l11/s233/p0]ms
+[canary] it=  5850 total=4.9672 rgb=0.056 mask=0.662 norm=1.018 alive=7 depth=0.2916  θ[0.04/0.04/0.77] εpsq[0.27/0.93/1.53] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r46/l7/s209/p0]ms
+[heartbeat] it=  5899/6000 alive=7 elapsed=4274s avg t[r143/s169]ms since last log
+/home/ubuntu/clearmesh/clearmesh/dualprim/export.py:130: UserWarning: [dualprim/export] manifold3d not installed; falling back to trimesh
+  warnings.warn("[dualprim/export] manifold3d not installed; falling back to trimesh")
+/home/ubuntu/clearmesh/clearmesh/dualprim/export.py:137: UserWarning: [dualprim/export] trimesh.boolean.difference failed: No boolean backend: `pip install manifold3d` or install `blender`; returning PSQ mesh only
+  warnings.warn(f"[dualprim/export] trimesh.boolean.difference failed: {e}; "
+[canary] it=  5900 total=5.0982 rgb=0.054 mask=0.637 norm=0.951 alive=7 depth=0.3123  θ[0.04/0.04/0.77] εpsq[0.27/0.93/1.53] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r141/l7/s169/p0]ms
+[canary] it=  5950 total=5.1297 rgb=0.057 mask=0.671 norm=0.990 alive=7 depth=0.3052  θ[0.04/0.04/0.76] εpsq[0.27/0.93/1.53] θ_min_eff=0.01 μ=0.00 λn=0.00 NSQ∩PSQ=57%  t[r98/l7/s170/p0]ms
+[canary] training done in 71.7 min — 7/8 alive
+[canary] exporting (α ≥ 0.5)
+
+============================================================
+CANARY DONE
+  mode:     mesh_rendered_views
+  K final:  7/8
+  iters:    6000
+  train_s:  4302.6
+  scene_v:  7,340
+  scene_f:  13,996
+  out:      /workspace/dualprim_k008_depth_camera_r49
+============================================================
+[r49] done 2026-04-26T06:15:11+00:00

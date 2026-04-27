@@ -1,0 +1,27 @@
+Fetching instances...
+[
+  {
+    "id": "0",
+    "ip": "64.247.206.140",
+    "name": "t4792sdi",
+    "status": "RUNNING",
+    "createdAt": "2026-04-26T07:08:56Z",
+    "uuid": "t4792sdi",
+    "storage": 100,
+    "cpuCores": "4",
+    "template": "base",
+    "gpuType": "A100XL",
+    "numGpus": "1",
+    "memory": "32",
+    "promoted": false,
+    "mode": "prototyping",
+    "port": 32528,
+    "k8s": true,
+    "provisioningTime": "2026-04-26T07:20:56.645371201Z",
+    "restoringTime": "2026-04-26T07:20:56.645371275Z",
+    "sshPublicKeys": [
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIL6klisd17/Ata/1CHnWOQ2qRc0fMho0K2O66io9CsGB\n",
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKzuZH6R94CR1eJmvjAPzNeHP9DhlO19ZMLn6ZRoeSbU\n"
+    ]
+  }
+]

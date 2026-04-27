@@ -8,7 +8,7 @@ Full pipeline stages:
   4. Stage 2: Geometric refinement (UltraShape 1.0, pre-trained — arxiv:2512.21185)
   5. Isosurface extraction (NDC/FlexiCubes — sharp edges, per-part selective)
   6. Geometry super-resolution (SuperCarver / CraftsMan3D, optional)
-  7. Retopology (BPT, optional — for digital/game-ready output)
+  7. Retopology (BPT / TreeMeshGPT / QuadGPT, optional — for digital/game-ready output)
   8. Mesh repair + print-readiness (PyMeshFix, orientation, drain holes)
   9. Scale normalization (28mm, 32mm, 54mm miniature scales)
   10. PBR textures (optional — for digital variants)
@@ -74,9 +74,10 @@ class GenerationOptions:
     enable_super_resolution: bool = False
     super_resolution_detail: str = "medium"  # low | medium | high
 
-    # Retopology (BPT)
+    # Retopology (BPT / TreeMeshGPT / QuadGPT)
     enable_retopology: bool = False  # Only for digital/game-ready
-    retopo_target_faces: int = 8000
+    retopo_method: str = "bpt"  # "bpt" | "treemeshgpt" | "quadgpt"
+    retopo_target_faces: int = 8000  # BPT≤8K, TreeMeshGPT≤11K, QuadGPT≤20K
 
     # Mesh repair + print prep
     orient_for_print: bool = True
@@ -218,12 +219,20 @@ class ClearMeshPipeline:
             self._super_resolver = GeometrySuperResolver(model_dir=self.model_dir)
         return self._super_resolver
 
-    @property
-    def retopologizer(self):
-        """Lazy-load retopology model."""
-        if self._retopologizer is None:
+    def _get_retopologizer(self, method: str):
+        """Lazy-load the retopology model for the requested backend.
+
+        We rebuild the Retopologizer when the method changes so config
+        switches between 'bpt', 'treemeshgpt', and 'quadgpt' work without
+        restarting the pipeline.
+        """
+        if self._retopologizer is None or self._retopologizer.method != method:
             from clearmesh.retopology.retopo import Retopologizer
-            self._retopologizer = Retopologizer(model_dir=self.model_dir)
+            self._retopologizer = Retopologizer(
+                method=method,
+                model_dir=self.model_dir,
+                device=self.device,
+            )
         return self._retopologizer
 
     def _get_rigger(self, method: str):
@@ -340,18 +349,26 @@ class ClearMeshPipeline:
             timings["super_resolution"] = time.time() - t0
 
         # === 7. Retopology (optional, for digital/game-ready) ===
-        if options.enable_retopology and self.retopologizer.is_available():
-            t0 = time.time()
-            if parts:
-                for part in parts:
-                    part.mesh = self.retopologizer.retopologize(
-                        part.mesh, target_faces=options.retopo_target_faces
+        if options.enable_retopology:
+            retopologizer = self._get_retopologizer(options.retopo_method)
+            if retopologizer.is_available():
+                t0 = time.time()
+                if parts:
+                    for part in parts:
+                        part.mesh = retopologizer.retopologize(
+                            part.mesh, target_faces=options.retopo_target_faces
+                        )
+                else:
+                    mesh = retopologizer.retopologize(
+                        mesh, target_faces=options.retopo_target_faces
                     )
+                timings["retopology"] = time.time() - t0
             else:
-                mesh = self.retopologizer.retopologize(
-                    mesh, target_faces=options.retopo_target_faces
+                print(
+                    f"Retopology requested ({options.retopo_method}) but backend "
+                    f"is not installed at {retopologizer.paths[options.retopo_method]}. "
+                    "Skipping."
                 )
-            timings["retopology"] = time.time() - t0
 
         # Reassemble parts into single mesh if decomposed
         if parts:
@@ -393,10 +410,18 @@ class ClearMeshPipeline:
         skeleton = None
         skin_weights = None
         if options.enable_rigging:
-            t0 = time.time()
             rigger = self._get_rigger(options.rigging_method)
-            skeleton, skin_weights = rigger.rig(mesh)
-            timings["rigging"] = time.time() - t0
+            if not rigger.is_available():
+                print(
+                    f"Rigging requested ({options.rigging_method}) but backend "
+                    f"is not installed at {rigger.paths.get(options.rigging_method)!r} "
+                    "(or is not yet wired — e.g. humanrig). Skipping rig stage. "
+                    "Install with scripts/setup/install_rigging.sh."
+                )
+            else:
+                t0 = time.time()
+                skeleton, skin_weights = rigger.rig(mesh)
+                timings["rigging"] = time.time() - t0
 
         # === 12. Export ===
         t0 = time.time()
@@ -514,7 +539,12 @@ def main():
     parser.add_argument("--num-parts", type=int, default=None, help="Part count hint (PartCrafter only)")
     parser.add_argument("--super-res", action="store_true", help="Enable geometry super-resolution")
     parser.add_argument("--super-res-detail", type=str, default="medium", choices=["low", "medium", "high"])
-    parser.add_argument("--retopo", action="store_true", help="Enable BPT retopology (digital/game-ready)")
+    parser.add_argument("--retopo", action="store_true", help="Enable neural retopology (digital/game-ready)")
+    parser.add_argument(
+        "--retopo-method", type=str, default="bpt",
+        choices=["bpt", "treemeshgpt", "quadgpt"],
+        help="Retopology backend: bpt (tri, ≤8K) | treemeshgpt (tri, ≤11K) | quadgpt (quad, ≤20K)",
+    )
     parser.add_argument("--retopo-faces", type=int, default=8000, help="Target face count for retopology")
     parser.add_argument("--textures", action="store_true", help="Enable PBR textures (digital)")
     parser.add_argument("--drain-holes", action="store_true", help="Add drain holes (resin printing)")
@@ -523,6 +553,11 @@ def main():
     parser.add_argument("--add-base", action="store_true")
     parser.add_argument("--hollow", action="store_true")
     parser.add_argument("--fast", action="store_true", help="Fast mode (12 diffusion steps)")
+    parser.add_argument(
+        "--skip-bg-removal",
+        action="store_true",
+        help="Skip background removal (input is already RGBA with alpha)",
+    )
     args = parser.parse_args()
 
     pipeline = ClearMeshPipeline(
@@ -543,6 +578,7 @@ def main():
         enable_super_resolution=args.super_res,
         super_resolution_detail=args.super_res_detail,
         enable_retopology=args.retopo,
+        retopo_method=args.retopo_method,
         retopo_target_faces=args.retopo_faces,
         enable_textures=args.textures,
         target_scale=args.scale,
@@ -552,6 +588,7 @@ def main():
         drain_holes=args.drain_holes,
         enable_rigging=args.rig,
         rigging_method=args.rig_method,
+        skip_background_removal=args.skip_bg_removal,
     )
 
     result = pipeline.generate(args.input, args.output, options)

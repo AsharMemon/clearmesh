@@ -1,0 +1,16 @@
+[watch] start pid=2093 2026-04-26T20:47:11Z
+[watch] tick 2026-04-26T20:47:11Z
+Fetching instances...
+Warning: Permanently added '[64.247.206.140]:32390' (ED25519) to the list of known hosts.
+Warning: Permanently added '[64.247.206.140]:32390' (ED25519) to the list of known hosts.
+[watch] state=stopped
+[watch] terminal state — final sync 2026-04-26T20:47:16Z
+Warning: Permanently added '[64.247.206.140]:32390' (ED25519) to the list of known hosts.
+Warning: Permanently added '[64.247.206.140]:32390' (ED25519) to the list of known hosts.
+[watch] deleting instance 2026-04-26T20:47:20Z
+Fetching instances...
+Deleting instance...
+Deleted instance 0
+Fetching instances...
+[watch] exit clean 2026-04-26T20:47:21Z
+[watch] EXIT trap pid=2093 2026-04-26T20:47:21Z

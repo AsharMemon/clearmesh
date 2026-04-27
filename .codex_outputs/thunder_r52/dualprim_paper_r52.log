@@ -1,0 +1,192 @@
+[r52] start 2026-04-26T20:36:23+00:00 host=instance-j6h0jrtl-main
+[r52] input=/workspace/objaverse_camera_4b3a.glb out=/workspace/dualprim_k100_paper_camera_r52
+NVIDIA A100-SXM4-80GB, 81920 MiB
+preflight manifold3d ok torch_cuda True
+[canary] device=cuda
+[canary] mode=mesh_rendered_views, K=100, iters=30000
+[canary] rendering 26 views to /workspace/dualprim_k100_paper_camera_r52/views
+Traceback (most recent call last):
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/OpenGL/latebind.py", line 41, in __call__
+    return self._finalCall( *args, **named )
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: 'NoneType' object is not callable
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/ubuntu/clearmesh/scripts/dualprim/run_canary.py", line 1093, in <module>
+    main()
+  File "/home/ubuntu/clearmesh/scripts/dualprim/run_canary.py", line 486, in main
+    render_views(
+  File "/home/ubuntu/clearmesh/scripts/dualprim/render_views.py", line 255, in render_views
+    color, depth = renderer.render(scene_rgb)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/pyrender/offscreen.py", line 102, in render
+    retval = self._renderer.render(scene, flags, seg_node_map)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/pyrender/renderer.py", line 125, in render
+    self._update_context(scene, flags)
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/pyrender/renderer.py", line 755, in _update_context
+    texture._add_to_context()
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/pyrender/texture.py", line 184, in _add_to_context
+    self._texid = glGenTextures(1)
+                  ^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/OpenGL/latebind.py", line 61, in __call__
+    return self.wrapperFunction( self.baseFunction, *args, **named )
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/OpenGL/GL/exceptional.py", line 178, in glGenTextures
+    baseFunction( count, textures)
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/OpenGL/latebind.py", line 45, in __call__
+    return self._finalCall( *args, **named )
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/OpenGL/wrapper.py", line 657, in wrapperCall
+    result = wrappedOperation( *cArguments )
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/OpenGL/platform/baseplatform.py", line 402, in __call__
+    return self( *args, **named )
+           ^^^^^^^^^^^^^^^^^^^^^^
+ctypes.ArgumentError: ("argument 2: TypeError: No array-type handler for type _ctypes.type (value: <cparam 'P' (0x726a3c2b8da0)>) registered", (1, <cparam 'P' (0x726a3c2b8da0)>))
+[r52] done 2026-04-26T20:36:39+00:00
+[r52] start 2026-04-26T20:37:41+00:00 host=instance-j6h0jrtl-main
+[r52] input=/workspace/objaverse_camera_4b3a_clean.glb out=/workspace/dualprim_k100_paper_camera_r52
+NVIDIA A100-SXM4-80GB, 81920 MiB
+preflight manifold3d ok torch_cuda True
+[canary] device=cuda
+[canary] mode=mesh_rendered_views, K=100, iters=30000
+[canary] rendering 26 views to /workspace/dualprim_k100_paper_camera_r52/views
+[render_views] wrote 26 views to /workspace/dualprim_k100_paper_camera_r52/views
+[canary] predicting StableNormal maps in /workspace/dualprim_k100_paper_camera_r52/views
+Downloading: "https://github.com/Stable-X/StableNormal/zipball/main" to /home/ubuntu/.cache/torch/hub/main.zip
+Traceback (most recent call last):
+  File "/home/ubuntu/clearmesh/scripts/dualprim/run_canary.py", line 1093, in <module>
+    main()
+  File "/home/ubuntu/clearmesh/scripts/dualprim/run_canary.py", line 493, in main
+    _ensure_stablenormal_views(
+  File "/home/ubuntu/clearmesh/scripts/dualprim/run_canary.py", line 1047, in _ensure_stablenormal_views
+    predictor = torch.hub.load("Stable-X/StableNormal", model_name, **kwargs)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/hub.py", line 669, in load
+    model = _load_local(repo_or_dir, model, *args, **kwargs)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/hub.py", line 699, in _load_local
+    hub_module = _import_module(MODULE_HUBCONF, hubconf_path)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/hub.py", line 118, in _import_module
+    spec.loader.exec_module(module)
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/ubuntu/.cache/torch/hub/Stable-X_StableNormal_main/hubconf.py", line 12, in <module>
+    from transformers import AutoImageProcessor, Mask2FormerForUniversalSegmentation, AutoModelForImageSegmentation
+ModuleNotFoundError: No module named 'transformers'
+[r52] done 2026-04-26T20:38:17+00:00
+[r52] start 2026-04-26T20:39:49+00:00 host=instance-j6h0jrtl-main
+[r52] input=/workspace/objaverse_camera_4b3a_clean.glb out=/workspace/dualprim_k100_paper_camera_r52
+NVIDIA A100-SXM4-80GB, 81920 MiB
+preflight manifold3d ok torch_cuda True transformers 5.6.2
+Using cache found in /home/ubuntu/.cache/torch/hub/Stable-X_StableNormal_main
+[canary] device=cuda
+[canary] mode=mesh_rendered_views, K=100, iters=30000
+[canary] rendering 26 views to /workspace/dualprim_k100_paper_camera_r52/views
+[render_views] wrote 26 views to /workspace/dualprim_k100_paper_camera_r52/views
+[canary] predicting StableNormal maps in /workspace/dualprim_k100_paper_camera_r52/views
+Traceback (most recent call last):
+  File "/home/ubuntu/clearmesh/scripts/dualprim/run_canary.py", line 1093, in <module>
+    main()
+  File "/home/ubuntu/clearmesh/scripts/dualprim/run_canary.py", line 493, in main
+    _ensure_stablenormal_views(
+  File "/home/ubuntu/clearmesh/scripts/dualprim/run_canary.py", line 1047, in _ensure_stablenormal_views
+    predictor = torch.hub.load("Stable-X/StableNormal", model_name, **kwargs)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/hub.py", line 669, in load
+    model = _load_local(repo_or_dir, model, *args, **kwargs)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/hub.py", line 701, in _load_local
+    entry = _load_entry_from_hubconf(hub_module, model)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/hub.py", line 417, in _load_entry_from_hubconf
+    _check_dependencies(m)
+  File "/usr/local/lib/python3.12/dist-packages/torch/hub.py", line 406, in _check_dependencies
+    raise RuntimeError(f"Missing dependencies: {', '.join(missing_deps)}")
+RuntimeError: Missing dependencies: diffusers
+[r52] failed 2026-04-26T20:40:26+00:00 rc=1
+[r52] start 2026-04-26T20:41:32+00:00 host=instance-j6h0jrtl-main
+[r52] input=/workspace/objaverse_camera_4b3a_clean.glb out=/workspace/dualprim_k100_paper_camera_r52
+NVIDIA A100-SXM4-80GB, 81920 MiB
+preflight manifold3d ok torch_cuda True transformers 5.6.2
+Using cache found in /home/ubuntu/.cache/torch/hub/Stable-X_StableNormal_main
+Cannot initialize model with low cpu memory usage because `accelerate` was not found in the environment. Defaulting to `low_cpu_mem_usage=False`. It is strongly recommended to install `accelerate` for faster and less memory-intense model loading. You can do so with: 
+```
+pip install accelerate
+```
+.
+[canary] device=cuda
+[canary] mode=mesh_rendered_views, K=100, iters=30000
+[canary] rendering 26 views to /workspace/dualprim_k100_paper_camera_r52/views
+[render_views] wrote 26 views to /workspace/dualprim_k100_paper_camera_r52/views
+[canary] predicting StableNormal maps in /workspace/dualprim_k100_paper_camera_r52/views
+Fetching 15 files:   0%|          | 0/15 [00:00<?, ?it/s]Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Fetching 15 files:   7%|▋         | 1/15 [00:00<00:07,  1.80it/s]Fetching 15 files:  20%|██        | 3/15 [00:12<00:53,  4.43s/it]Fetching 15 files:  87%|████████▋ | 13/15 [00:16<00:02,  1.06s/it]Fetching 15 files: 100%|██████████| 15/15 [00:16<00:00,  1.09s/it]
+Keyword arguments {'trust_remote_code': True} are not expected by YOSONormalsPipeline and will be ignored.
+Loading pipeline components...:   0%|          | 0/6 [00:00<?, ?it/s]Loading pipeline components...:   0%|          | 0/6 [00:00<?, ?it/s]
+Traceback (most recent call last):
+  File "/home/ubuntu/clearmesh/scripts/dualprim/run_canary.py", line 1093, in <module>
+    main()
+  File "/home/ubuntu/clearmesh/scripts/dualprim/run_canary.py", line 493, in main
+    _ensure_stablenormal_views(
+  File "/home/ubuntu/clearmesh/scripts/dualprim/run_canary.py", line 1047, in _ensure_stablenormal_views
+    predictor = torch.hub.load("Stable-X/StableNormal", model_name, **kwargs)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/hub.py", line 669, in load
+    model = _load_local(repo_or_dir, model, *args, **kwargs)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/hub.py", line 702, in _load_local
+    model = entry(*args, **kwargs)
+            ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/.cache/torch/hub/Stable-X_StableNormal_main/hubconf.py", line 321, in StableNormal_turbo
+    pipe = YOSONormalsPipeline.from_pretrained(yoso_weight_path, **kwargs).to(device)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/huggingface_hub/utils/_validators.py", line 88, in _inner_fn
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/diffusers/pipelines/pipeline_utils.py", line 1049, in from_pretrained
+    loaded_sub_model = load_sub_model(
+                       ^^^^^^^^^^^^^^^
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/diffusers/pipelines/pipeline_loading_utils.py", line 769, in load_sub_model
+    class_obj, class_candidates = get_class_obj_and_candidates(
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/diffusers/pipelines/pipeline_loading_utils.py", line 423, in get_class_obj_and_candidates
+    class_obj = get_class_from_dynamic_module(
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/huggingface_hub/utils/_validators.py", line 88, in _inner_fn
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/diffusers/utils/dynamic_modules_utils.py", line 512, in get_class_from_dynamic_module
+    return get_class_in_module(class_name, final_module)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/diffusers/utils/dynamic_modules_utils.py", line 210, in get_class_in_module
+    module_spec.loader.exec_module(module)
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/ubuntu/.cache/huggingface/modules/diffusers_modules/local/controlnetvae.py", line 41, in <module>
+    from diffusers.models.controlnet import ControlNetOutput
+ModuleNotFoundError: No module named 'diffusers.models.controlnet'
+[r52] failed 2026-04-26T20:42:27+00:00 rc=1
+[r52] start 2026-04-26T20:43:48+00:00 host=instance-j6h0jrtl-main
+[r52] input=/workspace/objaverse_camera_4b3a_clean.glb out=/workspace/dualprim_k100_paper_camera_r52
+NVIDIA A100-SXM4-80GB, 81920 MiB
+preflight manifold3d ok torch_cuda True transformers 5.6.2
+[canary] device=cuda
+[canary] mode=mesh_rendered_views, K=100, iters=30000
+[canary] rendering 26 views to /workspace/dualprim_k100_paper_camera_r52/views
+[render_views] wrote 26 views to /workspace/dualprim_k100_paper_camera_r52/views
+[sampler] total hole pixels across 26 views: 20 (0.00%)
+[canary] training for 30000 iters
+[canary] it=     0 total=9.5238 rgb=0.501 mask=2.180 norm=2.521 alive=100  θ[0.33/0.49/0.66] εpsq[0.27/0.52/0.73] θ_min_eff=0.04 μ=0.10 λn=0.10 NSQ∩PSQ=100% P_E_fg=0.001/0.85  t[r720/l49/s740/p0]ms
+[canary] it=    50 total=7.5749 rgb=0.182 mask=1.771 norm=2.523 alive=100  θ[0.35/0.51/0.68] εpsq[0.25/0.50/0.71] θ_min_eff=0.04 μ=0.10 λn=0.10 NSQ∩PSQ=100%  t[r27/l42/s308/p0]ms
+[canary] it=   100 total=6.4571 rgb=0.158 mask=1.497 norm=2.539 alive=100  θ[0.37/0.53/0.71] εpsq[0.23/0.47/0.68] θ_min_eff=0.04 μ=0.10 λn=0.10 NSQ∩PSQ=100%  t[r27/l44/s311/p0]ms
+[heartbeat] it=   150/30000 alive=100 elapsed=60s avg t[r26/s310]ms since last log
+[canary] it=   150 total=5.5086 rgb=0.140 mask=1.264 norm=2.516 alive=100  θ[0.38/0.56/0.73] εpsq[0.22/0.44/0.65] θ_min_eff=0.04 μ=0.10 λn=0.10 NSQ∩PSQ=100%  t[r26/l45/s310/p0]ms
+[canary] it=   200 total=4.5887 rgb=0.123 mask=1.038 norm=2.500 alive=100  θ[0.39/0.58/0.75] εpsq[0.21/0.41/0.62] θ_min_eff=0.04 μ=0.10 λn=0.10 NSQ∩PSQ=100% P_E_fg=0.002/0.91  t[r24/l47/s310/p0]ms
+[canary] it=   250 total=3.8807 rgb=0.123 mask=0.860 norm=2.514 alive=100  θ[0.37/0.61/0.76] εpsq[0.21/0.39/0.59] θ_min_eff=0.04 μ=0.10 λn=0.10 NSQ∩PSQ=99%  t[r28/l43/s312/p0]ms
+[canary] it=   300 total=3.4303 rgb=0.101 mask=0.752 norm=2.503 alive=100  θ[0.37/0.63/0.78] εpsq[0.21/0.37/0.57] θ_min_eff=0.04 μ=0.10 λn=0.10 NSQ∩PSQ=99%  t[r26/l45/s311/p0]ms
+[heartbeat] it=   307/30000 alive=100 elapsed=120s avg t[r24/s313]ms since last log

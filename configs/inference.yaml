@@ -27,7 +27,8 @@ craftsmanship_path: /mnt/data/CraftsMan3D
 
 # === Retopology (optional, clean topology for digital/game use) ===
 enable_retopology: false
-retopo_target_faces: 8000        # BPT max ~8K, TreeMeshGPT max ~11K
+retopo_method: bpt               # bpt (tri, ≤8K) | treemeshgpt (tri, ≤11K) | quadgpt (quad, ≤20K)
+retopo_target_faces: 8000        # Clamped per-backend inside Retopologizer
 
 # === Mesh Processing ===
 export_format: glb               # stl | glb | obj | fbx

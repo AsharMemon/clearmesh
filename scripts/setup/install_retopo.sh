@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# Install BPT retopology (Tencent, CVPR 2025).
-# Optional: only needed for game-ready/digital output (not for 3D printing).
+# Install neural retopology backends (all optional — only needed for
+# digital/game-ready output, not for 3D printing).
+#
+#   - BPT      (Tencent, CVPR 2025): triangle meshes up to ~8K faces
+#   - QuadGPT  (arxiv:2509.21420):  native quad meshes up to ~20K faces
+#                                   (installs once the public repo lands)
 #
 # Usage: conda activate clearmesh && ./install_retopo.sh
 
@@ -31,5 +35,33 @@ echo ""
 echo "=== BPT retopology installed ==="
 echo "Path: ${DATA_DIR}/bpt/"
 echo ""
-echo "Generates meshes up to 8,000 clean faces from high-poly input."
+echo "Generates triangle meshes up to 8,000 faces from high-poly input."
+
+# === QuadGPT (optional — quad retopology) ===
+# Official code is expected at https://github.com/<tba>/QuadGPT once the
+# authors release it (paper commits to "a public API and Code"). Pinned
+# env var so we can swap URLs without editing the script.
+QUADGPT_REPO="${QUADGPT_REPO:-https://github.com/liu-jian-21/QuadGPT.git}"
+
+cd "${DATA_DIR}"
+echo ""
+echo "=== Installing QuadGPT (quad retopology, optional) ==="
+if git ls-remote "${QUADGPT_REPO}" &>/dev/null; then
+    if [ ! -d "QuadGPT" ]; then
+        git clone "${QUADGPT_REPO}" QuadGPT || echo "QuadGPT clone failed — repo may not be public yet."
+    fi
+    if [ -d "QuadGPT" ]; then
+        cd QuadGPT
+        if [ -f requirements.txt ]; then
+            pip install -r requirements.txt 2>/dev/null || echo "Install QuadGPT dependencies manually"
+        fi
+        echo "QuadGPT installed at ${DATA_DIR}/QuadGPT (generates quad meshes up to ~20K faces)."
+    fi
+else
+    echo "QuadGPT public repo not reachable at ${QUADGPT_REPO}."
+    echo "Skipping — set QUADGPT_REPO=<url> and re-run once code is released."
+fi
+
+echo ""
+echo "=== Retopology setup complete ==="
 echo "Optional for print-only output; recommended for digital/game-ready."

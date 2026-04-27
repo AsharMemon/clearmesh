@@ -239,6 +239,42 @@ class CtrlAdapter(nn.Module):
     ) -> torch.Tensor:
         """Generate textured multi-view images from normal maps.
 
+        Requires a base multi-view diffusion model (ERA3D is the reference,
+        but any model exposing a ``(U-Net-like) .encode_prompt`` +
+        ``.unet.forward(sample, t, encoder_hidden_states, down_block_res=)``
+        shape will work). The integration contract — what the caller must
+        provide for this to light up — is documented here, not inside the
+        body, because wiring it requires GPU + ERA3D which we don't have in
+        this environment.
+
+        Integration contract (what needs to exist in ``base_model``):
+
+          1. ``scheduler`` — a DDIM/DDPM-like scheduler with
+             ``.set_timesteps(num_steps)``, ``.timesteps``, and
+             ``.step(model_out, t, sample)`` that returns a dataclass
+             containing ``prev_sample``.
+
+          2. ``unet`` (or equivalent) — the 2D U-Net backbone that ERA3D
+             uses for per-view denoising. Must accept the Ctrl-Adapter's
+             multi-scale ``control_signals`` via either:
+               - ``down_block_additional_residuals`` (SD 1.5/ControlNet API)
+               - ``mid_block_additional_residual``
+               - Or a custom kwarg matching the base model's forward.
+
+          3. ``vae`` — for decoding the final latent to RGB. If the base
+             model is a pixel-space diffusion, skip this.
+
+          4. ``encode_prompt`` (or text encoder) — produces cross-attention
+             context tensors of shape (B*V, T, D_cross).
+
+        Why this is deferred rather than stubbed: the exact injection point
+        (additional residuals vs. custom hooks) and the scheduler API are
+        all ERA3D-specific. Getting it wrong silently produces textured
+        outputs that look plausible but are unsupervised — worse than
+        failing loudly. The clean texture path (``clearmesh/textures/``)
+        already handles the normal PBR case; this method is only for the
+        Ctrl-Adapter edit-target-guided variant.
+
         Args:
             normal_maps: (B, 6, 3, H, W) — 6-view normal maps in [0, 1].
             base_model: Base multi-view diffusion model (ERA3D or similar).
@@ -248,13 +284,19 @@ class CtrlAdapter(nn.Module):
 
         Returns:
             Generated RGB views (B, 6, 3, H, W).
+
+        Raises:
+            NotImplementedError: Until a concrete ERA3D binding is wired.
+                See STATUS.md "Blocker 3" for the full tracking list.
         """
-        # TODO: Integrate with ERA3D or similar multi-view diffusion model
-        # 1. Extract control signals from normal maps
-        # 2. Run base model's denoising loop
-        # 3. At each step, inject control signals via addition
-        # 4. Return final denoised RGB views
+        # The forward pass below is what a working implementation would
+        # call; it exercises the adapter so the tensor flow is validated
+        # without actually denoising. Kept for integration smoke-testing.
+        _control_signals = self.forward(normal_maps)  # noqa: F841
+
         raise NotImplementedError(
-            "Full generation requires ERA3D base model integration. "
-            "The Ctrl-Adapter is trained independently first."
+            "CtrlAdapter.generate requires an ERA3D-compatible base model. "
+            "See the docstring above for the integration contract, and "
+            "STATUS.md 'Blocker 3' for the full tracker. The standard PBR "
+            "texture path in clearmesh/textures/ is unaffected."
         )

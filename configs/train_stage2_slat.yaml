@@ -33,11 +33,14 @@ pretrained_checkpoint: /workspace/models/trellis2-4b/ckpts/slat_flow_img2shape_d
 use_checkpoint: true             # Gradient checkpointing (~60% VRAM savings)
 
 # === Training ===
+# Schedule tuned for ~30K SLAT pairs (generate_slat_pairs_fast.py on 2×H100).
+# For smaller datasets (e.g. 370-pair sanity runs) drop total_steps to 10K,
+# warmup_steps to 200, and save_interval to 500.
 batch_size: 8                    # Default batch size (overridden by progressive_schedule)
 learning_rate: 0.00005           # 5e-5 for pretrained backbone; fresh heads get 5x
 weight_decay: 0.01               # AdamW weight decay
-total_steps: 10000               # Total training steps (370 pairs → overfit quickly, checkpoint frequently)
-warmup_steps: 200                # Linear warmup steps
+total_steps: 85000               # 85K steps × effective batch 16 ≈ 45 epochs over 30K pairs
+warmup_steps: 1500               # ~1.8% of total_steps
 max_grad_norm: 1.0               # Gradient clipping
 
 # === SLAT diffusion loss ===
@@ -58,8 +61,8 @@ progressive_schedule:
 
 # === Checkpointing ===
 output_dir: /workspace/checkpoints/clearmesh_stage2_slat
-save_interval: 500               # Save checkpoint every N steps
-log_interval: 25                 # Log losses every N steps
+save_interval: 2000              # Save checkpoint every N steps (~43 ckpts over 85K steps)
+log_interval: 50                 # Log losses every N steps
 
 # === Logging ===
 use_wandb: false                 # Set true after `wandb login`
