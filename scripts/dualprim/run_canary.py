@@ -72,10 +72,31 @@ def main():
                     help="Override export tessellation resolution")
     ap.add_argument("--num-samples-per-ray", type=int, default=None,
                     help="Override volumetric samples per ray")
+    ap.add_argument("--sampling-mode", default=None,
+                    choices=["uniform", "hierarchical"],
+                    help="Ray sampling strategy. 'hierarchical' runs a "
+                         "coarse pass and NeuS/NeRF-style PDF resampling "
+                         "near high-density intervals.")
+    ap.add_argument("--num-importance-samples-per-ray", type=int, default=None,
+                    help="Fine samples per ray for --sampling-mode hierarchical.")
     ap.add_argument("--shape-range-lo", type=float, default=None,
                     help="Override lower bound of the superquadric shape range")
     ap.add_argument("--shape-range-hi", type=float, default=None,
                     help="Override upper bound of the superquadric shape range")
+    ap.add_argument("--psq-shape-init", type=float, default=None,
+                    help="If set, force all PSQ ε values to this scalar right "
+                         "after scene initialization. Useful for reverse-init "
+                         "diagnostics (for example, testing whether sharp ε "
+                         "holds or drifts back toward rounded solutions).")
+    ap.add_argument("--freeze-psq-shape", action="store_true",
+                    help="Freeze PSQ ε after initialization by zeroing its "
+                         "gradient slice. Diagnostic for testing whether the "
+                         "remaining optimizer/render/export path can fit a "
+                         "sharp low-ε scaffold when shape is not allowed to "
+                         "drift back toward the rounded basin.")
+    ap.add_argument("--log-shape-grad-stats", action="store_true",
+                    help="Log per-primitive PSQ ε / θ / |grad ε| traces for "
+                         "alive primitives at each log step.")
     ap.add_argument("--export-cleanup-min-faces", type=int, default=None,
                     help="Drop tiny disconnected export components below this face count.")
     ap.add_argument("--export-cleanup-min-area-ratio", type=float, default=None,
@@ -115,10 +136,12 @@ def main():
                          "axis, round-10 addition), or "
                          "'independent' (NSQ random, paper-faithful)")
     ap.add_argument("--init-profile", default=None,
-                    choices=["biased", "paper_random"],
+                    choices=["biased", "paper_random", "paper_table"],
                     help="Primitive parameter init profile. 'biased' keeps "
                          "our tuned small/boxy init; 'paper_random' samples "
-                         "broadly across the paper ranges.")
+                         "broadly across the paper ranges; 'paper_table' "
+                         "uses the fixed scale/epsilon/alpha/theta values "
+                         "from the paper init table.")
     ap.add_argument("--union-export", action="store_true",
                     help="Boolean-union all primitives at export. "
                          "Slow (~minutes for K>=20) but produces a single "
@@ -152,6 +175,19 @@ def main():
                     help="Override lambda_max in config.")
     ap.add_argument("--lambda-norm-reg", type=float, default=None,
                     help="Override lambda_norm_reg in config.")
+    ap.add_argument("--lambda-depth", type=float, default=None,
+                    help="Synthetic GT depth supervision weight. Requires "
+                         "cached per-view *_depth.npy maps.")
+    ap.add_argument("--lambda-edge-mask", type=float, default=None,
+                    help="Override extra silhouette-boundary mask loss weight.")
+    ap.add_argument("--lambda-shape-box", type=float, default=None,
+                    help="Override one-sided PSQ epsilon boxiness prior weight.")
+    ap.add_argument("--shape-box-threshold", type=float, default=None,
+                    help="Epsilon threshold for --lambda-shape-box.")
+    ap.add_argument("--normal-loss-type", default=None,
+                    choices=["l1", "angular"],
+                    help="Normal-consistency loss: legacy masked L1 or "
+                         "angular loss (1 - cos).")
     ap.add_argument("--lambda-norm-reg-final", type=float, default=None,
                     help="Late-stage target for lambda_norm_reg.")
     ap.add_argument("--norm-reg-ramp-start-fraction", type=float, default=None,
@@ -181,6 +217,10 @@ def main():
                     help="Override view-dependent prune threshold.")
     ap.add_argument("--view-prune-every-multiplier", type=int, default=None,
                     help="Run view-dependent pruning every N alpha-prune cycles.")
+    ap.add_argument("--view-prune-foreground-only", default=None,
+                    choices=["true", "false"],
+                    help="Whether view-dependent pruning should probe only "
+                         "foreground-hit rays or sample uniformly across views.")
     ap.add_argument("--opacity-reset-interval", type=int, default=None,
                     help="Override periodic opacity reset cadence. "
                          "3DGS-inspired: resetting alpha keeps alive "
@@ -200,6 +240,8 @@ def main():
                          "curriculum and uses only a tiny theta safety eps.")
     ap.add_argument("--theta-min", type=float, default=None,
                     help="Override the minimum effective theta floor.")
+    ap.add_argument("--theta-min-nsq", type=float, default=None,
+                    help="Separate theta floor for NSQ gate (friend's #1). Higher=softer NSQ gate.")
     ap.add_argument("--paper-literal-theta-eps", type=float, default=None,
                     help="Tiny theta epsilon used only in --gate-mode paper_literal.")
     ap.add_argument("--delta-p-mode", default=None,
@@ -225,6 +267,8 @@ def main():
                     help="Override the initial theta curriculum floor.")
     ap.add_argument("--theta-curriculum-fraction", type=float, default=None,
                     help="Override the fraction of training used by the theta curriculum.")
+    ap.add_argument("--lambda-overlap", type=float, default=None,
+                    help="Pairwise PSQ bounding-sphere repulsion (friend's #4 audit fix).")
     ap.add_argument("--lambda-open-ray", type=float, default=None,
                     help="Weight on the open-ray loss (round-7 addition). "
                          "Penalizes predicted mask > 0 on rays passing "
@@ -286,6 +330,18 @@ def main():
         config.lambda_max = args.lambda_max
     if args.lambda_norm_reg is not None:
         config.lambda_norm_reg = args.lambda_norm_reg
+    if args.lambda_depth is not None:
+        config.lambda_depth = args.lambda_depth
+    if args.lambda_edge_mask is not None:
+        config.lambda_edge_mask = args.lambda_edge_mask
+    if args.lambda_shape_box is not None:
+        config.lambda_shape_box = args.lambda_shape_box
+    if args.shape_box_threshold is not None:
+        config.shape_box_threshold = args.shape_box_threshold
+    if args.normal_loss_type is not None:
+        config.normal_loss_type = args.normal_loss_type
+    if args.log_shape_grad_stats:
+        config.log_shape_grad_stats = True
     if args.lambda_norm_reg_final is not None:
         config.lambda_norm_reg_final = args.lambda_norm_reg_final
     if args.norm_reg_ramp_start_fraction is not None:
@@ -302,6 +358,10 @@ def main():
         config.tessellation_resolution = args.tessellation_resolution
     if args.num_samples_per_ray is not None:
         config.num_samples_per_ray = args.num_samples_per_ray
+    if args.sampling_mode is not None:
+        config.sampling_mode = args.sampling_mode
+    if args.num_importance_samples_per_ray is not None:
+        config.num_importance_samples_per_ray = args.num_importance_samples_per_ray
     if args.shape_range_lo is not None or args.shape_range_hi is not None:
         lo, hi = config.shape_range
         if args.shape_range_lo is not None:
@@ -341,6 +401,8 @@ def main():
         config.view_prune_weight_threshold = args.view_prune_weight_threshold
     if args.view_prune_every_multiplier is not None:
         config.view_prune_every_multiplier = args.view_prune_every_multiplier
+    if args.view_prune_foreground_only is not None:
+        config.view_prune_foreground_only = (args.view_prune_foreground_only == "true")
     if args.opacity_reset_interval is not None:
         config.opacity_reset_interval = args.opacity_reset_interval
     if args.mu_gate_offset is not None:
@@ -353,6 +415,8 @@ def main():
         config.gate_mode = args.gate_mode
     if args.theta_min is not None:
         config.theta_min = args.theta_min
+    if args.theta_min_nsq is not None:
+        config.theta_min_nsq = args.theta_min_nsq
     if args.paper_literal_theta_eps is not None:
         config.paper_literal_theta_eps = args.paper_literal_theta_eps
     if args.delta_p_mode is not None:
@@ -371,6 +435,8 @@ def main():
         config.theta_curriculum_start = args.theta_curriculum_start
     if args.theta_curriculum_fraction is not None:
         config.theta_curriculum_fraction = args.theta_curriculum_fraction
+    if args.lambda_overlap is not None:
+        config.lambda_overlap = args.lambda_overlap
     if args.lambda_open_ray is not None:
         config.lambda_open_ray = args.lambda_open_ray
     # Write the effective config for reproducibility
@@ -393,6 +459,21 @@ def main():
         print(f"[canary] loaded {scene.num_alive}/{scene.K} live primitives")
     else:
         scene = init_scene(config, device=device)
+    if args.psq_shape_init is not None:
+        from clearmesh.dualprim.types import IDX_PSQ_SHAPE
+        with torch.no_grad():
+            scene.params[:, IDX_PSQ_SHAPE] = float(args.psq_shape_init)
+        print(f"[canary] forced PSQ ε init to {args.psq_shape_init:.4f}")
+    if args.freeze_psq_shape:
+        from clearmesh.dualprim.types import IDX_PSQ_SHAPE
+
+        def _freeze_psq_shape_grad(grad):
+            grad = grad.clone()
+            grad[:, IDX_PSQ_SHAPE] = 0.0
+            return grad
+
+        scene.params.register_hook(_freeze_psq_shape_grad)
+        print("[canary] freezing PSQ ε gradients")
 
     # ----- Build the ray sampler for this mode -----
     if args.mode == "mesh_fit":
@@ -402,7 +483,12 @@ def main():
         sampler = None
     elif args.mode == "mesh_rendered_views":
         views_dir = out_dir / "views"
-        if not (views_dir / "views.json").exists():
+        views_missing = not (views_dir / "views.json").exists()
+        depth_missing = (
+            config.lambda_depth > 0
+            and (views_missing or not all((views_dir / f"{i:02d}_depth.npy").exists() for i in range(26)))
+        )
+        if views_missing or depth_missing:
             print(f"[canary] rendering 26 views to {views_dir}")
             from scripts.dualprim.render_views import render_views
             render_views(
@@ -422,6 +508,7 @@ def main():
             views_dir, device=device,
             fg_bias=args.fg_bias,
             hole_ray_oversample=args.hole_ray_oversample,
+            require_depth=config.lambda_depth > 0,
             normal_source=config.normal_source,
             stablenormal_blend_strength=config.stablenormal_blend_strength,
             stablenormal_agreement_floor=config.stablenormal_agreement_floor,
@@ -472,6 +559,8 @@ def main():
                 f"rgb={parts['rgb']:.3f} mask={parts['mask']:.3f} "
                 f"norm={parts['norm']:.3f} alive={parts['alive']}"
             )
+            if parts.get("depth", 0) > 0:
+                line += f" depth={parts['depth']:.4f}"
             # Open-ray loss (round 7+): only show if >0
             if parts.get("open", 0) > 0:
                 line += f" open={parts['open']:.4f}"
@@ -481,6 +570,9 @@ def main():
             if "theta_p50" in parts:
                 line += (f"  θ[{parts['theta_p10']:.2f}/{parts['theta_p50']:.2f}/"
                          f"{parts['theta_p90']:.2f}]")
+            if "eps_psq_p50" in parts:
+                line += (f" εpsq[{parts['eps_psq_p10']:.2f}/{parts['eps_psq_p50']:.2f}/"
+                         f"{parts['eps_psq_p90']:.2f}]")
             if "theta_min_eff" in parts:
                 line += f" θ_min_eff={parts['theta_min_eff']:.2f}"
             if "mu_gate_eff" in parts:
@@ -631,6 +723,7 @@ def _build_mesh_fit_tsdf(
 def _build_views_sampler(views_dir: Path, device: str,
                           fg_bias: float = 0.7,
                           hole_ray_oversample: float = 0.0,
+                          require_depth: bool = False,
                           normal_source: str = "analytic",
                           stablenormal_blend_strength: float = 1.0,
                           stablenormal_agreement_floor: float = 0.5,
@@ -667,6 +760,7 @@ def _build_views_sampler(views_dir: Path, device: str,
     normals = np.zeros((V, H, W, 3), dtype=np.float32)
     analytic_normals = np.zeros((V, H, W, 3), dtype=np.float32)
     stable_normals = np.zeros((V, H, W, 3), dtype=np.float32)
+    depths = np.zeros((V, H, W), dtype=np.float32)
     poses = np.zeros((V, 4, 4), dtype=np.float32)
     for i in range(V):
         rgbs[i] = np.asarray(Image.open(views_dir / f"{i:02d}_rgb.png").convert("RGB")) / 255.0
@@ -679,6 +773,14 @@ def _build_views_sampler(views_dir: Path, device: str,
             stable_normals[i] = stable_n * 2.0 - 1.0
         else:
             normals[i] = analytic_normals[i]
+        depth_path = views_dir / f"{i:02d}_depth.npy"
+        if depth_path.exists():
+            depths[i] = np.load(depth_path).astype(np.float32)
+        elif require_depth:
+            raise FileNotFoundError(
+                f"Depth supervision requested, but missing {depth_path}. "
+                "Regenerate views with the depth-enabled render_views.py cache."
+            )
         poses[i] = np.asarray(meta["views"][i]["pose_world_from_camera"], dtype=np.float32)
 
     yfov = meta["camera"]["yfov_rad"]
@@ -698,7 +800,7 @@ def _build_views_sampler(views_dir: Path, device: str,
 
     rgbs_t = torch.from_numpy(rgbs).to(device)
     masks_t = torch.from_numpy(masks).to(device)
-    normals_t = torch.from_numpy(normals).to(device)
+    depths_t = torch.from_numpy(depths).to(device)
     poses_t = torch.from_numpy(poses).to(device)
     cam_dirs_t = torch.from_numpy(cam_dirs).to(device)
 
@@ -726,6 +828,17 @@ def _build_views_sampler(views_dir: Path, device: str,
         stable_unit = stable_normals / np.clip(
             np.linalg.norm(stable_normals, axis=-1, keepdims=True), 1e-6, None,
         )
+        # StableNormal's object-mode PNGs are not in our world frame.
+        # Empirical agreement against the analytic mesh-rendered normals is
+        # strongest after flipping the image/camera X axis and rotating by the
+        # per-view camera-to-world matrix from views.json. Feeding the direct
+        # RGB-decoded vectors as world-space normals makes multi-view normal
+        # supervision contradictory.
+        stable_unit = stable_unit * np.asarray([-1.0, 1.0, 1.0], dtype=np.float32)
+        stable_unit = np.einsum("vij,vhwj->vhwi", poses[:, :3, :3], stable_unit)
+        stable_unit = stable_unit / np.clip(
+            np.linalg.norm(stable_unit, axis=-1, keepdims=True), 1e-6, None,
+        )
         if stablenormal_blend_strength >= 1.0 and stablenormal_edge_boost <= 0.0:
             normals = stable_unit.astype(np.float32)
         else:
@@ -748,7 +861,11 @@ def _build_views_sampler(views_dir: Path, device: str,
                 np.linalg.norm(blended, axis=-1, keepdims=True), 1e-6, None,
             )
             normals = normals.astype(np.float32)
+    # Build target-normal tensor only after optional StableNormal replacement/blending.
+    normals_t = torch.from_numpy(normals).to(device)
+
     hole_masks_t = torch.from_numpy(hole_masks).to(device)
+    edge_weights_t = torch.from_numpy(boundary_masks.astype(np.float32)).to(device)
     n_hole_pixels_total = int(hole_masks.sum())
     print(f"[sampler] total hole pixels across {V} views: {n_hole_pixels_total:,} "
           f"({100.0 * n_hole_pixels_total / (V * H * W):.2f}%)")
@@ -834,15 +951,17 @@ def _build_views_sampler(views_dir: Path, device: str,
         rgb = rgbs_t[vi, yi, xi]
         mask = masks_t[vi, yi, xi]
         normal = normals_t[vi, yi, xi]
+        depth = depths_t[vi, yi, xi]
         hole_ray = hole_masks_t[vi, yi, xi]
+        edge_weight = edge_weights_t[vi, yi, xi]
         cam_dir = cam_dirs_t[yi, xi]
         rot = poses_t[vi, :3, :3]
         world_dir = torch.einsum("rij,rj->ri", rot, cam_dir)
         origin = poses_t[vi, :3, 3]
         return RaySampleBatch(
             origins=origin, dirs=world_dir,
-            rgb_gt=rgb, mask_gt=mask, normals_gt=normal,
-            hole_ray_gt=hole_ray, view_idx=vi,
+            rgb_gt=rgb, mask_gt=mask, normals_gt=normal, depth_gt=depth,
+            hole_ray_gt=hole_ray, edge_weight_gt=edge_weight, view_idx=vi,
         )
 
     def sampler(n_rays: int) -> RaySampleBatch:
@@ -890,7 +1009,9 @@ def _build_views_sampler(views_dir: Path, device: str,
         rgb = rgbs_t[vi, yi, xi]                              # (R, 3)
         mask = masks_t[vi, yi, xi]                             # (R,)
         normal = normals_t[vi, yi, xi]                         # (R, 3)
+        depth = depths_t[vi, yi, xi]                            # (R,)
         hole_ray = hole_masks_t[vi, yi, xi]                    # (R,) bool
+        edge_weight = edge_weights_t[vi, yi, xi]                # (R,) float
 
         cam_dir = cam_dirs_t[yi, xi]
         rot = poses_t[vi, :3, :3]
@@ -899,8 +1020,8 @@ def _build_views_sampler(views_dir: Path, device: str,
 
         return RaySampleBatch(
             origins=origin, dirs=world_dir,
-            rgb_gt=rgb, mask_gt=mask, normals_gt=normal,
-            hole_ray_gt=hole_ray, view_idx=vi,
+            rgb_gt=rgb, mask_gt=mask, normals_gt=normal, depth_gt=depth,
+            hole_ray_gt=hole_ray, edge_weight_gt=edge_weight, view_idx=vi,
         )
     sampler.sample_view_probe = sample_view_probe
     return sampler

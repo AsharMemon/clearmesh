@@ -231,6 +231,7 @@ def effectiveness_probability(
     theta: torch.Tensor,    # (K,) — per-primitive sharpness
     mu: float = 0.0,
     theta_min: float = 0.01,
+    theta_min_nsq: float = 0.01,  # friend's #1: separate softer NSQ gate floor
     gate_mode: str = "stabilized",
     paper_literal_theta_eps: float = 1e-6,
 ) -> torch.Tensor:
@@ -247,10 +248,12 @@ def effectiveness_probability(
     # theta broadcasts as (K,) → (..., K) automatically
     if gate_mode == "paper_literal":
         t = theta.clamp(min=paper_literal_theta_eps)
+        t_nsq = t  # friend's #1: same in literal mode
     else:
         t = theta.clamp(min=theta_min)
+        t_nsq = theta.clamp(min=theta_min_nsq)  # friend's #1: NSQ softer gate
     term_psq = torch.sigmoid(-f_psq / t - mu)
-    term_nsq = torch.sigmoid(-f_nsq / t - mu)
+    term_nsq = torch.sigmoid(-f_nsq / t_nsq - mu)  # friend's #1
     return term_psq * term_nsq
 
 

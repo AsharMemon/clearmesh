@@ -28,7 +28,7 @@ class DualPrimConfig:
     num_primitives_init: int = 100           # K, paper: "initialize K=100"
     init_space: Tuple[float, float] = (-1.0, 1.0)  # paper: "[-1,1] space"
     seed: int = 0
-    init_profile: str = "biased"             # "biased" | "paper_random"
+    init_profile: str = "biased"             # "biased" | "paper_random" | "paper_table"
 
     # NSQ initialisation strategy:
     #   "coupled"     — NSQ starts at PSQ position with smaller scale
@@ -65,6 +65,7 @@ class DualPrimConfig:
     mu_gate_ramp_start_fraction: float = 0.7
     gate_mode: str = "stabilized"   # "stabilized" | "paper_literal"
     theta_min: float = 0.01         # floor on per-primitive θ to avoid div-by-zero
+    theta_min_nsq: float = 0.01     # friend's #1: separate NSQ gate floor (use 0.3-0.5 to enable carving)
     paper_literal_theta_eps: float = 1e-6
 
     # θ curriculum — a review-driven fix for the P_E-gate collapse mode
@@ -83,6 +84,8 @@ class DualPrimConfig:
     # Same formulation as NeuS.
     # ================================================================
     num_samples_per_ray: int = 64          # N in Eq 1. NOT SPECIFIED IN PAPER
+    sampling_mode: str = "uniform"         # "uniform" | "hierarchical"
+    num_importance_samples_per_ray: int = 0  # NeuS-style fine samples; 0 = off
     delta_p_mode: str = "fixed"             # "fixed" | "half_delta"
     delta_p_value: float = 0.01
     delta_p_scale: float = 0.5
@@ -112,11 +115,16 @@ class DualPrimConfig:
     lambda_entropy: float = 0.01            # NOT SPECIFIED
     lambda_max: float = 0.1                 # NOT SPECIFIED
     lambda_norm_reg: float = 0.1            # NOT SPECIFIED
+    lambda_depth: float = 0.0               # synthetic GT diagnostic, off by default
+    normal_loss_type: str = "l1"            # "l1" | "angular"
     masked_loss_norm_mode: str = "global_mean"   # "global_mean" | "fg_mean"
     primitive_reg_average_mode: str = "alive"    # "alive" | "fixed_k"
     lambda_norm_reg_final: float | None = None
     norm_reg_ramp_start_fraction: float = 0.5
     norm_reg_ramp_end_fraction: float = 1.0
+    lambda_edge_mask: float = 0.0           # hard-surface diagnostic, off by default
+    lambda_shape_box: float = 0.0           # one-sided ε prior, off by default
+    shape_box_threshold: float = 0.30
 
     # Open-ray loss — NOT IN PAPER. Friend's round-7 addition.
     # Penalizes predicted mask > 0 on rays that pass through GT holes,
@@ -124,6 +132,9 @@ class DualPrimConfig:
     # NSQ carving (vs PSQ-shrinking) for hole preservation.
     # Default 0 = off (backward compatible). Round 7 uses ~5.0.
     lambda_open_ray: float = 0.0
+
+    # Pairwise PSQ bounding-sphere repulsion (NOT IN PAPER, friend's #4).
+    lambda_overlap: float = 0.0
 
     # Mask loss type: "bce" (paper) or "mse" (NaN-safe).
     # Round 11 discovery: BCE gradient -1/(1-m) at m→1 cascades into
@@ -141,6 +152,7 @@ class DualPrimConfig:
     view_prune_every_multiplier: int = 3    # view-prune cadence relative to pruning_interval
     view_prune_probe_rays: int = 8192
     view_prune_weight_threshold: float = 1e-3
+    view_prune_foreground_only: bool = True
     view_prune_min_foreground_rays: int = 256
     view_prune_min_distinct_views: int = 8
     opacity_reset_interval: int = 3000      # 3DGS-inspired; DualPrim cites similar pruning
@@ -204,6 +216,7 @@ class DualPrimConfig:
                                      # from "hung" in real time.
     checkpoint_interval: int = 5_000
     export_interval: int = 5_000             # intermediate mesh snapshots
+    log_shape_grad_stats: bool = False
 
     # ================================================================
     # Export cleanup / final refinement

@@ -45,7 +45,13 @@ from clearmesh.dualprim.types import (
     IDX_COLOR,
 )
 from clearmesh.dualprim.renderer import LightingMLP, render_rays
-from clearmesh.dualprim.losses import total_loss, total_loss_tsdf
+from clearmesh.dualprim.losses import (
+    loss_mask,
+    loss_norm_reg,
+    loss_rgb,
+    total_loss,
+    total_loss_tsdf,
+)
 
 
 # ---------------------------------------------------------------------
@@ -70,6 +76,18 @@ def init_scene(config: DualPrimConfig, device="cuda") -> DualPrimScene:
         params[:, IDX_ALPHA] = _uniform(*config.alpha_range, (K,))
         theta_lo = max(config.theta_min, 0.05)
         params[:, IDX_THETA] = _uniform(theta_lo, config.sharpness_range[1], (K,))
+    elif config.init_profile == "paper_table":
+        # Paper Table "primitive_init": fixed initial scale / shape /
+        # opacity / sharpness, with random placement handled below.
+        # Keep this separate from "paper_random": the latter samples
+        # broadly across Table 1 ranges and is useful as a stress test,
+        # but it is not the table-style initialization.
+        init_s_hi = s_hi
+        params[:, IDX_PSQ_SCALE] = torch.full((K, 3), 0.1, device=device)
+        params[:, IDX_PSQ_SHAPE] = torch.ones((K, 2), device=device)
+        params[:, IDX_NSQ_SHAPE] = torch.ones((K, 2), device=device)
+        params[:, IDX_ALPHA] = torch.ones(K, device=device)
+        params[:, IDX_THETA] = torch.full((K,), 0.5, device=device)
     elif config.init_profile == "biased":
         # PSQ / NSQ scale — from config range, biased small initially
         init_s_hi = min(s_hi, 0.3)  # start compact so they don't cover the whole cube
@@ -130,14 +148,20 @@ def init_scene(config: DualPrimConfig, device="cuda") -> DualPrimScene:
         params[:, IDX_NSQ_ROTATION] = params[:, IDX_PSQ_ROTATION].clone()
     elif config.nsq_init_strategy == "independent":
         # Paper-faithful: NSQ random in [-1,1]^3, scale independent.
-        params[:, IDX_NSQ_SCALE] = _uniform(s_lo, init_s_hi, (K, 3))
+        if config.init_profile == "paper_table":
+            params[:, IDX_NSQ_SCALE] = torch.full((K, 3), 0.1, device=device)
+        else:
+            params[:, IDX_NSQ_SCALE] = _uniform(s_lo, init_s_hi, (K, 3))
         params[:, IDX_NSQ_TRANSLATION] = _uniform(t_lo, t_hi, (K, 3))
         params[:, IDX_NSQ_ROTATION] = _uniform(-math.pi, math.pi, (K, 3))
     else:
         raise ValueError(f"unknown nsq_init_strategy: {config.nsq_init_strategy}")
 
-    # Color — mid-grey
-    params[:, IDX_COLOR] = _uniform(0.4, 0.6, (K, 3))
+    if config.init_profile == "paper_table":
+        params[:, IDX_COLOR] = _uniform(*config.color_range, (K, 3))
+    else:
+        # Color — mid-grey
+        params[:, IDX_COLOR] = _uniform(0.4, 0.6, (K, 3))
 
     params.requires_grad_(True)
     mlp = LightingMLP(
@@ -678,7 +702,9 @@ class RaySampleBatch:
         rgb_gt: torch.Tensor,       # (R, 3)
         mask_gt: torch.Tensor,      # (R,)
         normals_gt: torch.Tensor,   # (R, 3)
+        depth_gt: Optional[torch.Tensor] = None,  # (R,)
         hole_ray_gt: Optional[torch.Tensor] = None,  # (R,) bool
+        edge_weight_gt: Optional[torch.Tensor] = None,  # (R,) float/bool
         view_idx: Optional[torch.Tensor] = None,     # (R,) long
     ):
         self.origins = origins
@@ -686,7 +712,9 @@ class RaySampleBatch:
         self.rgb_gt = rgb_gt
         self.mask_gt = mask_gt
         self.normals_gt = normals_gt
+        self.depth_gt = depth_gt
         self.hole_ray_gt = hole_ray_gt
+        self.edge_weight_gt = edge_weight_gt
         self.view_idx = view_idx
 
 
@@ -764,6 +792,7 @@ def train(
     # labels "slow" as "hung". Heartbeat fixes that categorically.
     HEARTBEAT_S = 60.0
     last_heartbeat = time.time()
+    prev_shape_grad_eps_by_idx: dict[int, float] = {}
 
     for it in range(config.num_iterations):
         batch = ray_sampler(rays_per_batch)
@@ -784,6 +813,8 @@ def train(
                     scene,
                     batch.origins, batch.dirs,
                     num_samples=config.num_samples_per_ray,
+                    sampling_mode=getattr(config, "sampling_mode", "uniform"),
+                    num_importance_samples=getattr(config, "num_importance_samples_per_ray", 0),
                     near=config.near_plane,
                     far=config.far_plane,
                     delta_p=config.delta_p_value,
@@ -794,6 +825,7 @@ def train(
                     final_normal_normalize=config.final_normal_normalize,
                     mu=mu_eff,
                     theta_min=theta_min_eff,
+                    theta_min_nsq=getattr(config, 'theta_min_nsq', config.theta_min),  # friend's #1
                     gate_mode=config.gate_mode,
                     paper_literal_theta_eps=config.paper_literal_theta_eps,
                     background=config.background_color,
@@ -805,14 +837,22 @@ def train(
                     scene, render,
                     rgb_gt=batch.rgb_gt, mask_gt=batch.mask_gt,
                     normals_pred=batch.normals_gt,
+                    depth_gt=getattr(batch, "depth_gt", None),
                     lambda_mask=config.lambda_mask,
                     lambda_sparse=config.lambda_sparse,
                     lambda_entropy=config.lambda_entropy,
                     lambda_max=config.lambda_max,
                     lambda_norm_reg=lambda_norm_eff,
+                    lambda_depth=getattr(config, "lambda_depth", 0.0),
                     lambda_open_ray=config.lambda_open_ray,
+                    lambda_overlap=getattr(config, "lambda_overlap", 0.0),
+                    lambda_edge_mask=getattr(config, "lambda_edge_mask", 0.0),
+                    lambda_shape_box=getattr(config, "lambda_shape_box", 0.0),
+                    shape_box_threshold=getattr(config, "shape_box_threshold", 0.30),
                     hole_ray_gt=getattr(batch, "hole_ray_gt", None),
+                    edge_weight_gt=getattr(batch, "edge_weight_gt", None),
                     mask_loss_type=getattr(config, "mask_loss_type", "bce"),
+                    normal_loss_type=getattr(config, "normal_loss_type", "l1"),
                     masked_loss_norm_mode=getattr(config, "masked_loss_norm_mode", "global_mean"),
                     primitive_reg_average_mode=getattr(config, "primitive_reg_average_mode", "alive"),
                 )
@@ -820,6 +860,52 @@ def train(
 
                 t0 = time.time()
                 optimizer.zero_grad()
+                audit_shape_grads = bool(getattr(config, "log_shape_grad_stats", False)) and (it % config.log_interval == 0)
+                audit_cache = None
+                if audit_shape_grads:
+                    alive_idx = scene.alive.nonzero(as_tuple=True)[0]
+                    if alive_idx.numel() > 0:
+                        eps_alive = scene.psq_shape().detach()[alive_idx].mean(dim=-1)
+                        theta_alive = scene.theta().detach()[alive_idx]
+
+                        def _component_grad(component_loss: torch.Tensor) -> torch.Tensor:
+                            grad = torch.autograd.grad(
+                                component_loss,
+                                scene.params,
+                                retain_graph=True,
+                                allow_unused=False,
+                            )[0]
+                            return grad.detach()[alive_idx, 6:8].mean(dim=-1)
+
+                        audit_cache = {
+                            "alive_idx": alive_idx.detach(),
+                            "eps_alive": eps_alive.detach(),
+                            "theta_alive": theta_alive.detach(),
+                            "rgb_signed": _component_grad(
+                                loss_rgb(
+                                    render,
+                                    batch.rgb_gt,
+                                    batch.mask_gt,
+                                    norm_mode=getattr(config, "masked_loss_norm_mode", "global_mean"),
+                                )
+                            ),
+                            "mask_signed": _component_grad(
+                                loss_mask(
+                                    render,
+                                    batch.mask_gt,
+                                    loss_type=getattr(config, "mask_loss_type", "bce"),
+                                )
+                            ),
+                            "norm_signed": _component_grad(
+                                loss_norm_reg(
+                                    render,
+                                    batch.normals_gt,
+                                    batch.mask_gt,
+                                    norm_mode=getattr(config, "masked_loss_norm_mode", "global_mean"),
+                                    loss_type=getattr(config, "normal_loss_type", "l1"),
+                                )
+                            ),
+                        }
                 # Skip the step if loss or grads are non-finite (NaN protection).
                 # sq_implicit can still produce huge finite values near ε=0.05
                 # that, combined with the softmin, occasionally overflow. The
@@ -832,6 +918,41 @@ def train(
                         log_fn(it, parts)
                     continue
                 loss.backward()
+                if audit_shape_grads and audit_cache is not None and scene.params.grad is not None:
+                    alive_idx = audit_cache["alive_idx"]
+                    eps_alive = audit_cache["eps_alive"]
+                    theta_alive = audit_cache["theta_alive"]
+                    total_signed = scene.params.grad.detach()[alive_idx, 6:8].mean(dim=-1)
+                    total_abs = scene.params.grad.detach()[alive_idx, 6:8].abs().mean(dim=-1)
+                    delta_eps = []
+                    for idx, eps_val in zip(alive_idx.detach().cpu().tolist(), eps_alive.detach().cpu().tolist()):
+                        prev = prev_shape_grad_eps_by_idx.get(int(idx))
+                        delta_eps.append(None if prev is None else float(eps_val - prev))
+                        prev_shape_grad_eps_by_idx[int(idx)] = float(eps_val)
+                    order = torch.argsort(eps_alive)
+                    order_cpu = order.detach().cpu().tolist()
+                    parts["shape_grad_alive_idx"] = alive_idx[order].detach().cpu().tolist()
+                    parts["shape_grad_alive_eps_mean"] = eps_alive[order].detach().cpu().tolist()
+                    parts["shape_grad_alive_theta"] = theta_alive[order].detach().cpu().tolist()
+                    parts["shape_grad_alive_abs_mean"] = total_abs[order].detach().cpu().tolist()
+                    parts["shape_grad_alive_signed_total"] = total_signed[order].detach().cpu().tolist()
+                    parts["shape_grad_alive_signed_rgb"] = audit_cache["rgb_signed"][order].detach().cpu().tolist()
+                    parts["shape_grad_alive_signed_mask"] = audit_cache["mask_signed"][order].detach().cpu().tolist()
+                    parts["shape_grad_alive_signed_norm"] = audit_cache["norm_signed"][order].detach().cpu().tolist()
+                    parts["shape_grad_alive_signed_rgb_weighted"] = audit_cache["rgb_signed"][order].detach().cpu().tolist()
+                    parts["shape_grad_alive_signed_mask_weighted"] = (
+                        config.lambda_mask * audit_cache["mask_signed"][order]
+                    ).detach().cpu().tolist()
+                    parts["shape_grad_alive_signed_norm_weighted"] = (
+                        lambda_norm_eff * audit_cache["norm_signed"][order]
+                    ).detach().cpu().tolist()
+                    parts["shape_delta_alive_eps_mean"] = [delta_eps[i] for i in order_cpu]
+                    parts["shape_grad_abs_p10"] = float(torch.quantile(total_abs, 0.1).item())
+                    parts["shape_grad_abs_p50"] = float(torch.quantile(total_abs, 0.5).item())
+                    parts["shape_grad_abs_p90"] = float(torch.quantile(total_abs, 0.9).item())
+                    parts["shape_grad_signed_p10"] = float(torch.quantile(total_signed, 0.1).item())
+                    parts["shape_grad_signed_p50"] = float(torch.quantile(total_signed, 0.5).item())
+                    parts["shape_grad_signed_p90"] = float(torch.quantile(total_signed, 0.9).item())
         except RuntimeError:
             print(
                 f"[trace_fail] it={it} theta_min_eff={theta_min_eff:.4f} "
@@ -877,6 +998,14 @@ def train(
         if scheduler is not None:
             scheduler.step()
         clip_to_ranges(scene, config)
+        if audit_shape_grads and audit_cache is not None:
+            alive_idx = audit_cache["alive_idx"]
+            eps_before = audit_cache["eps_alive"]
+            eps_after = scene.psq_shape().detach()[alive_idx].mean(dim=-1)
+            order = torch.argsort(eps_before)
+            parts["shape_step_delta_alive_eps_mean"] = (
+                eps_after[order] - eps_before[order]
+            ).detach().cpu().tolist()
         timings["step"] += time.time() - t0
 
         # Heartbeat — unconditional "I'm alive" signal independent of
@@ -910,6 +1039,7 @@ def train(
                     scene, ray_sampler, config,
                     num_probe_rays=min(config.view_prune_probe_rays, rays_per_batch * 8),
                     weight_threshold=config.view_prune_weight_threshold,
+                    foreground_only=getattr(config, "view_prune_foreground_only", True),
                     min_foreground_rays=config.view_prune_min_foreground_rays,
                     min_distinct_views=config.view_prune_min_distinct_views,
                     mu=mu_eff,
@@ -931,6 +1061,16 @@ def train(
             parts["theta_min_eff"] = theta_min_eff
             parts["mu_gate_eff"] = mu_eff
             parts["lambda_norm_eff"] = lambda_norm_eff
+            if scene.num_alive > 0:
+                psq_eps_alive = scene.psq_shape()[scene.alive].reshape(-1)
+                eps_q = torch.quantile(
+                    psq_eps_alive,
+                    torch.tensor([0.1, 0.5, 0.9], device=psq_eps_alive.device),
+                )
+                parts["eps_psq_mean"] = float(psq_eps_alive.mean().item())
+                parts["eps_psq_p10"] = float(eps_q[0].item())
+                parts["eps_psq_p50"] = float(eps_q[1].item())
+                parts["eps_psq_p90"] = float(eps_q[2].item())
             # Cheap diagnostics at every log step; expensive P_E probe
             # only every 4th log step.
             probe_this_step = (it % (config.log_interval * 4) == 0)

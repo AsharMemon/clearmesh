@@ -76,6 +76,30 @@ def loss_mask(
     return F.binary_cross_entropy(m, mask_gt)
 
 
+def loss_edge_mask(
+    render: RenderOutput,
+    mask_gt: torch.Tensor,
+    edge_weight_gt: torch.Tensor | None,
+    eps: float = 1e-6,
+    loss_type: str = "bce",
+) -> torch.Tensor:
+    """Extra mask loss on silhouette/boundary rays.
+
+    This is not in the paper. It is a hard-surface diagnostic: ordinary
+    RGB/mask supervision can fit a cuboid silhouette with rounded SQs,
+    so we add focused pressure exactly where sharp edges are visible.
+    """
+    if edge_weight_gt is None or edge_weight_gt.sum() <= 0:
+        return render.mask.sum() * 0
+    w = edge_weight_gt.to(render.mask.dtype)
+    if loss_type == "mse":
+        per = (render.mask - mask_gt).pow(2)
+    else:
+        m = render.mask.clamp(eps, 1.0 - eps)
+        per = F.binary_cross_entropy(m, mask_gt, reduction="none")
+    return (per * w).sum() / (w.sum() + eps)
+
+
 def loss_sparsity(
     scene: DualPrimScene,
     *,
@@ -120,16 +144,89 @@ def loss_max(
     return num / den
 
 
+def loss_shape_box(
+    scene: DualPrimScene,
+    *,
+    threshold: float = 0.30,
+    average_mode: str = "alive",
+) -> torch.Tensor:
+    """One-sided PSQ ε prior for hard-surface diagnostics.
+
+    Penalizes only ε above `threshold`; below it, the term is zero. This
+    lets us test whether the optimizer merely needs a small anti-rounding
+    bias, without forcing already-boxy primitives lower.
+    """
+    eps_vals = scene.psq_shape()
+    alive = scene.alive.to(eps_vals.dtype).unsqueeze(-1)
+    penalty = F.relu(eps_vals - threshold)
+    num = (penalty * alive).sum()
+    den = (scene.K * eps_vals.shape[-1]) if average_mode == "fixed_k" else alive.sum() * eps_vals.shape[-1] + 1e-8
+    return num / den
+
+
 def loss_norm_reg(
     render: RenderOutput,
     normals_pred: torch.Tensor,    # (R, 3) — from StableNormal or analytic
     mask_gt: torch.Tensor,         # (R,)
     *,
     norm_mode: str = "global_mean",
+    loss_type: str = "l1",
 ) -> torch.Tensor:
-    """Eq 18 — masked L1 on surface normals."""
-    diff = (render.normals - normals_pred).abs().sum(dim=-1)
+    """Eq 18 — masked surface-normal consistency."""
+    if loss_type == "angular":
+        nr = F.normalize(render.normals, dim=-1, eps=1e-6)
+        ng = F.normalize(normals_pred, dim=-1, eps=1e-6)
+        diff = 1.0 - (nr * ng).sum(dim=-1).clamp(-1.0, 1.0)
+    else:
+        diff = (render.normals - normals_pred).abs().sum(dim=-1)
     return _masked_reduce(diff, mask_gt, mode=norm_mode)
+
+
+def loss_depth(
+    render: RenderOutput,
+    depth_gt: torch.Tensor,         # (R,) expected foreground depth
+    mask_gt: torch.Tensor,          # (R,)
+    *,
+    norm_mode: str = "fg_mean",
+) -> torch.Tensor:
+    """Synthetic GT depth diagnostic.
+
+    This is not in the DualPrim paper. It targets the r45 failure mode:
+    RGB/mask/normal supervision can prefer a rounded ε≈0.5 solution even
+    when a sharp ε≈0.1 solution is used as initialization. Depth supplies
+    dense O(N^2) hard-surface signal over visible faces, not just O(N)
+    silhouette signal.
+    """
+    if depth_gt is None:
+        return render.mask.sum() * 0
+    if render.depth is None:
+        return render.mask.sum() * 0
+    diff = (render.depth - depth_gt).abs()
+    return _masked_reduce(diff, mask_gt, mode=norm_mode)
+
+
+def loss_overlap(scene: DualPrimScene) -> torch.Tensor:
+    """Pairwise PSQ bounding-sphere repulsion (friend's #4 audit fix).
+
+       overlap_ij = ReLU(r_i + r_j - ||t_i - t_j||) ** 2
+    where r_i = max(psq_scale[i, :]) is the conservative bounding radius.
+    """
+    K = scene.K
+    if K < 2 or scene.alive.sum().item() < 2:
+        return scene.params.new_zeros(())
+    scales = scene.psq_scale()              # (K, 3)
+    translations = scene.psq_translation()  # (K, 3)
+    radii = scales.amax(dim=-1)             # (K,)
+    diffs = translations.unsqueeze(0) - translations.unsqueeze(1)
+    dists = diffs.norm(dim=-1)              # (K, K)
+    radius_sums = radii.unsqueeze(0) + radii.unsqueeze(1)
+    overlap = torch.relu(radius_sums - dists)
+    alive_f = scene.alive.to(scales.dtype)
+    pair_mask = alive_f.unsqueeze(0) * alive_f.unsqueeze(1)
+    diag_mask = 1.0 - torch.eye(K, device=scales.device, dtype=scales.dtype)
+    pair_mask = pair_mask * diag_mask
+    n_pairs = pair_mask.sum() + 1e-8
+    return (overlap.pow(2) * pair_mask).sum() / n_pairs
 
 
 def loss_open_ray(
@@ -319,17 +416,25 @@ def total_loss(
     rgb_gt: torch.Tensor,
     mask_gt: torch.Tensor,
     normals_pred: torch.Tensor,
+    depth_gt: torch.Tensor | None = None,
     *,
     lambda_mask: float = 1.0,
     lambda_sparse: float = 0.01,
     lambda_entropy: float = 0.01,
     lambda_max: float = 0.1,
     lambda_norm_reg: float = 0.1,
+    lambda_depth: float = 0.0,
     lambda_open_ray: float = 0.0,
+    lambda_overlap: float = 0.0,
+    lambda_edge_mask: float = 0.0,
+    lambda_shape_box: float = 0.0,
+    shape_box_threshold: float = 0.30,
     hole_ray_gt=None,
+    edge_weight_gt=None,
     mask_loss_type: str = "bce",
     masked_loss_norm_mode: str = "global_mean",
     primitive_reg_average_mode: str = "alive",
+    normal_loss_type: str = "l1",
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Eq 12 — weighted sum of the 6 terms + optional open-ray loss.
 
@@ -340,9 +445,32 @@ def total_loss(
     l_sp = loss_sparsity(scene, average_mode=primitive_reg_average_mode)
     l_e = loss_entropy(scene, average_mode=primitive_reg_average_mode)
     l_max = loss_max(scene, average_mode=primitive_reg_average_mode)
-    l_norm = loss_norm_reg(render, normals_pred, mask_gt, norm_mode=masked_loss_norm_mode)
+    l_edge = (
+        loss_edge_mask(render, mask_gt, edge_weight_gt, loss_type=mask_loss_type)
+        if lambda_edge_mask > 0 else render.mask.new_zeros(())
+    )
+    l_shape_box = (
+        loss_shape_box(
+            scene,
+            threshold=shape_box_threshold,
+            average_mode=primitive_reg_average_mode,
+        )
+        if lambda_shape_box > 0 else render.mask.new_zeros(())
+    )
+    l_norm = loss_norm_reg(
+        render,
+        normals_pred,
+        mask_gt,
+        norm_mode=masked_loss_norm_mode,
+        loss_type=normal_loss_type,
+    )
+    l_depth = (
+        loss_depth(render, depth_gt, mask_gt, norm_mode="fg_mean")
+        if lambda_depth > 0 else render.mask.new_zeros(())
+    )
     # New: topology-aware open-ray loss (zero if no hole rays provided)
     l_open = loss_open_ray(render, hole_ray_gt) if lambda_open_ray > 0 else render.mask.new_zeros(())
+    l_overlap = loss_overlap(scene) if lambda_overlap > 0 else render.mask.new_zeros(())
 
     total = (
         l_rgb
@@ -351,7 +479,11 @@ def total_loss(
         + lambda_entropy * l_e
         + lambda_max * l_max
         + lambda_norm_reg * l_norm
+        + lambda_depth * l_depth
         + lambda_open_ray * l_open
+        + lambda_overlap * l_overlap
+        + lambda_edge_mask * l_edge
+        + lambda_shape_box * l_shape_box
     )
     parts = {
         "rgb": l_rgb.item(),
@@ -360,7 +492,11 @@ def total_loss(
         "entropy": l_e.item(),
         "max": l_max.item(),
         "norm": l_norm.item(),
+        "depth": l_depth.item(),
         "open": l_open.item(),
+        "overlap": l_overlap.item(),
+        "edge_mask": l_edge.item(),
+        "shape_box": l_shape_box.item(),
         "total": total.item(),
     }
     return total, parts

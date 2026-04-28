@@ -110,20 +110,77 @@ def sample_ray_points(
         rand = torch.rand_like(t_vals)
         t_vals = lower + (upper - lower) * rand
 
+    points, _, deltas = _points_and_deltas_from_t_vals(
+        ray_origins, ray_dirs, t_vals, fallback_delta=far - near,
+    )
+    return points, t_vals, deltas
+
+
+def _points_and_deltas_from_t_vals(
+    ray_origins: torch.Tensor,
+    ray_dirs: torch.Tensor,
+    t_vals: torch.Tensor,
+    *,
+    fallback_delta: float,
+):
     points = ray_origins.unsqueeze(1) + t_vals.unsqueeze(-1) * ray_dirs.unsqueeze(1)
-    # deltas: distance between adjacent samples
     deltas = torch.diff(t_vals, dim=-1)
     # Paper Eq 1 defines δ_i as adjacent sample spacing. The previous
     # NeRF-style 1e10 tail distance forces the final alpha to 1 for any
     # non-zero terminal density, which is especially destructive for
     # hole rays: a tiny stray sigma at the far sample makes the entire
     # ray opaque. Reuse the last finite interval instead.
-    if N > 1:
+    if t_vals.shape[-1] > 1:
         last = deltas[:, -1:]
     else:
-        last = torch.full_like(t_vals[:, :1], far - near)
+        last = torch.full_like(t_vals[:, :1], fallback_delta)
     deltas = torch.cat([deltas, last], dim=-1)
     return points, t_vals, deltas
+
+
+def _sample_pdf(
+    bins: torch.Tensor,
+    weights: torch.Tensor,
+    n_samples: int,
+    *,
+    perturb: bool = True,
+    eps: float = 1e-5,
+) -> torch.Tensor:
+    """Inverse-CDF samples from per-ray piecewise-constant weights.
+
+    bins: (R, M+1) sorted ray distances.
+    weights: (R, M) non-negative interval weights.
+    returns: (R, n_samples) distances in [bins[:,0], bins[:,-1]].
+    """
+    if n_samples <= 0:
+        return bins[:, :0]
+    weights = weights + eps
+    pdf = weights / weights.sum(dim=-1, keepdim=True).clamp(min=eps)
+    cdf = torch.cumsum(pdf, dim=-1)
+    cdf = torch.cat([torch.zeros_like(cdf[:, :1]), cdf], dim=-1)
+    cdf[:, -1] = 1.0
+
+    R = bins.shape[0]
+    if perturb:
+        u = torch.rand(R, n_samples, device=bins.device, dtype=bins.dtype)
+    else:
+        u = torch.linspace(
+            0.5 / n_samples,
+            1.0 - 0.5 / n_samples,
+            n_samples,
+            device=bins.device,
+            dtype=bins.dtype,
+        ).expand(R, n_samples)
+
+    inds = torch.searchsorted(cdf.contiguous(), u.contiguous(), right=True)
+    below = (inds - 1).clamp(min=0)
+    above = inds.clamp(max=cdf.shape[-1] - 1)
+    gather_idx = torch.stack([below, above], dim=-1)
+    cdf_g = torch.gather(cdf.unsqueeze(1).expand(-1, n_samples, -1), 2, gather_idx)
+    bins_g = torch.gather(bins.unsqueeze(1).expand(-1, n_samples, -1), 2, gather_idx)
+    denom = (cdf_g[..., 1] - cdf_g[..., 0]).clamp(min=eps)
+    t = (u - cdf_g[..., 0]) / denom
+    return bins_g[..., 0] + t * (bins_g[..., 1] - bins_g[..., 0])
 
 
 # ---------------------------------------------------------------------
@@ -173,7 +230,7 @@ def density_from_field(
     f_fwd: torch.Tensor,     # f at sample + Δp (..., K)
     f_bwd: torch.Tensor,     # f at sample − Δp (..., K)
     theta: torch.Tensor,     # (K,)
-    eps: float = 1e-8,
+    eps: float = 1e-5,  # friend's audit fix #2: raised from 1e-8
     theta_min: float = 0.01,
     gate_mode: str = "stabilized",
     paper_literal_theta_eps: float = 1e-6,
@@ -225,6 +282,7 @@ class RenderOutput(NamedTuple):
     rgb: torch.Tensor       # (R, 3)
     mask: torch.Tensor      # (R,) in [0, 1]
     normals: torch.Tensor   # (R, 3)
+    depth: torch.Tensor     # (R,) expected foreground depth along the ray
     opacity: torch.Tensor   # (R,) in [0, 1] — same as mask, kept for clarity
 
 
@@ -234,6 +292,8 @@ def render_rays(
     ray_dirs: torch.Tensor,
     *,
     num_samples: int = 64,
+    sampling_mode: str = "uniform",
+    num_importance_samples: int = 0,
     near: float = 0.1,
     far: float = 4.0,
     delta_p: float = 0.01,      # Eq 7 finite-diff step; NOT SPECIFIED IN PAPER
@@ -244,6 +304,7 @@ def render_rays(
     final_normal_normalize: bool = True,
     mu: float = 0.0,
     theta_min: float = 0.01,
+    theta_min_nsq: float = 0.01,  # friend's #1
     gate_mode: str = "stabilized",
     paper_literal_theta_eps: float = 1e-6,
     background: tuple = (1.0, 1.0, 1.0),
@@ -263,6 +324,55 @@ def render_rays(
     )
     # points: (R, N, 3)
 
+    if sampling_mode == "hierarchical" and num_importance_samples > 0 and num_samples > 1:
+        with torch.no_grad():
+            dp_coarse = _delta_p_offsets(
+                ray_dirs, deltas,
+                delta_p=delta_p,
+                delta_p_mode=delta_p_mode,
+                delta_p_scale=delta_p_scale,
+            )
+            f_fwd_coarse = _scene_field(
+                scene, points + dp_coarse, mu, theta_min,
+                gate_mode=gate_mode,
+                paper_literal_theta_eps=paper_literal_theta_eps,
+            )
+            f_bwd_coarse = _scene_field(
+                scene, points - dp_coarse, mu, theta_min,
+                gate_mode=gate_mode,
+                paper_literal_theta_eps=paper_literal_theta_eps,
+            )
+            sigma_k_coarse = density_from_field(
+                f_fwd_coarse, f_bwd_coarse, scene.theta(), theta_min=theta_min,
+                gate_mode=gate_mode,
+                paper_literal_theta_eps=paper_literal_theta_eps,
+            )
+            alive = scene.alive.to(sigma_k_coarse.dtype)
+            alpha_k = scene.alpha().clamp(0.0, 1.0)
+            sigma_coarse = (
+                sigma_k_coarse * (alpha_k * alive).view(1, 1, -1)
+            ).sum(dim=-1)
+            optical_coarse = torch.nan_to_num(
+                sigma_coarse * deltas, nan=0.0, posinf=80.0, neginf=0.0,
+            )
+            alpha_coarse = 1.0 - torch.exp(-optical_coarse.clamp(min=0.0, max=80.0))
+            alpha_coarse = torch.nan_to_num(
+                alpha_coarse, nan=0.0, posinf=1.0, neginf=0.0,
+            ).clamp(0.0, 1.0)
+            weights_coarse = alpha_coarse * _accumulated_transmittance(alpha_coarse)
+            interval_weights = 0.5 * (
+                weights_coarse[:, :-1] + weights_coarse[:, 1:]
+            )
+            fine_t = _sample_pdf(
+                t_vals, interval_weights, num_importance_samples, perturb=perturb,
+            )
+            t_vals, _ = torch.sort(torch.cat([t_vals, fine_t], dim=-1), dim=-1)
+        points, _, deltas = _points_and_deltas_from_t_vals(
+            ray_origins, ray_dirs, t_vals, fallback_delta=far - near,
+        )
+    elif sampling_mode != "uniform":
+        raise ValueError(f"unknown sampling_mode: {sampling_mode}")
+
     # Forward/backward for Eq 7 finite diff along ray.
     # Paper's Eq 7 denominator is the FORWARD point, not the midpoint,
     # so we don't need to evaluate the field at the midpoint here.
@@ -277,11 +387,13 @@ def render_rays(
 
     f_fwd = _scene_field(
         scene, pts_fwd, mu, theta_min,
+        theta_min_nsq=theta_min_nsq,  # friend's #1
         gate_mode=gate_mode,
         paper_literal_theta_eps=paper_literal_theta_eps,
     )   # (R, N, K)
     f_bwd = _scene_field(
         scene, pts_bwd, mu, theta_min,
+        theta_min_nsq=theta_min_nsq,  # friend's #1
         gate_mode=gate_mode,
         paper_literal_theta_eps=paper_literal_theta_eps,
     )
@@ -341,6 +453,7 @@ def render_rays(
     # roughly in half on profiling.
     normals_per_sample = _scene_normal(
         scene, points, sigma_k, sigma_k_weighted, sigma_plain, sigma, mu, theta_min,
+        theta_min_nsq=theta_min_nsq,  # friend's #1
         point_normal_weight_mode=point_normal_weight_mode,
         gate_mode=gate_mode,
         paper_literal_theta_eps=paper_literal_theta_eps,
@@ -361,6 +474,10 @@ def render_rays(
 
     # ----- mask (Eq 9) -----
     mask = torch.nan_to_num(weights.sum(dim=1), nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+    depth = torch.nan_to_num(
+        (weights * t_vals).sum(dim=1) / mask.clamp(min=1e-8),
+        nan=0.0, posinf=far, neginf=near,
+    )
 
     normals = (weights.unsqueeze(-1) * normals_per_sample).sum(dim=1)
     if final_normal_normalize:
@@ -372,7 +489,7 @@ def render_rays(
     bg = torch.tensor(background, device=rgb.device, dtype=rgb.dtype)
     rgb = rgb + (1.0 - mask).unsqueeze(-1) * bg
 
-    return RenderOutput(rgb=rgb, mask=mask, normals=normals, opacity=mask)
+    return RenderOutput(rgb=rgb, mask=mask, normals=normals, depth=depth, opacity=mask)
 
 
 # ---------------------------------------------------------------------
@@ -385,6 +502,7 @@ def _scene_field(
     mu,
     theta_min,
     *,
+    theta_min_nsq: float = 0.01,  # friend's #1
     gate_mode: str = "stabilized",
     paper_literal_theta_eps: float = 1e-6,
 ):
@@ -398,6 +516,7 @@ def _scene_field(
     )
     p_e = effectiveness_probability(
         f_psq, f_nsq, scene.theta(), mu=mu, theta_min=theta_min,
+        theta_min_nsq=theta_min_nsq,  # friend's #1
         gate_mode=gate_mode,
         paper_literal_theta_eps=paper_literal_theta_eps,
     )
@@ -414,6 +533,7 @@ def _scene_normal(
     mu,
     theta_min,
     *,
+    theta_min_nsq: float = 0.01,  # friend's #1
     point_normal_weight_mode: str = "alpha_density",
     gate_mode: str = "stabilized",
     paper_literal_theta_eps: float = 1e-6,
@@ -437,6 +557,7 @@ def _scene_normal(
     )
     p_e = effectiveness_probability(
         f_psq, f_nsq, scene.theta(), mu=mu, theta_min=theta_min,
+        theta_min_nsq=theta_min_nsq,  # friend's #1
         gate_mode=gate_mode,
         paper_literal_theta_eps=paper_literal_theta_eps,
     )
