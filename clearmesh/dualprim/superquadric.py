@@ -303,6 +303,7 @@ def scene_combined_field(
     scene: DualPrimScene,
     mu: float = 0.0,
     theta_min: float = 0.01,
+    theta_min_nsq: float = 0.01,
     gate_mode: str = "stabilized",
     paper_literal_theta_eps: float = 1e-6,
     with_normals: bool = False,
@@ -330,6 +331,7 @@ def scene_combined_field(
     )
     p_e = effectiveness_probability(
         f_psq, f_nsq, scene.theta(), mu=mu, theta_min=theta_min,
+        theta_min_nsq=theta_min_nsq,
         gate_mode=gate_mode,
         paper_literal_theta_eps=paper_literal_theta_eps,
     )

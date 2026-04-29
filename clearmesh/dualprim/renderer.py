@@ -334,11 +334,13 @@ def render_rays(
             )
             f_fwd_coarse = _scene_field(
                 scene, points + dp_coarse, mu, theta_min,
+                theta_min_nsq=theta_min_nsq,
                 gate_mode=gate_mode,
                 paper_literal_theta_eps=paper_literal_theta_eps,
             )
             f_bwd_coarse = _scene_field(
                 scene, points - dp_coarse, mu, theta_min,
+                theta_min_nsq=theta_min_nsq,
                 gate_mode=gate_mode,
                 paper_literal_theta_eps=paper_literal_theta_eps,
             )

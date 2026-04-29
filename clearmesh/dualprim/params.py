@@ -135,6 +135,9 @@ class DualPrimConfig:
 
     # Pairwise PSQ bounding-sphere repulsion (NOT IN PAPER, friend's #4).
     lambda_overlap: float = 0.0
+    lambda_overlap_final: float | None = None
+    overlap_ramp_start_fraction: float = 0.4
+    overlap_ramp_end_fraction: float = 0.8
 
     # Mask loss type: "bce" (paper) or "mse" (NaN-safe).
     # Round 11 discovery: BCE gradient -1/(1-m) at m→1 cascades into

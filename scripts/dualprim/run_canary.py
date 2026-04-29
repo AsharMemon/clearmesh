@@ -269,6 +269,14 @@ def main():
                     help="Override the fraction of training used by the theta curriculum.")
     ap.add_argument("--lambda-overlap", type=float, default=None,
                     help="Pairwise PSQ bounding-sphere repulsion (friend's #4 audit fix).")
+    ap.add_argument("--lambda-overlap-final", type=float, default=None,
+                    help="Optional late-stage target for lambda_overlap. "
+                         "Use this to keep early anti-collapse pressure but "
+                         "relax final seams/contact.")
+    ap.add_argument("--overlap-ramp-start-fraction", type=float, default=None,
+                    help="Start fraction for the lambda_overlap ramp/decay.")
+    ap.add_argument("--overlap-ramp-end-fraction", type=float, default=None,
+                    help="End fraction for the lambda_overlap ramp/decay.")
     ap.add_argument("--lambda-open-ray", type=float, default=None,
                     help="Weight on the open-ray loss (round-7 addition). "
                          "Penalizes predicted mask > 0 on rays passing "
@@ -437,6 +445,12 @@ def main():
         config.theta_curriculum_fraction = args.theta_curriculum_fraction
     if args.lambda_overlap is not None:
         config.lambda_overlap = args.lambda_overlap
+    if args.lambda_overlap_final is not None:
+        config.lambda_overlap_final = args.lambda_overlap_final
+    if args.overlap_ramp_start_fraction is not None:
+        config.overlap_ramp_start_fraction = args.overlap_ramp_start_fraction
+    if args.overlap_ramp_end_fraction is not None:
+        config.overlap_ramp_end_fraction = args.overlap_ramp_end_fraction
     if args.lambda_open_ray is not None:
         config.lambda_open_ray = args.lambda_open_ray
     # Write the effective config for reproducibility
@@ -579,6 +593,8 @@ def main():
                 line += f" μ={parts['mu_gate_eff']:.2f}"
             if "lambda_norm_eff" in parts:
                 line += f" λn={parts['lambda_norm_eff']:.2f}"
+            if "lambda_overlap_eff" in parts:
+                line += f" λov={parts['lambda_overlap_eff']:.2f}"
             if "nsq_overlap_pct" in parts:
                 line += f" NSQ∩PSQ={parts['nsq_overlap_pct']:.0f}%"
             if "pe_mean_fg" in parts:

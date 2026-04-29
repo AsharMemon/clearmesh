@@ -343,11 +343,41 @@ def _norm_reg_schedule(config: DualPrimConfig, iteration: int) -> float:
     return (1.0 - alpha) * lam_start + alpha * lam_final
 
 
+def _overlap_schedule(config: DualPrimConfig, iteration: int) -> float:
+    """Optional decay/ramp for the PSQ overlap repulsion.
+
+    The overlap term is most useful early, when it breaks the
+    stacked-at-origin basin. Late in training it can fight legitimate
+    contact between adjacent body/lens primitives, so callers can ramp
+    it down after the layout has spread.
+    """
+    lam_start = config.lambda_overlap
+    lam_final = (
+        config.lambda_overlap
+        if config.lambda_overlap_final is None
+        else config.lambda_overlap_final
+    )
+    if lam_final == lam_start:
+        return lam_start
+
+    tot = max(config.num_iterations, 1)
+    frac = iteration / tot
+    start = config.overlap_ramp_start_fraction
+    end = max(start, config.overlap_ramp_end_fraction)
+    if frac <= start:
+        return lam_start
+    if frac >= end:
+        return lam_final
+    alpha = (frac - start) / max(end - start, 1e-9)
+    return (1.0 - alpha) * lam_start + alpha * lam_final
+
+
 def _dp_diagnostics(
     scene: DualPrimScene,
     ray_sampler: Optional["RaySampler"] = None,
     n_probe: int = 1024,
     theta_min_eff: float = 0.01,
+    theta_min_nsq: float = 0.01,
     mu: float = 0.0,
     gate_mode: str = "stabilized",
     paper_literal_theta_eps: float = 1e-6,
@@ -420,6 +450,7 @@ def _dp_diagnostics(
                 p_e = effectiveness_probability(
                     f_psq, f_nsq, scene.theta(),
                     mu=mu, theta_min=theta_min_eff,
+                    theta_min_nsq=theta_min_nsq,
                     gate_mode=gate_mode,
                     paper_literal_theta_eps=paper_literal_theta_eps,
                 )
@@ -538,11 +569,13 @@ def prune_view_dependent(
         )
         f_fwd = _scene_field(
             scene, points + dp, mu, theta_min,
+            theta_min_nsq=getattr(config, "theta_min_nsq", config.theta_min),
             gate_mode=config.gate_mode,
             paper_literal_theta_eps=config.paper_literal_theta_eps,
         )
         f_bwd = _scene_field(
             scene, points - dp, mu, theta_min,
+            theta_min_nsq=getattr(config, "theta_min_nsq", config.theta_min),
             gate_mode=config.gate_mode,
             paper_literal_theta_eps=config.paper_literal_theta_eps,
         )
@@ -804,6 +837,7 @@ def train(
         theta_min_eff = _theta_min_curriculum(config, it)
         mu_eff = _mu_gate_schedule(config, it)
         lambda_norm_eff = _norm_reg_schedule(config, it)
+        lambda_overlap_eff = _overlap_schedule(config, it)
 
         anomaly_ctx = torch.autograd.detect_anomaly(check_nan=True) if detect_anomaly else nullcontext()
         try:
@@ -845,7 +879,7 @@ def train(
                     lambda_norm_reg=lambda_norm_eff,
                     lambda_depth=getattr(config, "lambda_depth", 0.0),
                     lambda_open_ray=config.lambda_open_ray,
-                    lambda_overlap=getattr(config, "lambda_overlap", 0.0),
+                    lambda_overlap=lambda_overlap_eff,
                     lambda_edge_mask=getattr(config, "lambda_edge_mask", 0.0),
                     lambda_shape_box=getattr(config, "lambda_shape_box", 0.0),
                     shape_box_threshold=getattr(config, "shape_box_threshold", 0.30),
@@ -1061,6 +1095,7 @@ def train(
             parts["theta_min_eff"] = theta_min_eff
             parts["mu_gate_eff"] = mu_eff
             parts["lambda_norm_eff"] = lambda_norm_eff
+            parts["lambda_overlap_eff"] = lambda_overlap_eff
             if scene.num_alive > 0:
                 psq_eps_alive = scene.psq_shape()[scene.alive].reshape(-1)
                 eps_q = torch.quantile(
@@ -1078,6 +1113,7 @@ def train(
                 scene,
                 ray_sampler=ray_sampler if probe_this_step else None,
                 theta_min_eff=theta_min_eff,
+                theta_min_nsq=getattr(config, "theta_min_nsq", config.theta_min),
                 mu=mu_eff,
                 gate_mode=config.gate_mode,
                 paper_literal_theta_eps=config.paper_literal_theta_eps,
@@ -1183,6 +1219,7 @@ def train_mesh_fit(
             lambda_max=config.lambda_max,
             mu=config.mu_gate_offset,
             theta_min=theta_min_eff,
+            theta_min_nsq=getattr(config, "theta_min_nsq", config.theta_min),
             primitive_reg_average_mode=getattr(config, "primitive_reg_average_mode", "alive"),
         )
         timings["loss"] += time.time() - t0
@@ -1220,6 +1257,7 @@ def train_mesh_fit(
             diag = _dp_diagnostics(
                 scene, ray_sampler=None,
                 theta_min_eff=theta_min_eff,
+                theta_min_nsq=getattr(config, "theta_min_nsq", config.theta_min),
                 mu=config.mu_gate_offset,
             )
             parts.update(diag)

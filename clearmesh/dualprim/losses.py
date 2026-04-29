@@ -298,6 +298,7 @@ def loss_tsdf(
     *,
     mu: float = 0.0,
     theta_min: float = 0.01,
+    theta_min_nsq: float = 0.01,
     truncation: float = 0.1,
     beta: float = 8.0,
 ) -> torch.Tensor:
@@ -329,6 +330,7 @@ def loss_tsdf(
     from clearmesh.dualprim.superquadric import scene_combined_field
     f_comb = scene_combined_field(
         query_points, scene, mu=mu, theta_min=theta_min,
+        theta_min_nsq=theta_min_nsq,
     )   # (P, K)
 
     alpha = scene.alpha().clamp(0.0, 1.0)
@@ -372,6 +374,7 @@ def total_loss_tsdf(
     lambda_max: float = 0.1,
     mu: float = 0.0,
     theta_min: float = 0.01,
+    theta_min_nsq: float = 0.01,
     truncation: float = 0.1,
     primitive_reg_average_mode: str = "alive",
 ) -> tuple[torch.Tensor, dict[str, float]]:
@@ -384,7 +387,8 @@ def total_loss_tsdf(
     """
     l_tsdf = loss_tsdf(
         scene, query_points, target_sdf,
-        mu=mu, theta_min=theta_min, truncation=truncation,
+        mu=mu, theta_min=theta_min, theta_min_nsq=theta_min_nsq,
+        truncation=truncation,
     )
     l_sp = loss_sparsity(scene, average_mode=primitive_reg_average_mode)
     l_e = loss_entropy(scene, average_mode=primitive_reg_average_mode)
