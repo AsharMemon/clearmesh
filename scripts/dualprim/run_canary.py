@@ -958,6 +958,16 @@ def main():
     print(f"[canary] training done in {train_dt/60:.1f} min "
           f"— {scene.num_alive}/{config.num_primitives_init} alive")
 
+    # Save primitive params before export. Export can fail for ordinary
+    # mesh-backend reasons; the optimized primitive state is the expensive
+    # result and should survive regardless.
+    from clearmesh.dualprim.io import save_scene_json
+    save_scene_json(
+        scene, out_dir / "primitives.json",
+        iteration=config.num_iterations,
+        extra_metadata={"training_s": train_dt},
+    )
+
     # ----- Export -----
     export_mode = "union" if union_export else "concat-preview"
     print(f"[canary] exporting (α ≥ {config.export_alpha_threshold}, mode={export_mode})")
@@ -976,16 +986,6 @@ def main():
         f"[canary] export: components={export_summary['components']} "
         f"largest_faces={export_summary['largest_component_faces_pct']:.1%} "
         f"watertight={export_summary['watertight']}"
-    )
-
-    # Save primitive params (same format as trajectory snapshots for
-    # corpus-uniformity — downstream dataset loaders can treat the
-    # final primitives.json as just another snapshot keyed at iter==N).
-    from clearmesh.dualprim.io import save_scene_json
-    save_scene_json(
-        scene, out_dir / "primitives.json",
-        iteration=config.num_iterations,
-        extra_metadata={"training_s": train_dt},
     )
 
     detail_manifest = None

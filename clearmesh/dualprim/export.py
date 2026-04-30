@@ -164,6 +164,56 @@ def export_dual_primitive(
     return boolean_difference(psq, nsq, backend=backend)
 
 
+def _repair_for_boolean(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    """Best-effort topology repair before scene-level Boolean union."""
+    if len(mesh.faces) == 0:
+        return mesh
+    repaired = mesh.copy()
+    try:
+        repaired.process(validate=True)
+    except Exception:
+        pass
+    for name in ("remove_duplicate_faces", "remove_degenerate_faces", "remove_unreferenced_vertices"):
+        try:
+            getattr(repaired, name)()
+        except Exception:
+            pass
+    try:
+        repaired.fill_holes()
+    except Exception:
+        pass
+    try:
+        repaired.fix_normals()
+    except Exception:
+        pass
+    return repaired
+
+
+def _union_meshes(meshes: List[trimesh.Trimesh]) -> trimesh.Trimesh:
+    """Union repaired volume meshes, preferring manifold3d when available."""
+    if len(meshes) == 1:
+        return meshes[0]
+    try:
+        import manifold3d as m3d
+        acc = None
+        for mesh in meshes:
+            mm = m3d.Manifold(
+                m3d.Mesh(
+                    vert_properties=np.asarray(mesh.vertices, dtype=np.float32),
+                    tri_verts=np.asarray(mesh.faces, dtype=np.uint32),
+                )
+            )
+            acc = mm if acc is None else acc + mm
+        out_mesh = acc.to_mesh()
+        return trimesh.Trimesh(
+            vertices=np.asarray(out_mesh.vert_properties[:, :3]),
+            faces=np.asarray(out_mesh.tri_verts),
+            process=False,
+        )
+    except ImportError:
+        return trimesh.boolean.union(meshes)
+
+
 def export_scene(
     scene: DualPrimScene,
     config: DualPrimConfig,
@@ -208,13 +258,28 @@ def export_scene(
 
     if union_all:
         try:
-            scene_mesh = trimesh.boolean.union(per_prim)
+            union_inputs = []
+            rejected = []
+            for j, mesh in enumerate(per_prim):
+                repaired = _repair_for_boolean(mesh)
+                if len(repaired.faces) == 0:
+                    continue
+                if not repaired.is_volume:
+                    rejected.append(j)
+                    continue
+                union_inputs.append(repaired)
+            if rejected:
+                raise ValueError(
+                    f"{len(rejected)} per-primitive meshes are not volumes "
+                    f"after repair: {rejected[:12]}"
+                )
+            scene_mesh = _union_meshes(union_inputs) if union_inputs else trimesh.Trimesh()
         except Exception as e:
             if require_union:
                 raise RuntimeError(
-                    "DualPrim fused export failed. Install/use a robust "
-                    "boolean backend such as manifold3d, or rerun with "
-                    "--allow-preview-export for debug-only concatenation."
+                    "DualPrim fused export failed after per-primitive repair. "
+                    "Inspect per_prim_*.glb or rerun with --allow-preview-export "
+                    "for debug-only concatenation."
                 ) from e
             warnings.warn(f"[dualprim/export] union failed ({e}); concatenating")
             scene_mesh = trimesh.util.concatenate(per_prim)

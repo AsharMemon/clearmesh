@@ -1473,6 +1473,9 @@ def train(
             iteration=config.num_iterations,
         )
 
+    if checkpoint_path:
+        _save_checkpoint(scene, checkpoint_path, config.num_iterations)
+
     timings["total"] = time.time() - t_start
     return TrainingState(
         scene=scene, iteration=config.num_iterations,
