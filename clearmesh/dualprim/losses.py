@@ -23,6 +23,7 @@ import torch
 import torch.nn.functional as F
 
 from clearmesh.dualprim.renderer import RenderOutput
+from clearmesh.dualprim.superquadric import sq_implicit, effectiveness_probability
 from clearmesh.dualprim.types import DualPrimScene
 
 
@@ -205,6 +206,85 @@ def loss_depth(
     return _masked_reduce(diff, mask_gt, mode=norm_mode)
 
 
+def loss_nsq_carve(
+    scene: DualPrimScene,
+    render: RenderOutput,
+    ray_origins: torch.Tensor | None,
+    ray_dirs: torch.Tensor | None,
+    mask_gt: torch.Tensor,
+    *,
+    hole_ray_gt: torch.Tensor | None = None,
+    mu: float = 0.0,
+    theta_min: float = 0.01,
+    theta_min_nsq: float = 0.01,
+    gate_mode: str = "stabilized",
+    paper_literal_theta_eps: float = 1e-6,
+    num_samples: int = 5,
+    depth_band: float = 0.08,
+    residual_threshold: float = 0.05,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Encourage NSQs to become active Boolean cutters on false-positive rays.
+
+    This is a paper-mode auxiliary, not a paper-literal Eq. 12 term. It uses
+    only the paper's own signals: rendered mask, target mask, ray geometry, and
+    Eq. 4 effectiveness probability. Where the current model predicts matter
+    but the supervision says empty, minimizing this loss asks at least one
+    active PSQ/NSQ pair to raise P_E near the predicted depth, giving the NSQ
+    a direct gradient to become the subtractive "knife" instead of letting
+    additive PSQs mash together.
+    """
+    if ray_origins is None or ray_dirs is None:
+        return scene.params.sum() * 0
+    if scene.alive.sum().item() == 0:
+        return scene.params.sum() * 0
+
+    with torch.no_grad():
+        residual = (render.mask.detach() - mask_gt.detach()).clamp_min(0.0)
+        if hole_ray_gt is not None:
+            hole = hole_ray_gt.to(device=residual.device, dtype=torch.bool)
+            residual = torch.maximum(residual, render.mask.detach() * hole.to(residual.dtype))
+        keep = residual > residual_threshold
+    if not bool(keep.any().item()):
+        return scene.params.sum() * 0
+
+    origins = ray_origins[keep].detach()
+    dirs = ray_dirs[keep].detach()
+    weights = residual[keep].detach()
+    depth = render.depth[keep].detach().clamp_min(0.0)
+
+    n = max(int(num_samples), 1)
+    if n == 1:
+        offsets = torch.zeros(1, device=depth.device, dtype=depth.dtype)
+    else:
+        offsets = torch.linspace(-depth_band, depth_band, n, device=depth.device, dtype=depth.dtype)
+    t = (depth[:, None] + offsets[None, :]).clamp_min(0.0)
+    pts = origins[:, None, :] + dirs[:, None, :] * t[..., None]
+
+    f_psq = sq_implicit(
+        pts,
+        scene.psq_translation(), scene.psq_rotation(),
+        scene.psq_scale(), scene.psq_shape(),
+    ).detach()
+    f_nsq = sq_implicit(
+        pts,
+        scene.nsq_translation(), scene.nsq_rotation(),
+        scene.nsq_scale(), scene.nsq_shape(),
+    )
+    p_e = effectiveness_probability(
+        f_psq, f_nsq, scene.theta().detach(),
+        mu=mu,
+        theta_min=theta_min,
+        theta_min_nsq=theta_min_nsq,
+        gate_mode=gate_mode,
+        paper_literal_theta_eps=paper_literal_theta_eps,
+    )
+    active = (scene.alive.to(p_e.dtype) * scene.alpha().clamp(0.0, 1.0)).view(1, 1, -1)
+    pe_any = 1.0 - torch.exp(-(p_e * active).sum(dim=-1).clamp_min(0.0))
+    pe_ray = pe_any.amax(dim=1).clamp(eps, 1.0 - eps)
+    return (-(pe_ray.log()) * weights).sum() / (weights.sum() + eps)
+
+
 def loss_overlap(scene: DualPrimScene) -> torch.Tensor:
     """Pairwise PSQ bounding-sphere repulsion (friend's #4 audit fix).
 
@@ -227,6 +307,49 @@ def loss_overlap(scene: DualPrimScene) -> torch.Tensor:
     pair_mask = pair_mask * diag_mask
     n_pairs = pair_mask.sum() + 1e-8
     return (overlap.pow(2) * pair_mask).sum() / n_pairs
+
+
+def loss_region_ownership(
+    scene: DualPrimScene,
+    *,
+    anchor_margin: float = 1.0,
+    scale_growth: float = 1.5,
+    average_mode: str = "alive",
+) -> torch.Tensor:
+    """Soft local ownership prior for structured visual-hull initialization.
+
+    Marching-Primitives/SuperFit-style methods do not optimize an
+    unconstrained primitive soup: each primitive starts with local support.
+    This term keeps that support soft rather than hard-clamping params.
+    It is paper-mode compatible because the anchors come from masks and
+    cameras, not from hidden mesh geometry.
+    """
+    anchors = getattr(scene, "region_anchors", None)
+    region_scales = getattr(scene, "region_scales", None)
+    region_active = getattr(scene, "region_active", None)
+    if anchors is None or region_scales is None or region_active is None:
+        return scene.params.sum() * 0
+    alive = scene.alive & region_active.to(scene.alive.device)
+    if alive.sum().item() == 0:
+        return scene.params.sum() * 0
+
+    dtype = scene.params.dtype
+    alive_f = alive.to(dtype).unsqueeze(-1)
+    anchors = anchors.to(device=scene.params.device, dtype=dtype)
+    region_scales = region_scales.to(device=scene.params.device, dtype=dtype).clamp_min(1e-4)
+
+    radius = region_scales * max(float(anchor_margin), 1e-4)
+    psq_drift = F.relu((scene.psq_translation() - anchors).abs() - radius) / radius
+    nsq_drift = F.relu((scene.nsq_translation() - anchors).abs() - radius) / radius
+
+    scale_limit = region_scales * max(float(scale_growth), 1e-4)
+    psq_over = F.relu(scene.psq_scale() - scale_limit) / scale_limit
+    nsq_over = F.relu(scene.nsq_scale() - scale_limit) / scale_limit
+
+    penalty = psq_drift.pow(2) + 0.5 * nsq_drift.pow(2) + psq_over.pow(2) + 0.5 * nsq_over.pow(2)
+    num = (penalty * alive_f).sum()
+    den = (scene.K * penalty.shape[-1]) if average_mode == "fixed_k" else alive_f.sum() * penalty.shape[-1] + 1e-8
+    return num / den
 
 
 def loss_open_ray(
@@ -421,6 +544,8 @@ def total_loss(
     mask_gt: torch.Tensor,
     normals_pred: torch.Tensor,
     depth_gt: torch.Tensor | None = None,
+    ray_origins: torch.Tensor | None = None,
+    ray_dirs: torch.Tensor | None = None,
     *,
     lambda_mask: float = 1.0,
     lambda_sparse: float = 0.01,
@@ -429,16 +554,28 @@ def total_loss(
     lambda_norm_reg: float = 0.1,
     lambda_depth: float = 0.0,
     lambda_open_ray: float = 0.0,
+    lambda_nsq_carve: float = 0.0,
     lambda_overlap: float = 0.0,
+    lambda_region_ownership: float = 0.0,
     lambda_edge_mask: float = 0.0,
     lambda_shape_box: float = 0.0,
     shape_box_threshold: float = 0.30,
+    region_anchor_margin: float = 1.0,
+    region_scale_growth: float = 1.5,
     hole_ray_gt=None,
     edge_weight_gt=None,
     mask_loss_type: str = "bce",
     masked_loss_norm_mode: str = "global_mean",
     primitive_reg_average_mode: str = "alive",
     normal_loss_type: str = "l1",
+    mu: float = 0.0,
+    theta_min: float = 0.01,
+    theta_min_nsq: float = 0.01,
+    gate_mode: str = "stabilized",
+    paper_literal_theta_eps: float = 1e-6,
+    nsq_carve_samples: int = 5,
+    nsq_carve_depth_band: float = 0.08,
+    nsq_carve_residual_threshold: float = 0.05,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Eq 12 — weighted sum of the 6 terms + optional open-ray loss.
 
@@ -474,7 +611,35 @@ def total_loss(
     )
     # New: topology-aware open-ray loss (zero if no hole rays provided)
     l_open = loss_open_ray(render, hole_ray_gt) if lambda_open_ray > 0 else render.mask.new_zeros(())
+    l_nsq_carve = (
+        loss_nsq_carve(
+            scene,
+            render,
+            ray_origins,
+            ray_dirs,
+            mask_gt,
+            hole_ray_gt=hole_ray_gt,
+            mu=mu,
+            theta_min=theta_min,
+            theta_min_nsq=theta_min_nsq,
+            gate_mode=gate_mode,
+            paper_literal_theta_eps=paper_literal_theta_eps,
+            num_samples=nsq_carve_samples,
+            depth_band=nsq_carve_depth_band,
+            residual_threshold=nsq_carve_residual_threshold,
+        )
+        if lambda_nsq_carve > 0 else render.mask.new_zeros(())
+    )
     l_overlap = loss_overlap(scene) if lambda_overlap > 0 else render.mask.new_zeros(())
+    l_region = (
+        loss_region_ownership(
+            scene,
+            anchor_margin=region_anchor_margin,
+            scale_growth=region_scale_growth,
+            average_mode=primitive_reg_average_mode,
+        )
+        if lambda_region_ownership > 0 else render.mask.new_zeros(())
+    )
 
     total = (
         l_rgb
@@ -485,7 +650,9 @@ def total_loss(
         + lambda_norm_reg * l_norm
         + lambda_depth * l_depth
         + lambda_open_ray * l_open
+        + lambda_nsq_carve * l_nsq_carve
         + lambda_overlap * l_overlap
+        + lambda_region_ownership * l_region
         + lambda_edge_mask * l_edge
         + lambda_shape_box * l_shape_box
     )
@@ -498,7 +665,9 @@ def total_loss(
         "norm": l_norm.item(),
         "depth": l_depth.item(),
         "open": l_open.item(),
+        "nsq_carve": l_nsq_carve.item(),
         "overlap": l_overlap.item(),
+        "region": l_region.item(),
         "edge_mask": l_edge.item(),
         "shape_box": l_shape_box.item(),
         "total": total.item(),

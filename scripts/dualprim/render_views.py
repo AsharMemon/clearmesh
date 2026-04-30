@@ -18,6 +18,7 @@ world→camera.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -172,6 +173,44 @@ def _normalize_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
     return mesh
 
 
+def _file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _cache_key(
+    mesh_path: str,
+    *,
+    resolution: int,
+    distance: float,
+    yfov_deg: float,
+    n_sphere_views: int,
+    render_normals: bool,
+    bg_color: tuple,
+    add_hole_axis_views: bool,
+    n_hole_ring: int,
+    hole_tilt_deg: float,
+) -> dict:
+    path = Path(mesh_path)
+    return {
+        "version": 2,
+        "mesh_path": str(path.resolve()),
+        "mesh_sha256": _file_sha256(path),
+        "resolution": int(resolution),
+        "distance": float(distance),
+        "yfov_deg": float(yfov_deg),
+        "n_sphere_views": int(n_sphere_views),
+        "render_normals": bool(render_normals),
+        "bg_color": list(bg_color),
+        "add_hole_axis_views": bool(add_hole_axis_views),
+        "n_hole_ring": int(n_hole_ring),
+        "hole_tilt_deg": float(hole_tilt_deg),
+    }
+
+
 def render_views(
     mesh_path: str,
     out_dir: str,
@@ -194,10 +233,57 @@ def render_views(
     Recreating the scene each call sidesteps the problem at ~50 ms/view
     cost.
     """
-    import pyrender
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    expected_key = _cache_key(
+        mesh_path,
+        resolution=resolution,
+        distance=distance,
+        yfov_deg=yfov_deg,
+        n_sphere_views=n_sphere_views,
+        render_normals=render_normals,
+        bg_color=bg_color,
+        add_hole_axis_views=add_hole_axis_views,
+        n_hole_ring=n_hole_ring,
+        hole_tilt_deg=hole_tilt_deg,
+    )
 
+    # Thunder/EGL can fail after long queues even when the view cache is
+    # already complete. Reuse cached supervision views instead of
+    # needlessly creating a fresh OpenGL context. Cache reuse is keyed
+    # by mesh bytes and all render settings so stale views from a prior
+    # mesh/config cannot silently become supervision.
+    cached_meta = out / "views.json"
+    if cached_meta.exists():
+        try:
+            with open(cached_meta) as f:
+                cached = json.load(f)
+            if cached.get("cache_key") == expected_key:
+                n_cached = int(cached.get("n_views", len(cached.get("views", []))))
+                required = []
+                for i in range(n_cached):
+                    required.append(out / f"{i:02d}_rgb.png")
+                    required.append(out / f"{i:02d}_mask.png")
+                    required.append(out / f"{i:02d}_depth.npy")
+                    if render_normals:
+                        required.append(out / f"{i:02d}_normal.png")
+                if n_cached > 0 and all(p.exists() for p in required):
+                    print(f"[render_views] cache hit: reusing {n_cached} keyed views in {out}")
+                    return
+            else:
+                print(f"[render_views] cache miss: render settings or mesh changed for {out}")
+        except Exception as exc:
+            print(f"[render_views] ignoring unreadable cache metadata: {exc}")
+
+    stale_patterns = ("*_rgb.png", "*_mask.png", "*_normal.png", "*_normal_stablenormal.png", "*_depth.npy")
+    for pattern in stale_patterns:
+        for p in out.glob(pattern):
+            try:
+                p.unlink()
+            except FileNotFoundError:
+                pass
+
+    import pyrender
     mesh = trimesh.load(mesh_path, force="mesh")
     mesh = _normalize_mesh(mesh)
     mesh.fix_normals()   # ensure vertex_normals are present for _render_world_normals
@@ -236,6 +322,7 @@ def render_views(
 
         Image.fromarray(rgb).save(out / f"{i:02d}_rgb.png")
         Image.fromarray(mask).save(out / f"{i:02d}_mask.png")
+        np.save(out / f"{i:02d}_depth.npy", depth.astype(np.float32))
 
         if render_normals:
             normal_map = _render_world_normals(mesh, pose, resolution, yfov)
@@ -254,25 +341,33 @@ def render_views(
             "views": views,
             "camera": {"yfov_rad": yfov, "distance": distance, "resolution": resolution},
             "n_views": len(directions),
+            "cache_key": expected_key,
         }, f, indent=2)
 
     print(f"[render_views] wrote {len(directions)} views to {out}")
 
 
 def _render_world_normals(mesh, pose, resolution, yfov):
-    """Render world-space normals by baking per-vertex RGB = (n+1)/2
-    then alpha-compositing. Clean for analytic supervision."""
+    """Render world-space flat face normals for analytic supervision.
+
+    Hard-surface supervision should not use smoothed vertex normals:
+    a cube with vertex-normal interpolation teaches rounded corners.
+    Instead, duplicate vertices per face, color every face by its
+    constant world-space face normal, and render with flat shading.
+    """
     import pyrender
-    # Compute vertex normals
-    if mesh.vertex_normals is None or len(mesh.vertex_normals) != len(mesh.vertices):
-        mesh = mesh.copy()
-        mesh.fix_normals()
-    n = np.asarray(mesh.vertex_normals, dtype=np.float32)
-    # Encode [-1,1] → [0,1]
-    rgb = ((n + 1.0) * 0.5 * 255.0).clip(0, 255).astype(np.uint8)
-    # Attach as vertex colors
+    m = mesh.copy()
+    m.fix_normals()
+    vertices = np.asarray(m.vertices, dtype=np.float32)
+    faces = np.asarray(m.faces, dtype=np.int64)
+    face_normals = np.asarray(m.face_normals, dtype=np.float32)
+
+    flat_vertices = vertices[faces].reshape(-1, 3)
+    flat_faces = np.arange(flat_vertices.shape[0], dtype=np.int64).reshape(-1, 3)
+    flat_normals = np.repeat(face_normals, 3, axis=0)
+    rgb = ((flat_normals + 1.0) * 0.5 * 255.0).clip(0, 255).astype(np.uint8)
     colored = trimesh.Trimesh(
-        vertices=mesh.vertices, faces=mesh.faces, process=False,
+        vertices=flat_vertices, faces=flat_faces, process=False,
         vertex_colors=np.concatenate([rgb, np.full((len(rgb), 1), 255, dtype=np.uint8)], axis=-1),
     )
 
@@ -280,7 +375,7 @@ def _render_world_normals(mesh, pose, resolution, yfov):
         ambient_light=(1.0, 1.0, 1.0),  # no lighting shading on normals
         bg_color=(0, 0, 0, 0),
     )
-    rm = pyrender.Mesh.from_trimesh(colored, smooth=True)
+    rm = pyrender.Mesh.from_trimesh(colored, smooth=False)
     scene.add(rm)
     cam = pyrender.PerspectiveCamera(yfov=yfov, aspectRatio=1.0)
     scene.add(cam, pose=pose)

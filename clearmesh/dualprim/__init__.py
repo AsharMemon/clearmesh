@@ -35,6 +35,10 @@ from clearmesh.dualprim.local_refine import (
     LocalRefineConfig,
     train_primitive_local_refiners,
 )
+from clearmesh.dualprim.view_init import (
+    activate_visual_hull_regions,
+    apply_visual_hull_init,
+)
 
 __all__ = [
     "DualPrimConfig",
@@ -50,4 +54,6 @@ __all__ = [
     "prepare_primitive_local_refine_artifacts",
     "LocalRefineConfig",
     "train_primitive_local_refiners",
+    "activate_visual_hull_regions",
+    "apply_visual_hull_init",
 ]

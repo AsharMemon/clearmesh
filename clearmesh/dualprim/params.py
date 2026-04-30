@@ -132,6 +132,10 @@ class DualPrimConfig:
     # NSQ carving (vs PSQ-shrinking) for hole preservation.
     # Default 0 = off (backward compatible). Round 7 uses ~5.0.
     lambda_open_ray: float = 0.0
+    lambda_nsq_carve: float = 0.0           # Eq-4 carve pressure on false-positive rays
+    nsq_carve_samples: int = 5              # samples around predicted false-positive depth
+    nsq_carve_depth_band: float = 0.08
+    nsq_carve_residual_threshold: float = 0.05
 
     # Pairwise PSQ bounding-sphere repulsion (NOT IN PAPER, friend's #4).
     lambda_overlap: float = 0.0
@@ -158,6 +162,10 @@ class DualPrimConfig:
     view_prune_foreground_only: bool = True
     view_prune_min_foreground_rays: int = 256
     view_prune_min_distinct_views: int = 8
+    adaptive_prune_target_final: int = 0   # 0 = disabled; otherwise compact late active set target
+    adaptive_prune_start_fraction: float = 0.25
+    adaptive_prune_end_fraction: float = 0.75
+    adaptive_prune_min_keep: int = 8
     opacity_reset_interval: int = 3000      # 3DGS-inspired; DualPrim cites similar pruning
     opacity_reset_value: float = 0.01       # matches 3DGS reset_opacity() cap
 
@@ -196,6 +204,29 @@ class DualPrimConfig:
     # Multi-view sampling (§5.1: 24 sphere views + top + bottom = 26)
     num_views: int = 26
     view_resolution: int = 256              # paper: 256x256
+    add_hole_axis_views: bool = False       # diagnostic/topology augmentation, off for paper parity
+    n_hole_ring: int = 12
+    hole_tilt_deg: float = 15.0
+    init_from_visual_hull: bool = False     # structured init from masks/cameras, off by default
+    visual_hull_grid_res: int = 48
+    visual_hull_scale_margin: float = 1.15
+    visual_hull_region_method: str = "recursive"  # "recursive" | "watershed"
+    visual_hull_active_start: int = 0       # 0 = all regions alive immediately
+    visual_hull_birth_interval: int = 0     # 0 = disabled; otherwise activate queued regions every N iters
+    visual_hull_birth_count: int = 4
+    visual_hull_birth_stop_fraction: float = 0.5
+    visual_hull_birth_strategy: str = "residual"  # "residual" | "scheduled" | "hybrid"
+    visual_hull_birth_min_score: float = 1e-4
+    visual_hull_birth_region_sigma: float = 1.5
+    visual_hull_nsq_init: str = "knife"      # "centered" | "knife"
+    visual_hull_nsq_offset_fraction: float = 0.45
+    visual_hull_nsq_scale_fraction: float = 0.70
+    lambda_region_ownership: float = 0.0    # soft keep-within-visual-hull-region prior, off by default
+    lambda_region_ownership_final: float | None = None
+    region_ownership_ramp_start_fraction: float = 0.2
+    region_ownership_ramp_end_fraction: float = 0.5
+    region_anchor_margin: float = 1.0       # allowed translation radius in units of init region half-extent
+    region_scale_growth: float = 1.5        # allowed scale growth over init region half-extent
 
     # Normal supervision source
     # - "stablenormal": run StableNormal on rendered RGBs (paper)

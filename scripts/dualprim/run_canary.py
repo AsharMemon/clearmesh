@@ -57,11 +57,22 @@ import trimesh
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--input", required=True,
-                    help="path to mesh (GLB/OBJ) — used as GT geometry")
+    ap.add_argument("--input", default=None,
+                    help="path to mesh (GLB/OBJ) for mesh_* modes")
     ap.add_argument("--out", required=True)
     ap.add_argument("--mode", default="mesh_rendered_views",
                     choices=["mesh_fit", "mesh_rendered_views", "paper"])
+    ap.add_argument("--paper-preset", default="off",
+                    choices=["off", "parity", "augmented"],
+                    help="'parity' forces the paper-stated setup and forbids "
+                         "non-paper interventions; --mode paper defaults to "
+                         "this. 'augmented' labels paper-driven variants such "
+                         "as visual-hull init/birth or NSQ knife pressure.")
+    ap.add_argument("--views-dir", default=None,
+                    help="Prepared multi-view supervision directory with "
+                         "views.json plus NN_rgb.png/NN_mask.png files. "
+                         "Required for --mode paper; optional cache override "
+                         "for --mode mesh_rendered_views.")
     ap.add_argument("--k", type=int, default=100,
                     help="initial number of dual-primitives")
     ap.add_argument("--iters", type=int, default=10_000)
@@ -142,10 +153,17 @@ def main():
                          "broadly across the paper ranges; 'paper_table' "
                          "uses the fixed scale/epsilon/alpha/theta values "
                          "from the paper init table.")
-    ap.add_argument("--union-export", action="store_true",
+    ap.add_argument("--union-export", dest="union_export", action="store_true", default=None,
                     help="Boolean-union all primitives at export. "
-                         "Slow (~minutes for K>=20) but produces a single "
-                         "watertight mesh ~10-100x more compact than concatenate.")
+                    "Slow (~minutes for K>=20) but produces a single "
+                    "watertight mesh ~10-100x more compact than concatenate.")
+    ap.add_argument("--no-union-export", dest="union_export", action="store_false",
+                    help="Preview-only export: concatenate per-primitive meshes. "
+                         "Disabled by default for paper/visual-hull runs.")
+    ap.add_argument("--allow-preview-export", action="store_true",
+                    help="Allow a paper/visual-hull run to finish with a "
+                         "non-fused concatenated export. Intended only for "
+                         "fast debugging, not paper-quality claims.")
     ap.add_argument("--fg-bias", type=float, default=0.7,
                     help="Fraction of rays drawn from foreground+boundary "
                          "pixels (rest uniform). 0.0 = paper's default "
@@ -221,6 +239,15 @@ def main():
                     choices=["true", "false"],
                     help="Whether view-dependent pruning should probe only "
                          "foreground-hit rays or sample uniformly across views.")
+    ap.add_argument("--adaptive-prune-target-final", type=int, default=None,
+                    help="Late active-set budget for contribution-ranked pruning. "
+                         "0 disables this compactness schedule.")
+    ap.add_argument("--adaptive-prune-start-fraction", type=float, default=None,
+                    help="Training fraction where contribution-budget pruning begins.")
+    ap.add_argument("--adaptive-prune-end-fraction", type=float, default=None,
+                    help="Training fraction where the final active-set budget is reached.")
+    ap.add_argument("--adaptive-prune-min-keep", type=int, default=None,
+                    help="Hard lower bound on alive primitives during adaptive pruning.")
     ap.add_argument("--opacity-reset-interval", type=int, default=None,
                     help="Override periodic opacity reset cadence. "
                          "3DGS-inspired: resetting alpha keeps alive "
@@ -285,12 +312,85 @@ def main():
                          "Default off (0). Round 7 recipe: 5.0. "
                          "NOTE: superseded by --hole-ray-oversample which "
                          "avoids the NaN-grad cascade this loss triggers.")
+    ap.add_argument("--lambda-nsq-carve", type=float, default=None,
+                    help="Auxiliary Eq-4 knife pressure on false-positive rays. "
+                         "Uses only rendered/target masks and calibrated rays, "
+                         "but is not part of paper-literal Eq. 12.")
+    ap.add_argument("--nsq-carve-samples", type=int, default=None,
+                    help="Samples around predicted false-positive depth for --lambda-nsq-carve.")
+    ap.add_argument("--nsq-carve-depth-band", type=float, default=None,
+                    help="Depth band around predicted false-positive surface for NSQ carve pressure.")
+    ap.add_argument("--nsq-carve-residual-threshold", type=float, default=None,
+                    help="Minimum rendered-mask false-positive residual used by NSQ carve pressure.")
     ap.add_argument("--hole-ray-oversample", type=float, default=0.0,
                     help="Fraction of rays per batch drawn specifically "
                          "from GT hole pixels. Upweights the existing "
                          "BCE mask loss at hole pixels WITHOUT adding a "
                          "new loss path — avoids round-7's NaN-grad "
-                         "cascade. Round 8 recipe: 0.3 (30% of rays).")
+                         "cascade. Round 8 recipe: 0.3 (30%% of rays).")
+    ap.add_argument("--add-hole-axis-views", action="store_true",
+                    help="For mesh_rendered_views, append detected hole-axis "
+                         "views to the paper 24+sphere/top/bottom set. Off "
+                         "by default because it is not paper parity.")
+    ap.add_argument("--n-hole-ring", type=int, default=None,
+                    help="Number of views per side of the detected hole axis.")
+    ap.add_argument("--hole-tilt-deg", type=float, default=None,
+                    help="Cone tilt for --add-hole-axis-views.")
+    ap.add_argument("--init-from-visual-hull", action="store_true",
+                    help="Initialize primitive regions from calibrated masks "
+                         "and views.json instead of blind random placement. "
+                         "This is a paper-driven augmented variant, not "
+                         "paper-parity random initialization.")
+    ap.add_argument("--visual-hull-grid-res", type=int, default=None,
+                    help="Voxel resolution for --init-from-visual-hull.")
+    ap.add_argument("--visual-hull-scale-margin", type=float, default=None,
+                    help="Scale multiplier applied to each visual-hull region box.")
+    ap.add_argument("--visual-hull-region-method", default=None,
+                    choices=["recursive", "watershed"],
+                    help="How to partition the visual hull into primitive supports.")
+    ap.add_argument("--visual-hull-active-start", type=int, default=None,
+                    help="If >0, only this many visual-hull regions start alive; "
+                         "remaining initialized slots are born later.")
+    ap.add_argument("--visual-hull-birth-interval", type=int, default=None,
+                    help="Activate queued visual-hull primitive slots every N iterations.")
+    ap.add_argument("--visual-hull-birth-count", type=int, default=None,
+                    help="Number of queued visual-hull slots to activate per birth event.")
+    ap.add_argument("--visual-hull-birth-stop-fraction", type=float, default=None,
+                    help="Stop visual-hull primitive births after this training fraction.")
+    ap.add_argument("--visual-hull-birth-strategy", default=None,
+                    choices=["residual", "scheduled", "hybrid"],
+                    help="How queued visual-hull primitive slots are selected. "
+                         "'residual' activates regions with highest current "
+                         "under-coverage; 'scheduled' preserves FIFO behavior; "
+                         "'hybrid' falls back to FIFO if residual scores are low.")
+    ap.add_argument("--visual-hull-birth-min-score", type=float, default=None,
+                    help="Minimum residual score needed to activate a queued region.")
+    ap.add_argument("--visual-hull-birth-region-sigma", type=float, default=None,
+                    help="Region-support width used when scoring residual rays.")
+    ap.add_argument("--visual-hull-nsq-init", default=None,
+                    choices=["centered", "knife"],
+                    help="NSQ placement for visual-hull init. 'knife' offsets "
+                         "NSQs toward region faces so they start as cutters.")
+    ap.add_argument("--visual-hull-nsq-offset-fraction", type=float, default=None,
+                    help="Offset, in region half-extent units, for visual-hull NSQ knife init.")
+    ap.add_argument("--visual-hull-nsq-scale-fraction", type=float, default=None,
+                    help="NSQ scale as a fraction of PSQ region scale for visual-hull init.")
+    ap.add_argument("--lambda-region-ownership", type=float, default=None,
+                    help="Soft local-region ownership prior for visual-hull init. "
+                         "Keeps primitives near their mask-derived support cells.")
+    ap.add_argument("--lambda-region-ownership-final", type=float, default=None,
+                    help="Late-stage target for region ownership. Use 0 to "
+                         "release local supports after the assignment phase.")
+    ap.add_argument("--region-ownership-ramp-start-fraction", type=float, default=None,
+                    help="Start fraction for region-ownership decay/ramp.")
+    ap.add_argument("--region-ownership-ramp-end-fraction", type=float, default=None,
+                    help="End fraction for region-ownership decay/ramp.")
+    ap.add_argument("--region-anchor-margin", type=float, default=None,
+                    help="Allowed translation radius in units of each visual-hull "
+                         "region half-extent.")
+    ap.add_argument("--region-scale-growth", type=float, default=None,
+                    help="Allowed PSQ/NSQ scale growth over each visual-hull "
+                         "region half-extent before penalty starts.")
     ap.add_argument("--detect-anomaly", action="store_true",
                     help="Enable torch.autograd.detect_anomaly for the "
                          "training loop. Slow but useful for identifying "
@@ -325,6 +425,41 @@ def main():
         seed=args.seed,
         nsq_init_strategy=args.nsq_init,
     )
+    paper_preset = args.paper_preset
+    if args.mode == "paper" and paper_preset == "off":
+        paper_preset = "parity"
+    if paper_preset == "parity":
+        config.init_profile = "paper_random"
+        config.nsq_init_strategy = "independent"
+        config.gate_mode = "paper_literal"
+        config.theta_min = 0.0
+        config.theta_min_nsq = 0.0
+        config.theta_curriculum_start = 0.0
+        config.theta_curriculum_fraction = 0.0
+        config.primitive_reg_average_mode = "fixed_k"
+        config.mask_loss_type = "bce"
+        config.opacity_reset_interval = 0
+        config.lambda_depth = 0.0
+        config.lambda_open_ray = 0.0
+        config.lambda_nsq_carve = 0.0
+        config.lambda_overlap = 0.0
+        config.lambda_region_ownership = 0.0
+        config.lambda_edge_mask = 0.0
+        config.lambda_shape_box = 0.0
+        config.init_from_visual_hull = False
+        config.visual_hull_birth_interval = 0
+        config.adaptive_prune_target_final = 0
+    elif paper_preset == "augmented":
+        # No silent behavior change here; this preset is primarily a
+        # provenance label. Individual augmented mechanisms remain explicit
+        # CLI/config choices so ablations are obvious in logs.
+        pass
+    if args.mode in ("mesh_fit", "mesh_rendered_views") and args.input is None:
+        raise ValueError(f"--mode {args.mode} requires --input")
+    if args.mode == "paper" and args.views_dir is None:
+        raise ValueError("--mode paper requires --views-dir with calibrated RGB/mask views")
+    if args.mode == "paper" and args.normal_source is None:
+        config.normal_source = "stablenormal"
     if args.init_profile is not None:
         config.init_profile = args.init_profile
     # CLI overrides for round-4+ tuning levers
@@ -389,6 +524,54 @@ def main():
         config.export_smoothing_nu = args.export_smoothing_nu
     if args.normal_source is not None:
         config.normal_source = args.normal_source
+    if args.add_hole_axis_views:
+        config.add_hole_axis_views = True
+    if args.n_hole_ring is not None:
+        config.n_hole_ring = args.n_hole_ring
+    if args.hole_tilt_deg is not None:
+        config.hole_tilt_deg = args.hole_tilt_deg
+    if args.init_from_visual_hull:
+        config.init_from_visual_hull = True
+    if args.visual_hull_grid_res is not None:
+        config.visual_hull_grid_res = args.visual_hull_grid_res
+    if args.visual_hull_scale_margin is not None:
+        config.visual_hull_scale_margin = args.visual_hull_scale_margin
+    if args.visual_hull_region_method is not None:
+        config.visual_hull_region_method = args.visual_hull_region_method
+    if args.visual_hull_active_start is not None:
+        config.visual_hull_active_start = args.visual_hull_active_start
+    if args.visual_hull_birth_interval is not None:
+        config.visual_hull_birth_interval = args.visual_hull_birth_interval
+    if args.visual_hull_birth_count is not None:
+        config.visual_hull_birth_count = args.visual_hull_birth_count
+    if args.visual_hull_birth_stop_fraction is not None:
+        config.visual_hull_birth_stop_fraction = args.visual_hull_birth_stop_fraction
+    if args.visual_hull_birth_strategy is not None:
+        config.visual_hull_birth_strategy = args.visual_hull_birth_strategy
+    if args.visual_hull_birth_min_score is not None:
+        config.visual_hull_birth_min_score = args.visual_hull_birth_min_score
+    if args.visual_hull_birth_region_sigma is not None:
+        config.visual_hull_birth_region_sigma = args.visual_hull_birth_region_sigma
+    if args.visual_hull_nsq_init is not None:
+        config.visual_hull_nsq_init = args.visual_hull_nsq_init
+    if args.visual_hull_nsq_offset_fraction is not None:
+        config.visual_hull_nsq_offset_fraction = args.visual_hull_nsq_offset_fraction
+    if args.visual_hull_nsq_scale_fraction is not None:
+        config.visual_hull_nsq_scale_fraction = args.visual_hull_nsq_scale_fraction
+    if args.lambda_region_ownership is not None:
+        config.lambda_region_ownership = args.lambda_region_ownership
+    if args.lambda_region_ownership_final is not None:
+        config.lambda_region_ownership_final = args.lambda_region_ownership_final
+    if args.region_ownership_ramp_start_fraction is not None:
+        config.region_ownership_ramp_start_fraction = args.region_ownership_ramp_start_fraction
+    if args.region_ownership_ramp_end_fraction is not None:
+        config.region_ownership_ramp_end_fraction = args.region_ownership_ramp_end_fraction
+    if args.region_anchor_margin is not None:
+        config.region_anchor_margin = args.region_anchor_margin
+    if args.region_scale_growth is not None:
+        config.region_scale_growth = args.region_scale_growth
+    if config.add_hole_axis_views:
+        config.num_views = 26 + 2 * config.n_hole_ring
     if args.stablenormal_turbo:
         config.stablenormal_use_turbo = True
     if args.stablenormal_cache_dir is not None:
@@ -411,6 +594,14 @@ def main():
         config.view_prune_every_multiplier = args.view_prune_every_multiplier
     if args.view_prune_foreground_only is not None:
         config.view_prune_foreground_only = (args.view_prune_foreground_only == "true")
+    if args.adaptive_prune_target_final is not None:
+        config.adaptive_prune_target_final = args.adaptive_prune_target_final
+    if args.adaptive_prune_start_fraction is not None:
+        config.adaptive_prune_start_fraction = args.adaptive_prune_start_fraction
+    if args.adaptive_prune_end_fraction is not None:
+        config.adaptive_prune_end_fraction = args.adaptive_prune_end_fraction
+    if args.adaptive_prune_min_keep is not None:
+        config.adaptive_prune_min_keep = args.adaptive_prune_min_keep
     if args.opacity_reset_interval is not None:
         config.opacity_reset_interval = args.opacity_reset_interval
     if args.mu_gate_offset is not None:
@@ -453,6 +644,82 @@ def main():
         config.overlap_ramp_end_fraction = args.overlap_ramp_end_fraction
     if args.lambda_open_ray is not None:
         config.lambda_open_ray = args.lambda_open_ray
+    if args.lambda_nsq_carve is not None:
+        config.lambda_nsq_carve = args.lambda_nsq_carve
+    if args.nsq_carve_samples is not None:
+        config.nsq_carve_samples = args.nsq_carve_samples
+    if args.nsq_carve_depth_band is not None:
+        config.nsq_carve_depth_band = args.nsq_carve_depth_band
+    if args.nsq_carve_residual_threshold is not None:
+        config.nsq_carve_residual_threshold = args.nsq_carve_residual_threshold
+    if args.views_dir is not None:
+        meta_path = Path(args.views_dir) / "views.json"
+        if meta_path.exists():
+            with open(meta_path) as f:
+                config.num_views = len(json.load(f).get("views", []))
+    if paper_preset == "parity":
+        parity_violations = []
+        if config.init_profile != "paper_random":
+            parity_violations.append(f"init_profile={config.init_profile}")
+        if config.nsq_init_strategy != "independent":
+            parity_violations.append(f"nsq_init_strategy={config.nsq_init_strategy}")
+        if config.gate_mode != "paper_literal":
+            parity_violations.append(f"gate_mode={config.gate_mode}")
+        if config.theta_curriculum_start != 0.0 or config.theta_curriculum_fraction != 0.0:
+            parity_violations.append("theta_curriculum")
+        if config.primitive_reg_average_mode != "fixed_k":
+            parity_violations.append(f"primitive_reg_average_mode={config.primitive_reg_average_mode}")
+        if config.opacity_reset_interval != 0:
+            parity_violations.append(f"opacity_reset_interval={config.opacity_reset_interval}")
+        if config.init_from_visual_hull:
+            parity_violations.append("init_from_visual_hull")
+        if config.visual_hull_birth_interval:
+            parity_violations.append(f"visual_hull_birth_interval={config.visual_hull_birth_interval}")
+        if config.adaptive_prune_target_final:
+            parity_violations.append(f"adaptive_prune_target_final={config.adaptive_prune_target_final}")
+        for name in (
+            "lambda_depth", "lambda_open_ray", "lambda_nsq_carve",
+            "lambda_overlap", "lambda_region_ownership", "lambda_edge_mask",
+            "lambda_shape_box",
+        ):
+            if float(getattr(config, name, 0.0) or 0.0) != 0.0:
+                parity_violations.append(f"{name}={getattr(config, name)}")
+        if parity_violations:
+            raise ValueError(
+                "--paper-preset parity forbids non-paper settings: "
+                + ", ".join(parity_violations)
+                + ". Use --paper-preset augmented for paper-driven variants."
+            )
+    print(
+        "[canary] paper_preset="
+        f"{paper_preset} init={config.init_profile} nsq={config.nsq_init_strategy} "
+        f"gate={config.gate_mode} reg_avg={config.primitive_reg_average_mode} "
+        f"opacity_reset={config.opacity_reset_interval} "
+        f"visual_hull={config.init_from_visual_hull} "
+        f"aux(depth/open/knife/ov/reg/edge/box)="
+        f"{config.lambda_depth}/{config.lambda_open_ray}/{config.lambda_nsq_carve}/"
+        f"{config.lambda_overlap}/{config.lambda_region_ownership}/"
+        f"{config.lambda_edge_mask}/{config.lambda_shape_box}"
+    )
+    paperish_export = args.mode == "paper" or config.init_from_visual_hull
+    union_export = args.union_export
+    if union_export is None:
+        union_export = paperish_export
+    require_fused_export = paperish_export and not args.allow_preview_export
+    if require_fused_export and not union_export:
+        raise ValueError(
+            "paper/visual-hull runs require fused boolean export. "
+            "Use --allow-preview-export --no-union-export only for debugging."
+        )
+    if require_fused_export and config.boolean_backend == "manifold3d":
+        try:
+            import manifold3d  # noqa: F401
+        except ImportError as e:
+            raise RuntimeError(
+                "paper/visual-hull runs now require manifold3d for fused "
+                "boolean export. Install requirements.txt or rerun with "
+                "--allow-preview-export for debug-only concatenation."
+            ) from e
     # Write the effective config for reproducibility
     from dataclasses import asdict
     with open(out_dir / "config.json", "w") as f:
@@ -496,19 +763,23 @@ def main():
         # ray sampler / train() flow.
         sampler = None
     elif args.mode == "mesh_rendered_views":
-        views_dir = out_dir / "views"
-        views_missing = not (views_dir / "views.json").exists()
-        depth_missing = (
-            config.lambda_depth > 0
-            and (views_missing or not all((views_dir / f"{i:02d}_depth.npy").exists() for i in range(26)))
-        )
-        if views_missing or depth_missing:
-            print(f"[canary] rendering 26 views to {views_dir}")
+        views_dir = Path(args.views_dir) if args.views_dir else (out_dir / "views")
+        if args.views_dir:
+            print(f"[canary] using prepared views from {views_dir}")
+            _validate_views_dir(
+                views_dir,
+                require_depth=config.lambda_depth > 0,
+                normal_source=config.normal_source,
+            )
+        else:
             from scripts.dualprim.render_views import render_views
             render_views(
                 args.input, str(views_dir),
                 resolution=config.view_resolution,
                 render_normals=True,
+                add_hole_axis_views=config.add_hole_axis_views,
+                n_hole_ring=config.n_hole_ring,
+                hole_tilt_deg=config.hole_tilt_deg,
             )
         if config.normal_source == "stablenormal":
             print(f"[canary] predicting StableNormal maps in {views_dir}")
@@ -530,10 +801,49 @@ def main():
             stablenormal_edge_boost=config.stablenormal_edge_boost,
         )
     elif args.mode == "paper":
-        raise NotImplementedError(
-            "mode=paper requires real source images + StableNormal — "
-            "run mode=mesh_rendered_views first to validate the code path"
+        views_dir = Path(args.views_dir)
+        print(f"[canary] paper mode: using prepared source views from {views_dir}")
+        _validate_views_dir(
+            views_dir,
+            require_depth=config.lambda_depth > 0,
+            normal_source=config.normal_source,
         )
+        if config.normal_source == "stablenormal":
+            print(f"[canary] predicting StableNormal maps in {views_dir}")
+            _ensure_stablenormal_views(
+                views_dir,
+                device=device,
+                use_turbo=config.stablenormal_use_turbo,
+                cache_dir=config.stablenormal_cache_dir,
+            )
+        sampler = _build_views_sampler(
+            views_dir, device=device,
+            fg_bias=args.fg_bias,
+            hole_ray_oversample=args.hole_ray_oversample,
+            require_depth=config.lambda_depth > 0,
+            normal_source=config.normal_source,
+            stablenormal_blend_strength=config.stablenormal_blend_strength,
+            stablenormal_agreement_floor=config.stablenormal_agreement_floor,
+            stablenormal_agreement_ceil=config.stablenormal_agreement_ceil,
+            stablenormal_edge_boost=config.stablenormal_edge_boost,
+        )
+
+    if config.init_from_visual_hull:
+        if args.mode == "mesh_fit":
+            raise ValueError("--init-from-visual-hull requires a view-based mode")
+        from clearmesh.dualprim.view_init import apply_visual_hull_init
+        stats = apply_visual_hull_init(
+            scene,
+            views_dir,
+            config,
+            grid_res=config.visual_hull_grid_res,
+            scale_margin=config.visual_hull_scale_margin,
+            region_method=config.visual_hull_region_method,
+        )
+        print(f"[canary] visual-hull init: {stats['num_regions']} regions, "
+              f"{stats['num_occupied_voxels']:,} occupied voxels "
+              f"at grid={stats['grid_res']} method={stats['region_method']} "
+              f"initial_alive={stats['num_initially_alive']}")
 
     # ----- Train -----
     print(f"[canary] training for {config.num_iterations} iters")
@@ -578,6 +888,10 @@ def main():
             # Open-ray loss (round 7+): only show if >0
             if parts.get("open", 0) > 0:
                 line += f" open={parts['open']:.4f}"
+            if parts.get("nsq_carve", 0) > 0:
+                line += f" knife={parts['nsq_carve']:.4f}"
+            if parts.get("region", 0) > 0:
+                line += f" region={parts['region']:.4f}"
             if parts.get("nan_grad_skip"):
                 line += " [nan_grad]"
             # NSQ-health diagnostics (added in review round 3)
@@ -595,8 +909,23 @@ def main():
                 line += f" λn={parts['lambda_norm_eff']:.2f}"
             if "lambda_overlap_eff" in parts:
                 line += f" λov={parts['lambda_overlap_eff']:.2f}"
+            if "lambda_region_eff" in parts and parts["lambda_region_eff"] > 0:
+                line += f" λreg={parts['lambda_region_eff']:.3f}"
+            if parts.get("birth_count"):
+                line += f" birth={parts['birth_count']}:{parts.get('birth_strategy', '?')}"
+            if parts.get("adaptive_prune_target"):
+                line += (f" prune→{parts['adaptive_prune_target']}"
+                         f"(-{parts.get('adaptive_prune_killed', 0)})")
             if "nsq_overlap_pct" in parts:
                 line += f" NSQ∩PSQ={parts['nsq_overlap_pct']:.0f}%"
+            if "carve_ratio_p50" in parts:
+                line += (f" carve[{parts['carve_ratio_p10']:.2f}/"
+                         f"{parts['carve_ratio_p50']:.2f}/"
+                         f"{parts['carve_ratio_p90']:.2f}]")
+            if "nsq_offset_p50" in parts:
+                line += (f" off[{parts['nsq_offset_p10']:.2f}/"
+                         f"{parts['nsq_offset_p50']:.2f}/"
+                         f"{parts['nsq_offset_p90']:.2f}]")
             if "pe_mean_fg" in parts:
                 line += f" P_E_fg={parts['pe_mean_fg']:.3f}/{parts['pe_max_fg']:.2f}"
             if "t_render_ms" in parts:
@@ -630,11 +959,24 @@ def main():
           f"— {scene.num_alive}/{config.num_primitives_init} alive")
 
     # ----- Export -----
-    print(f"[canary] exporting (α ≥ {config.export_alpha_threshold})")
-    scene_mesh, per_prim = export_scene(scene, config, union_all=args.union_export)
+    export_mode = "union" if union_export else "concat-preview"
+    print(f"[canary] exporting (α ≥ {config.export_alpha_threshold}, mode={export_mode})")
+    scene_mesh, per_prim = export_scene(
+        scene, config,
+        union_all=union_export,
+        require_union=require_fused_export,
+    )
     scene_mesh.export(out_dir / "refit.glb")
     for i, m in enumerate(per_prim):
         m.export(out_dir / f"per_prim_{i:03d}.glb")
+    export_summary = _mesh_export_summary(scene_mesh, len(per_prim), union_export)
+    with open(out_dir / "export_summary.json", "w") as f:
+        json.dump(export_summary, f, indent=2)
+    print(
+        f"[canary] export: components={export_summary['components']} "
+        f"largest_faces={export_summary['largest_component_faces_pct']:.1%} "
+        f"watertight={export_summary['watertight']}"
+    )
 
     # Save primitive params (same format as trajectory snapshots for
     # corpus-uniformity — downstream dataset loaders can treat the
@@ -669,6 +1011,8 @@ def main():
     print(f"  train_s:  {train_dt:.1f}")
     print(f"  scene_v:  {len(scene_mesh.vertices):,}")
     print(f"  scene_f:  {len(scene_mesh.faces):,}")
+    print(f"  comps:    {export_summary['components']}")
+    print(f"  export:   {export_mode}")
     print(f"  out:      {out_dir}")
     if detail_manifest is not None:
         detail = detail_manifest["detail_signal"]
@@ -682,6 +1026,71 @@ def main():
 # ---------------------------------------------------------------------
 # Samplers
 # ---------------------------------------------------------------------
+
+def _mesh_export_summary(mesh: trimesh.Trimesh, num_primitives: int, union_export: bool) -> dict:
+    if len(mesh.faces) == 0:
+        return {
+            "num_primitives": int(num_primitives),
+            "union_export": bool(union_export),
+            "vertices": 0,
+            "faces": 0,
+            "components": 0,
+            "watertight": False,
+            "largest_component_faces": 0,
+            "largest_component_faces_pct": 0.0,
+            "component_faces_top10": [],
+        }
+    try:
+        components = list(mesh.split(only_watertight=False))
+    except Exception:
+        components = [mesh]
+    component_faces = [int(len(c.faces)) for c in components]
+    largest = max(component_faces, default=0)
+    return {
+        "num_primitives": int(num_primitives),
+        "union_export": bool(union_export),
+        "vertices": int(len(mesh.vertices)),
+        "faces": int(len(mesh.faces)),
+        "components": int(len(components)),
+        "watertight": bool(mesh.is_watertight),
+        "largest_component_faces": int(largest),
+        "largest_component_faces_pct": float(largest / max(len(mesh.faces), 1)),
+        "component_faces_top10": sorted(component_faces, reverse=True)[:10],
+    }
+
+
+def _validate_views_dir(
+    views_dir: Path,
+    *,
+    require_depth: bool = False,
+    normal_source: str = "analytic",
+) -> None:
+    meta_path = views_dir / "views.json"
+    if not meta_path.exists():
+        raise FileNotFoundError(f"{views_dir}: missing views.json")
+    with open(meta_path) as f:
+        meta = json.load(f)
+    if "camera" not in meta or "views" not in meta:
+        raise ValueError(f"{meta_path}: expected camera + views metadata")
+    n_views = len(meta["views"])
+    if n_views == 0:
+        raise ValueError(f"{meta_path}: no views")
+    for i in range(n_views):
+        for suffix in ("rgb.png", "mask.png"):
+            p = views_dir / f"{i:02d}_{suffix}"
+            if not p.exists():
+                raise FileNotFoundError(p)
+        if normal_source == "analytic":
+            p = views_dir / f"{i:02d}_normal.png"
+            if not p.exists():
+                raise FileNotFoundError(
+                    f"{p} is required for --normal-source analytic"
+                )
+        if require_depth:
+            p = views_dir / f"{i:02d}_depth.npy"
+            if not p.exists():
+                raise FileNotFoundError(p)
+
 
 def _build_mesh_fit_tsdf(
     mesh_path: str, device: str, resolution: int = 64,
@@ -778,12 +1187,18 @@ def _build_views_sampler(views_dir: Path, device: str,
     stable_normals = np.zeros((V, H, W, 3), dtype=np.float32)
     depths = np.zeros((V, H, W), dtype=np.float32)
     poses = np.zeros((V, 4, 4), dtype=np.float32)
+    has_analytic_normals = all((views_dir / f"{i:02d}_normal.png").exists() for i in range(V))
     for i in range(V):
         rgbs[i] = np.asarray(Image.open(views_dir / f"{i:02d}_rgb.png").convert("RGB")) / 255.0
         m = np.asarray(Image.open(views_dir / f"{i:02d}_mask.png").convert("L"))
         masks[i] = (m > 127).astype(np.float32)
-        analytic_n = np.asarray(Image.open(views_dir / f"{i:02d}_normal.png").convert("RGB")) / 255.0
-        analytic_normals[i] = analytic_n * 2.0 - 1.0
+        if has_analytic_normals:
+            analytic_n = np.asarray(Image.open(views_dir / f"{i:02d}_normal.png").convert("RGB")) / 255.0
+            analytic_normals[i] = analytic_n * 2.0 - 1.0
+        elif normal_source == "analytic":
+            raise FileNotFoundError(
+                f"{views_dir / f'{i:02d}_normal.png'} is required for analytic normal supervision"
+            )
         if normal_source == "stablenormal":
             stable_n = np.asarray(Image.open(views_dir / f"{i:02d}_normal_stablenormal.png").convert("RGB")) / 255.0
             stable_normals[i] = stable_n * 2.0 - 1.0
@@ -838,9 +1253,6 @@ def _build_views_sampler(views_dir: Path, device: str,
         boundary_masks[v] = boundary | outer
 
     if normal_source == "stablenormal":
-        analytic_unit = analytic_normals / np.clip(
-            np.linalg.norm(analytic_normals, axis=-1, keepdims=True), 1e-6, None,
-        )
         stable_unit = stable_normals / np.clip(
             np.linalg.norm(stable_normals, axis=-1, keepdims=True), 1e-6, None,
         )
@@ -855,9 +1267,14 @@ def _build_views_sampler(views_dir: Path, device: str,
         stable_unit = stable_unit / np.clip(
             np.linalg.norm(stable_unit, axis=-1, keepdims=True), 1e-6, None,
         )
-        if stablenormal_blend_strength >= 1.0 and stablenormal_edge_boost <= 0.0:
+        if not has_analytic_normals:
+            normals = stable_unit.astype(np.float32)
+        elif stablenormal_blend_strength >= 1.0 and stablenormal_edge_boost <= 0.0:
             normals = stable_unit.astype(np.float32)
         else:
+            analytic_unit = analytic_normals / np.clip(
+                np.linalg.norm(analytic_normals, axis=-1, keepdims=True), 1e-6, None,
+            )
             denom = max(stablenormal_agreement_ceil - stablenormal_agreement_floor, 1e-6)
             cosine = np.clip((analytic_unit * stable_unit).sum(axis=-1), -1.0, 1.0)
             agreement = np.clip(

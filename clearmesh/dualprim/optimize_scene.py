@@ -372,6 +372,64 @@ def _overlap_schedule(config: DualPrimConfig, iteration: int) -> float:
     return (1.0 - alpha) * lam_start + alpha * lam_final
 
 
+def _region_ownership_schedule(config: DualPrimConfig, iteration: int) -> float:
+    """Assignment-phase support prior, optionally released later.
+
+    SuperFit/Marching-Primitives style fitting keeps primitives local
+    while they are assigned, then lets the final assembly settle. This
+    schedule makes that release explicit instead of leaving a permanent
+    r58-style tether.
+    """
+    lam_start = float(getattr(config, "lambda_region_ownership", 0.0))
+    lam_final_cfg = getattr(config, "lambda_region_ownership_final", None)
+    if lam_start <= 0.0 or lam_final_cfg is None:
+        return lam_start
+    lam_final = float(lam_final_cfg)
+    if lam_final == lam_start:
+        return lam_start
+
+    tot = max(config.num_iterations, 1)
+    frac = iteration / tot
+    start = float(getattr(config, "region_ownership_ramp_start_fraction", 0.2))
+    end = max(start, float(getattr(config, "region_ownership_ramp_end_fraction", 0.5)))
+    if frac <= start:
+        return lam_start
+    if frac >= end:
+        return lam_final
+    alpha = (frac - start) / max(end - start, 1e-9)
+    return (1.0 - alpha) * lam_start + alpha * lam_final
+
+
+def _adaptive_prune_target(config: DualPrimConfig, iteration: int) -> int:
+    """Late compactness schedule for contribution-ranked primitive selection.
+
+    The DualPrim video shows a very overcomplete candidate soup early, then a
+    much smaller useful assembly late. This target makes that attrition explicit:
+    do not force compactness while primitives are still discovering support, but
+    progressively select the best contributors once the coarse shape exists.
+    """
+    final = int(getattr(config, "adaptive_prune_target_final", 0))
+    if final <= 0:
+        return 0
+
+    start_count = int(getattr(config, "visual_hull_active_start", 0))
+    if start_count <= 0:
+        start_count = int(getattr(config, "num_primitives_init", 0))
+    min_keep = max(int(getattr(config, "adaptive_prune_min_keep", 8)), 1)
+    final = max(final, min_keep)
+
+    frac = iteration / max(int(config.num_iterations), 1)
+    start = float(getattr(config, "adaptive_prune_start_fraction", 0.25))
+    end = max(start, float(getattr(config, "adaptive_prune_end_fraction", 0.75)))
+    if frac <= start:
+        return max(start_count, final)
+    if frac >= end:
+        return final
+
+    alpha = (frac - start) / max(end - start, 1e-9)
+    return int(round((1.0 - alpha) * start_count + alpha * final))
+
+
 def _dp_diagnostics(
     scene: DualPrimScene,
     ray_sampler: Optional["RaySampler"] = None,
@@ -422,6 +480,23 @@ def _dp_diagnostics(
             (psq_lo <= nsq_hi) & (psq_hi >= nsq_lo), dim=-1,
         )
         out["nsq_overlap_pct"] = float(aabb_overlap.float().mean().item() * 100)
+        psq_vol = psq_s.prod(dim=-1).clamp_min(1e-8)
+        carve_ratio = (nsq_s.prod(dim=-1) / psq_vol).clamp(0.0, 10.0)
+        nsq_offset = (nsq_t - psq_t).norm(dim=-1) / psq_s.norm(dim=-1).clamp_min(1e-8)
+        cr_q = torch.quantile(
+            carve_ratio.float(),
+            torch.tensor([0.1, 0.5, 0.9], device=carve_ratio.device),
+        )
+        off_q = torch.quantile(
+            nsq_offset.float(),
+            torch.tensor([0.1, 0.5, 0.9], device=nsq_offset.device),
+        )
+        out["carve_ratio_p10"] = float(cr_q[0].item())
+        out["carve_ratio_p50"] = float(cr_q[1].item())
+        out["carve_ratio_p90"] = float(cr_q[2].item())
+        out["nsq_offset_p10"] = float(off_q[0].item())
+        out["nsq_offset_p50"] = float(off_q[1].item())
+        out["nsq_offset_p90"] = float(off_q[2].item())
 
         # Optional: mean P_E at foreground probe rays. Requires a
         # ray_sampler that returns mask_gt so we can filter to fg.
@@ -459,7 +534,7 @@ def _dp_diagnostics(
         return out
 
 
-def prune_view_dependent(
+def _estimate_view_contribution(
     scene: DualPrimScene,
     ray_sampler: "RaySampler",
     config: DualPrimConfig,
@@ -472,34 +547,8 @@ def prune_view_dependent(
     mu: float | None = None,
     theta_min: float | None = None,
     verbose: bool = False,
-) -> int:
-    """Kill primitives with negligible rendering weight across viewpoints.
-
-    Paper §4.2: "We prune primitives with negligible rendering weights
-    across all viewpoints." A primitive is redundant if no ray through
-    any view ever accumulates significant contribution from it.
-
-    Normalization note (fixed in review round 2):
-      We normalize per-primitive contribution by the FOREGROUND-HIT
-      ray count, not the total probe-ray count. If probes are sampled
-      uniformly over the image (most render_views-based samplers),
-      most rays miss the object entirely — including them in the
-      denominator makes the threshold depend on silhouette area and
-      disproportionately punishes thin primitives (slats, rings, small
-      protrusions — exactly what DualPrim's NSQ is designed to keep).
-
-    Args:
-      foreground_only: if True (default), filter the probe batch to
-          rays with mask_gt > 0.5 before accumulating. Requires the
-          sampler to provide mask_gt; falls back to using rays whose
-          rendered mask is > 0.5 if mask_gt is all zero (legacy
-          sanity samplers).
-      min_foreground_rays: if fewer than this many rays actually hit
-          the object, skip this prune cycle entirely (not enough
-          signal to trust the threshold).
-
-    Runs under ``torch.no_grad``.
-    """
+) -> tuple[torch.Tensor | None, int, int]:
+    """Estimate per-primitive compositing contribution on foreground probes."""
     from clearmesh.dualprim.renderer import (
         sample_ray_points,
         _scene_field,
@@ -541,7 +590,7 @@ def prune_view_dependent(
                 if verbose:
                     print(f"[prune/view] only {n_fg} foreground rays "
                           f"(< {min_foreground_rays}); skipping prune cycle")
-                return 0
+                return None, n_fg, 0
             origins = batch.origins[fg_mask]
             dirs = batch.dirs[fg_mask]
             if view_idx is not None:
@@ -608,7 +657,7 @@ def prune_view_dependent(
                 if verbose:
                     print(f"[prune/view] only {uniq_views.numel()} distinct views "
                           f"(< {min_distinct_views}); skipping prune cycle")
-                return 0
+                return None, R_eff, int(uniq_views.numel())
             per_view_contrib = []
             for v in uniq_views:
                 mask_v = view_idx == v
@@ -622,6 +671,56 @@ def prune_view_dependent(
             per_prim_contrib = per_ray_prim_contrib.sum(dim=0) / max(R_eff, 1)
             n_views_eff = 1
 
+        return per_prim_contrib, R_eff, n_views_eff
+
+
+def prune_view_dependent(
+    scene: DualPrimScene,
+    ray_sampler: "RaySampler",
+    config: DualPrimConfig,
+    *,
+    num_probe_rays: int | None = None,
+    weight_threshold: float | None = None,
+    foreground_only: bool = True,
+    min_foreground_rays: int | None = None,
+    min_distinct_views: int | None = None,
+    mu: float | None = None,
+    theta_min: float | None = None,
+    verbose: bool = False,
+) -> int:
+    """Kill primitives with negligible rendering weight across viewpoints.
+
+    Paper §4.2: "We prune primitives with negligible rendering weights
+    across all viewpoints." A primitive is redundant if no ray through
+    any view ever accumulates significant contribution from it.
+
+    Normalization note (fixed in review round 2):
+      We normalize per-primitive contribution by the FOREGROUND-HIT
+      ray count, not the total probe-ray count. If probes are sampled
+      uniformly over the image (most render_views-based samplers),
+      most rays miss the object entirely — including them in the
+      denominator makes the threshold depend on silhouette area and
+      disproportionately punishes thin primitives (slats, rings, small
+      protrusions — exactly what DualPrim's NSQ is designed to keep).
+
+    Runs under ``torch.no_grad``.
+    """
+    with torch.no_grad():
+        per_prim_contrib, R_eff, n_views_eff = _estimate_view_contribution(
+            scene, ray_sampler, config,
+            num_probe_rays=num_probe_rays,
+            weight_threshold=weight_threshold,
+            foreground_only=foreground_only,
+            min_foreground_rays=min_foreground_rays,
+            min_distinct_views=min_distinct_views,
+            mu=mu,
+            theta_min=theta_min,
+            verbose=verbose,
+        )
+        if per_prim_contrib is None:
+            return 0
+        if weight_threshold is None:
+            weight_threshold = config.view_prune_weight_threshold
         kill = scene.alive & (per_prim_contrib < weight_threshold)
         n_killed = int(kill.sum().item())
         scene.alive &= ~kill
@@ -632,6 +731,65 @@ def prune_view_dependent(
               f"(contribution<{weight_threshold}, over {R_eff} fg rays / {n_views_eff} views); "
               f"{scene.num_alive} alive")
     return n_killed
+
+
+def prune_to_active_budget(
+    scene: DualPrimScene,
+    ray_sampler: "RaySampler",
+    config: DualPrimConfig,
+    target_alive: int,
+    *,
+    num_probe_rays: int | None = None,
+    foreground_only: bool = True,
+    min_foreground_rays: int | None = None,
+    min_distinct_views: int | None = None,
+    mu: float | None = None,
+    theta_min: float | None = None,
+    verbose: bool = False,
+) -> int:
+    """Select the top contributing alive primitives until a budget is met."""
+    with torch.no_grad():
+        min_keep = max(int(getattr(config, "adaptive_prune_min_keep", 8)), 1)
+        target_alive = max(int(target_alive), min_keep)
+        alive_idx = scene.alive.nonzero(as_tuple=True)[0]
+        n_alive = int(alive_idx.numel())
+        if n_alive <= target_alive:
+            return 0
+
+        per_prim_contrib, R_eff, n_views_eff = _estimate_view_contribution(
+            scene, ray_sampler, config,
+            num_probe_rays=num_probe_rays,
+            foreground_only=foreground_only,
+            min_foreground_rays=min_foreground_rays,
+            min_distinct_views=min_distinct_views,
+            mu=mu,
+            theta_min=theta_min,
+            verbose=verbose,
+        )
+        if per_prim_contrib is None:
+            return 0
+
+        n_to_kill = n_alive - target_alive
+        contrib_alive = torch.nan_to_num(
+            per_prim_contrib[alive_idx],
+            nan=-float("inf"),
+            posinf=float("inf"),
+            neginf=-float("inf"),
+        )
+        kill_order = torch.argsort(contrib_alive, descending=False)[:n_to_kill]
+        kill_idx = alive_idx[kill_order]
+        scene.alive[kill_idx] = False
+        scene.params[kill_idx, IDX_ALPHA] = 0.0
+
+    if verbose and n_to_kill > 0:
+        kept_floor = float(torch.topk(contrib_alive, k=target_alive, largest=True).values.min().item())
+        print(
+            f"[prune/adaptive] killed {n_to_kill} lowest-contribution primitives "
+            f"to target={target_alive} (keep_floor={kept_floor:.4g}, "
+            f"over {R_eff} fg rays / {n_views_eff} views); {scene.num_alive} alive",
+            flush=True,
+        )
+    return n_to_kill
 
 
 # ---------------------------------------------------------------------
@@ -714,6 +872,85 @@ def _scene_value_summary(scene: DualPrimScene) -> str:
             f"theta=[{scene.theta().min().item():.3g},{scene.theta().max().item():.3g}] "
             f"alpha=[{scene.alpha().min().item():.3g},{scene.alpha().max().item():.3g}]"
         )
+
+
+def _visual_hull_birth_scores(
+    scene: DualPrimScene,
+    batch: "RaySampleBatch",
+    render,
+    config: DualPrimConfig,
+) -> torch.Tensor | None:
+    """Score queued visual-hull slots by current residual evidence.
+
+    This mirrors the density-control idea used by successful explicit
+    primitive methods: do not merely add capacity on a timer; allocate it
+    near rays where the current model is under-explaining foreground.
+    Depth supervision, when available from synthetic or calibrated depth
+    views, gives direct 3D residual points. Pure paper/RGB-mask mode falls
+    back to a ray-to-region score using the same silhouette evidence.
+    """
+
+    anchors = getattr(scene, "region_anchors", None)
+    scales = getattr(scene, "region_scales", None)
+    active = getattr(scene, "region_active", None)
+    if anchors is None or scales is None or active is None:
+        return None
+
+    with torch.no_grad():
+        device = scene.params.device
+        anchors = anchors.to(device=device, dtype=scene.params.dtype)
+        scales = scales.to(device=device, dtype=scene.params.dtype).clamp_min(1e-3)
+        valid = active.to(device=device) & ~scene.alive
+        if not bool(valid.any().item()):
+            return None
+
+        mask_gt = batch.mask_gt.detach().to(device=device, dtype=scene.params.dtype)
+        mask_pred = render.mask.detach().to(device=device, dtype=scene.params.dtype)
+        residual = (mask_gt - mask_pred).clamp_min(0.0)
+        fg = mask_gt > 0.5
+        keep = fg & (residual > 1e-4)
+        if not bool(keep.any().item()):
+            scores = torch.zeros(scene.K, device=device, dtype=scene.params.dtype)
+            return scores
+
+        origins = batch.origins.detach().to(device=device, dtype=scene.params.dtype)[keep]
+        dirs = batch.dirs.detach().to(device=device, dtype=scene.params.dtype)[keep]
+        residual = residual[keep]
+        sigma = float(getattr(config, "visual_hull_birth_region_sigma", 1.5))
+        sigma = max(sigma, 1e-3)
+
+        depth_gt = getattr(batch, "depth_gt", None)
+        if depth_gt is not None:
+            depth = depth_gt.detach().to(device=device, dtype=scene.params.dtype)[keep]
+            depth_ok = torch.isfinite(depth) & (depth > config.near_plane) & (depth < config.far_plane)
+        else:
+            depth_ok = torch.zeros_like(residual, dtype=torch.bool)
+
+        queued_anchors = anchors[valid]
+        queued_scales = scales[valid]
+        if bool(depth_ok.any().item()):
+            points = origins[depth_ok] + dirs[depth_ok] * depth[depth_ok].unsqueeze(-1)
+            diff = (points[:, None, :] - queued_anchors[None, :, :]) / (queued_scales[None, :, :] * sigma)
+            dist2 = diff.pow(2).sum(dim=-1)
+            weights = torch.exp(-0.5 * dist2)
+            res = residual[depth_ok]
+        else:
+            # Silhouette-only fallback: a region is responsible for a ray
+            # when the ray passes near its support box center.
+            offset = queued_anchors[None, :, :] - origins[:, None, :]
+            t = (offset * dirs[:, None, :]).sum(dim=-1)
+            closest = origins[:, None, :] + t.unsqueeze(-1) * dirs[:, None, :]
+            radius = queued_scales.norm(dim=-1).clamp_min(1e-3) * sigma
+            dist2 = ((queued_anchors[None, :, :] - closest).norm(dim=-1) / radius[None, :]).pow(2)
+            in_segment = (t > config.near_plane) & (t < config.far_plane)
+            weights = torch.exp(-0.5 * dist2) * in_segment.to(scene.params.dtype)
+            res = residual
+
+        denom = weights.sum(dim=0).clamp_min(1.0).sqrt()
+        queued_scores = (weights * res[:, None]).sum(dim=0) / denom
+        scores = torch.zeros(scene.K, device=device, dtype=scene.params.dtype)
+        scores[valid] = queued_scores
+        return scores
 
 
 class RaySampleBatch:
@@ -826,6 +1063,12 @@ def train(
     HEARTBEAT_S = 60.0
     last_heartbeat = time.time()
     prev_shape_grad_eps_by_idx: dict[int, float] = {}
+    birth_interval = int(getattr(config, "visual_hull_birth_interval", 0) or 0)
+    birth_count = int(getattr(config, "visual_hull_birth_count", 0) or 0)
+    birth_stop_fraction = float(getattr(config, "visual_hull_birth_stop_fraction", 0.5))
+    birth_strategy = str(getattr(config, "visual_hull_birth_strategy", "residual"))
+    if birth_strategy not in {"residual", "scheduled", "hybrid"}:
+        raise ValueError(f"unknown visual_hull_birth_strategy: {birth_strategy}")
 
     for it in range(config.num_iterations):
         batch = ray_sampler(rays_per_batch)
@@ -838,6 +1081,7 @@ def train(
         mu_eff = _mu_gate_schedule(config, it)
         lambda_norm_eff = _norm_reg_schedule(config, it)
         lambda_overlap_eff = _overlap_schedule(config, it)
+        lambda_region_eff = _region_ownership_schedule(config, it)
 
         anomaly_ctx = torch.autograd.detect_anomaly(check_nan=True) if detect_anomaly else nullcontext()
         try:
@@ -872,6 +1116,8 @@ def train(
                     rgb_gt=batch.rgb_gt, mask_gt=batch.mask_gt,
                     normals_pred=batch.normals_gt,
                     depth_gt=getattr(batch, "depth_gt", None),
+                    ray_origins=batch.origins,
+                    ray_dirs=batch.dirs,
                     lambda_mask=config.lambda_mask,
                     lambda_sparse=config.lambda_sparse,
                     lambda_entropy=config.lambda_entropy,
@@ -879,16 +1125,28 @@ def train(
                     lambda_norm_reg=lambda_norm_eff,
                     lambda_depth=getattr(config, "lambda_depth", 0.0),
                     lambda_open_ray=config.lambda_open_ray,
+                    lambda_nsq_carve=getattr(config, "lambda_nsq_carve", 0.0),
                     lambda_overlap=lambda_overlap_eff,
+                    lambda_region_ownership=lambda_region_eff,
                     lambda_edge_mask=getattr(config, "lambda_edge_mask", 0.0),
                     lambda_shape_box=getattr(config, "lambda_shape_box", 0.0),
                     shape_box_threshold=getattr(config, "shape_box_threshold", 0.30),
+                    region_anchor_margin=getattr(config, "region_anchor_margin", 1.0),
+                    region_scale_growth=getattr(config, "region_scale_growth", 1.5),
                     hole_ray_gt=getattr(batch, "hole_ray_gt", None),
                     edge_weight_gt=getattr(batch, "edge_weight_gt", None),
                     mask_loss_type=getattr(config, "mask_loss_type", "bce"),
                     normal_loss_type=getattr(config, "normal_loss_type", "l1"),
                     masked_loss_norm_mode=getattr(config, "masked_loss_norm_mode", "global_mean"),
                     primitive_reg_average_mode=getattr(config, "primitive_reg_average_mode", "alive"),
+                    mu=mu_eff,
+                    theta_min=theta_min_eff,
+                    theta_min_nsq=getattr(config, "theta_min_nsq", config.theta_min),
+                    gate_mode=config.gate_mode,
+                    paper_literal_theta_eps=config.paper_literal_theta_eps,
+                    nsq_carve_samples=getattr(config, "nsq_carve_samples", 5),
+                    nsq_carve_depth_band=getattr(config, "nsq_carve_depth_band", 0.08),
+                    nsq_carve_residual_threshold=getattr(config, "nsq_carve_residual_threshold", 0.05),
                 )
                 timings["loss"] += time.time() - t0
 
@@ -1064,6 +1322,8 @@ def train(
 
         if it % config.pruning_interval == 0 and it >= config.warmup_iterations:
             t0 = time.time()
+            adaptive_killed = 0
+            adaptive_target = _adaptive_prune_target(config, it)
             prune(scene, config, verbose=(log_fn is not None))
             # View-dependent pruning (paper §4.2): runs at a coarser
             # cadence than the fast α/scale prune because it requires
@@ -1080,6 +1340,21 @@ def train(
                     theta_min=theta_min_eff,
                     verbose=(log_fn is not None),
                 )
+            if adaptive_target > 0 and scene.num_alive > adaptive_target:
+                adaptive_killed = prune_to_active_budget(
+                    scene, ray_sampler, config,
+                    target_alive=adaptive_target,
+                    num_probe_rays=min(config.view_prune_probe_rays, rays_per_batch * 8),
+                    foreground_only=getattr(config, "view_prune_foreground_only", True),
+                    min_foreground_rays=config.view_prune_min_foreground_rays,
+                    min_distinct_views=config.view_prune_min_distinct_views,
+                    mu=mu_eff,
+                    theta_min=theta_min_eff,
+                    verbose=(log_fn is not None),
+                )
+            if adaptive_target > 0:
+                parts["adaptive_prune_target"] = adaptive_target
+                parts["adaptive_prune_killed"] = adaptive_killed
             timings["prune"] += time.time() - t0
 
         if (
@@ -1089,6 +1364,45 @@ def train(
         ):
             reset_opacity(scene, config, verbose=(log_fn is not None))
 
+        if (
+            birth_interval > 0
+            and birth_count > 0
+            and it > 0
+            and it % birth_interval == 0
+            and (it / max(config.num_iterations, 1)) <= birth_stop_fraction
+        ):
+            from clearmesh.dualprim.view_init import activate_visual_hull_regions
+
+            score_tensor = None
+            min_score = None
+            label = birth_strategy
+            if birth_strategy in {"residual", "hybrid"}:
+                score_tensor = _visual_hull_birth_scores(scene, batch, render, config)
+                min_score = float(getattr(config, "visual_hull_birth_min_score", 1e-4))
+            n_born, born_idx, born_scores = activate_visual_hull_regions(
+                scene, birth_count, scores=score_tensor, min_score=min_score,
+                return_details=True,
+            )
+            if n_born == 0 and birth_strategy == "hybrid":
+                n_born, born_idx, born_scores = activate_visual_hull_regions(
+                    scene, birth_count, return_details=True,
+                )
+                label = "hybrid-fallback"
+            if n_born > 0:
+                parts["birth_count"] = n_born
+                parts["birth_strategy"] = label
+                parts["birth_indices"] = born_idx
+                if born_scores:
+                    parts["birth_score_max"] = max(born_scores)
+                    parts["birth_score_min"] = min(born_scores)
+                print(
+                    f"[birth/visual_hull/{label}] activated {n_born} queued primitives "
+                    f"at it={it}; alive={scene.num_alive}/{scene.K}"
+                    + (f" score=[{min(born_scores):.4g},{max(born_scores):.4g}]"
+                       if born_scores else ""),
+                    flush=True,
+                )
+
         if it % config.log_interval == 0:
             parts["iter"] = it
             parts["alive"] = scene.num_alive
@@ -1096,6 +1410,7 @@ def train(
             parts["mu_gate_eff"] = mu_eff
             parts["lambda_norm_eff"] = lambda_norm_eff
             parts["lambda_overlap_eff"] = lambda_overlap_eff
+            parts["lambda_region_eff"] = lambda_region_eff
             if scene.num_alive > 0:
                 psq_eps_alive = scene.psq_shape()[scene.alive].reshape(-1)
                 eps_q = torch.quantile(
@@ -1285,4 +1600,8 @@ def _save_checkpoint(scene: DualPrimScene, path: str, it: int):
     }
     if scene.lighting_mlp is not None:
         state["lighting_mlp"] = scene.lighting_mlp.state_dict()
+    for name in ("region_anchors", "region_scales", "region_active"):
+        value = getattr(scene, name, None)
+        if value is not None:
+            state[name] = value.detach().cpu()
     torch.save(state, out)

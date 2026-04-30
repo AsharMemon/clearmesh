@@ -169,6 +169,7 @@ def export_scene(
     config: DualPrimConfig,
     *,
     union_all: bool = False,
+    require_union: bool = False,
 ) -> tuple[trimesh.Trimesh, List[trimesh.Trimesh]]:
     """Export the full scene to a single mesh + per-primitive meshes.
 
@@ -180,6 +181,8 @@ def export_scene(
                    a single watertight scene mesh (slow but clean).
                    If False, just concatenate (fast, not watertight
                    across primitives).
+        require_union: if True, raise on union failure instead of silently
+                       returning a preview concatenate.
 
     Returns:
         scene_mesh: the single exported mesh
@@ -207,6 +210,12 @@ def export_scene(
         try:
             scene_mesh = trimesh.boolean.union(per_prim)
         except Exception as e:
+            if require_union:
+                raise RuntimeError(
+                    "DualPrim fused export failed. Install/use a robust "
+                    "boolean backend such as manifold3d, or rerun with "
+                    "--allow-preview-export for debug-only concatenation."
+                ) from e
             warnings.warn(f"[dualprim/export] union failed ({e}); concatenating")
             scene_mesh = trimesh.util.concatenate(per_prim)
     else:
