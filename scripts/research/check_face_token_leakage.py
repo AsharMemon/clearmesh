@@ -20,7 +20,6 @@ if str(REPO_ROOT) not in sys.path:
 from clearmesh.mesh_heads.face_tokens import (  # noqa: E402
     canonicalize_mesh_faces_paper_zyx,
     dequantize_normalized_points,
-    fit_face_token_transform,
 )
 
 
@@ -118,8 +117,10 @@ def _identity_retokenization_report(tokens: np.ndarray, num_bins: int, within_fa
         num_bins=num_bins,
     ).reshape(-1, 3, 3)
     flat_vertices = face_vertices.reshape(-1, 3)
-    transform = fit_face_token_transform(flat_vertices)
-    normalized_vertices = transform.normalize(flat_vertices)
+    # The decoded points are already normalized bin centers. Re-fitting a new
+    # mesh transform here can expand the bin-center bounds and shift tokens by
+    # one bin, producing false "identity drift" reports on valid token files.
+    normalized_vertices = flat_vertices
     faces = np.arange(len(flat_vertices), dtype=np.int64).reshape(-1, 3)
     roundtrip, _ = canonicalize_mesh_faces_paper_zyx(
         normalized_vertices,
