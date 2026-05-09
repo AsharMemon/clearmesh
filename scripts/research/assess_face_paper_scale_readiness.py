@@ -208,10 +208,26 @@ def _run_settings(run_summary: dict[str, Any] | None) -> dict[str, Any]:
 def _dataset_counts(run_summary: dict[str, Any] | None, train_teacher: dict[str, Any] | None, test_teacher: dict[str, Any] | None) -> dict[str, int]:
     train = int((_summary(train_teacher).get("attempted") or 0))
     test = int((_summary(test_teacher).get("attempted") or 0))
-    nested = run_summary.get("split") if run_summary else None
+
+    if not run_summary:
+        return {"train": train, "test": test, "total": train + test}
+
+    # Full runs often evaluate a bounded train/test subset, so eval attempts can
+    # badly undercount the real corpus. Prefer the integrity-checked split
+    # counts written by the strict token-hash split gate when available.
+    split_integrity = run_summary.get("split_integrity")
+    if isinstance(split_integrity, dict):
+        train_info = split_integrity.get("train")
+        test_info = split_integrity.get("test")
+        if isinstance(train_info, dict):
+            train = int(train_info.get("sample_count") or train_info.get("valid_count") or train)
+        if isinstance(test_info, dict):
+            test = int(test_info.get("sample_count") or test_info.get("valid_count") or test)
+
+    nested = run_summary.get("split")
     if isinstance(nested, dict):
-        train = int(nested.get("train") or train)
-        test = int(nested.get("test") or test)
+        train = int(nested.get("train_count") or nested.get("train") or train)
+        test = int(nested.get("test_count") or nested.get("test") or test)
     return {"train": train, "test": test, "total": train + test}
 
 

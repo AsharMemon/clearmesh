@@ -62,6 +62,8 @@ SPLIT_INTEGRITY_IDENTITY_LIMIT="${SPLIT_INTEGRITY_IDENTITY_LIMIT:-64}"
 EVAL_LIMIT="${EVAL_LIMIT:-0}"
 AR_LIMIT="${AR_LIMIT:-5}"
 AR_FACE_LIMIT="${AR_FACE_LIMIT:-0}"
+TEACHER_PREFIX_LIMIT="${TEACHER_PREFIX_LIMIT:-0}"
+TEACHER_PREFIX_FACE_COUNTS="${TEACHER_PREFIX_FACE_COUNTS:-1 4 16}"
 PREDICTED_LIMIT="${PREDICTED_LIMIT:-5}"
 PREDICTED_FACE_LIMIT="${PREDICTED_FACE_LIMIT:-0}"
 TEACHER_FORCED_LIMIT="${TEACHER_FORCED_LIMIT:-0}"
@@ -172,15 +174,23 @@ eval_dataset() {
   local face_limit="$5"
   local export_dir="$6"
   local face_count_mode="${7:-gt}"
+  local teacher_prefix_faces="${8:-0}"
   local output_name="${split_name}_${generation_mode}"
   if [ "$face_count_mode" != "gt" ]; then
     output_name="${output_name}_${face_count_mode}_count"
   fi
+  if [ "$teacher_prefix_faces" -gt 0 ]; then
+    output_name="${output_name}_prefix${teacher_prefix_faces}"
+  fi
   local output="$RUN_DIR/eval/${output_name}.json"
   local export_args=()
+  local prefix_args=()
   if [ -n "$export_dir" ]; then
     mkdir -p "$export_dir"
     export_args+=(--export-dir "$export_dir")
+  fi
+  if [ "$teacher_prefix_faces" -gt 0 ]; then
+    prefix_args+=(--teacher-prefix-faces "$teacher_prefix_faces")
   fi
   python scripts/research/eval_face_paper_faithful.py \
     --checkpoint "$CHECKPOINT" \
@@ -194,6 +204,7 @@ eval_dataset() {
     --pair-samples "$PAIR_SAMPLES" \
     --device "$DEVICE" \
     --log-every 1 \
+    "${prefix_args[@]}" \
     "${export_args[@]}"
 }
 
@@ -209,6 +220,13 @@ if [ "$AR_LIMIT" -gt 0 ]; then
   fi
   eval_dataset train "$TRAIN_DIR" autoregressive "$AR_LIMIT" "$AR_FACE_LIMIT" "$train_export" gt
   eval_dataset test "$TEST_DIR" autoregressive "$AR_LIMIT" "$AR_FACE_LIMIT" "$test_export" gt
+fi
+
+if [ "$TEACHER_PREFIX_LIMIT" -gt 0 ]; then
+  for prefix_faces in $TEACHER_PREFIX_FACE_COUNTS; do
+    eval_dataset train "$TRAIN_DIR" autoregressive "$TEACHER_PREFIX_LIMIT" "$AR_FACE_LIMIT" "" gt "$prefix_faces"
+    eval_dataset test "$TEST_DIR" autoregressive "$TEACHER_PREFIX_LIMIT" "$AR_FACE_LIMIT" "" gt "$prefix_faces"
+  done
 fi
 
 if [ "$PREDICTED_LIMIT" -gt 0 ]; then
@@ -267,6 +285,8 @@ summary = {
         "train_limit": int("$TRAIN_LIMIT"),
         "ar_limit": int("$AR_LIMIT"),
         "ar_face_limit": int("$AR_FACE_LIMIT"),
+        "teacher_prefix_limit": int("$TEACHER_PREFIX_LIMIT"),
+        "teacher_prefix_face_counts": "$TEACHER_PREFIX_FACE_COUNTS",
         "predicted_limit": int("$PREDICTED_LIMIT"),
         "predicted_face_limit": int("$PREDICTED_FACE_LIMIT"),
         "split_integrity_identity_limit": int("$SPLIT_INTEGRITY_IDENTITY_LIMIT"),
@@ -279,6 +299,10 @@ summary = {
         "test_autoregressive": (read(run / "eval" / "test_autoregressive.json") or {}).get("summary"),
         "train_autoregressive_predicted_count": (read(run / "eval" / "train_autoregressive_predicted_count.json") or {}).get("summary"),
         "test_autoregressive_predicted_count": (read(run / "eval" / "test_autoregressive_predicted_count.json") or {}).get("summary"),
+        "teacher_prefix": {
+            path.stem: (read(path) or {}).get("summary")
+            for path in sorted((run / "eval").glob("*_autoregressive_prefix*.json"))
+        },
     },
 }
 (run / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")

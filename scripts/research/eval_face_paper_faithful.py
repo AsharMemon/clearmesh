@@ -72,10 +72,18 @@ def _generate_tokens(
     stop_on_eos: bool = False,
     eos_threshold: float = 0.5,
     min_faces: int = 1,
+    teacher_prefix_tokens: np.ndarray | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:  # type: ignore[no-untyped-def]
     import torch
 
     point_tensor = torch.as_tensor(point_features, dtype=torch.float32, device=device).unsqueeze(0)
+    teacher_prefix = None
+    teacher_prefix_count = 0
+    if teacher_prefix_tokens is not None:
+        teacher_prefix_array = np.asarray(teacher_prefix_tokens, dtype=np.int64).reshape(-1, 9)[:face_count]
+        if len(teacher_prefix_array):
+            teacher_prefix = torch.as_tensor(teacher_prefix_array, dtype=torch.long, device=device)
+            teacher_prefix_count = int(len(teacher_prefix_array))
     generated: list[np.ndarray] = []
     eos_probs: list[float] = []
     stopped_on_eos = False
@@ -85,7 +93,10 @@ def _generate_tokens(
             previous_face = torch.full((1, 9), -1, dtype=torch.long, device=device)
             for position in range(face_count):
                 hidden = model.incremental_hidden_step(previous_face, position, cache)
-                next_face = _decode_next_face_from_hidden(model, hidden, num_bins, device, decode_head)
+                if teacher_prefix is not None and position < teacher_prefix_count:
+                    next_face = teacher_prefix[position : position + 1]
+                else:
+                    next_face = _decode_next_face_from_hidden(model, hidden, num_bins, device, decode_head)
                 generated.append(next_face.squeeze(0).detach().cpu().numpy().astype(np.int64))
                 eos_prob = _eos_probability(model, hidden)
                 if eos_prob is not None:
@@ -104,6 +115,8 @@ def _generate_tokens(
                 else:
                     hidden = model.hidden(point_tensor, input_faces)[:, -1:, :]
                     next_face = _decode_next_face_from_hidden(model, hidden, num_bins, device, decode_head)
+                if teacher_prefix is not None and position < teacher_prefix_count:
+                    next_face = teacher_prefix[position : position + 1]
                 generated.append(next_face.squeeze(0).detach().cpu().numpy().astype(np.int64))
                 eos_prob = _eos_probability(model, hidden)
                 if eos_prob is not None:
@@ -118,6 +131,7 @@ def _generate_tokens(
     return np.stack(generated, axis=0), {
         "stopped_on_eos": bool(stopped_on_eos),
         "predicted_face_count": int(len(generated)),
+        "teacher_prefix_faces": int(min(teacher_prefix_count, len(generated))),
         "eos_probs": eos_probs,
         "last_eos_prob": eos_probs[-1] if eos_probs else None,
     }
@@ -252,10 +266,23 @@ def _aggregate(items: list[dict[str, Any]]) -> dict[str, Any]:
         "teacher_forced_slot_accuracy",
         "teacher_forced_slot_loss",
         "generated_slot_accuracy",
+        "first_face_teacher_rank_by_slot",
+        "first_face_teacher_target_prob_by_slot",
+        "first_face_teacher_entropy_by_slot",
     ):
         mean_value = _mean_slot_metric(key)
         if mean_value is not None:
             payload[f"mean_{key}"] = mean_value
+    for key in (
+        "first_face_teacher_rank_mean",
+        "first_face_teacher_top1_accuracy",
+        "first_face_teacher_target_prob_mean",
+        "first_face_teacher_entropy_mean",
+        "teacher_prefix_faces",
+    ):
+        values = [float(item[key]) for item in items if item.get(key) is not None]
+        if values:
+            payload[f"mean_{key}"] = float(np.mean(values))
     return payload
 
 
@@ -366,6 +393,37 @@ def _generated_vs_teacher_metrics(generated_tokens: np.ndarray, teacher_tokens: 
     }
 
 
+def _first_face_logit_metrics(logits, target_faces, num_bins: int) -> dict[str, Any]:  # type: ignore[no-untyped-def]
+    import torch
+    import torch.nn.functional as F
+
+    if target_faces.shape[1] <= 0:
+        return {}
+    first_logits = logits[0, 0, :, :num_bins].to(dtype=torch.float32)
+    first_targets = target_faces[0, 0, :].to(dtype=torch.long)
+    valid = first_targets.ge(0) & first_targets.lt(num_bins)
+    if not bool(valid.all()):
+        return {}
+    probs = F.softmax(first_logits, dim=-1)
+    log_probs = F.log_softmax(first_logits, dim=-1)
+    target_scores = first_logits.gather(1, first_targets.unsqueeze(1)).squeeze(1)
+    ranks = first_logits.gt(target_scores.unsqueeze(1)).sum(dim=1) + 1
+    top1 = torch.argmax(first_logits, dim=-1)
+    target_probs = probs.gather(1, first_targets.unsqueeze(1)).squeeze(1)
+    entropy = -(probs * log_probs).sum(dim=-1)
+    return {
+        "first_face_teacher_rank_by_slot": [int(value) for value in ranks.detach().cpu().tolist()],
+        "first_face_teacher_rank_mean": float(ranks.to(torch.float32).mean().detach().cpu()),
+        "first_face_teacher_top1_accuracy": float(top1.eq(first_targets).to(torch.float32).mean().detach().cpu()),
+        "first_face_teacher_target_prob_by_slot": [float(value) for value in target_probs.detach().cpu().tolist()],
+        "first_face_teacher_target_prob_mean": float(target_probs.mean().detach().cpu()),
+        "first_face_teacher_entropy_by_slot": [float(value) for value in entropy.detach().cpu().tolist()],
+        "first_face_teacher_entropy_mean": float(entropy.mean().detach().cpu()),
+        "first_face_teacher_tokens": [int(value) for value in first_targets.detach().cpu().tolist()],
+        "first_face_top1_tokens": [int(value) for value in top1.detach().cpu().tolist()],
+    }
+
+
 def _teacher_forced_metrics(model, point_features, teacher_tokens, max_faces: int, num_bins: int, device, decode_head: str):  # type: ignore[no-untyped-def]
     import torch
     import torch.nn.functional as F
@@ -390,6 +448,7 @@ def _teacher_forced_metrics(model, point_features, teacher_tokens, max_faces: in
         accuracy = pred.eq(target_faces).to(torch.float32).mean()
         slot_accuracy = pred.eq(target_faces).to(torch.float32).mean(dim=(0, 1))
         slot_loss = losses.mean(dim=(0, 1))
+        first_face_metrics = _first_face_logit_metrics(logits, target_faces, num_bins)
         eos_loss = None
         eos_accuracy = None
         eos_logits = model.eos_logits_from_hidden(hidden) if hasattr(model, "eos_logits_from_hidden") else None
@@ -403,6 +462,7 @@ def _teacher_forced_metrics(model, point_features, teacher_tokens, max_faces: in
         "teacher_forced_accuracy": float(accuracy.detach().cpu()),
         "teacher_forced_slot_accuracy": [float(value) for value in slot_accuracy.detach().cpu().tolist()],
         "teacher_forced_slot_loss": [float(value) for value in slot_loss.detach().cpu().tolist()],
+        **first_face_metrics,
         "teacher_forced_eos_loss": None if eos_loss is None else float(eos_loss.detach().cpu()),
         "teacher_forced_eos_accuracy": None if eos_accuracy is None else float(eos_accuracy.detach().cpu()),
     }
@@ -419,6 +479,15 @@ def main() -> int:
     parser.add_argument("--face-count-mode", choices=["gt", "max", "predicted"], default="gt")
     parser.add_argument("--generation-mode", choices=["autoregressive", "teacher_forced"], default="autoregressive")
     parser.add_argument("--disable-incremental-generation", action="store_true")
+    parser.add_argument(
+        "--teacher-prefix-faces",
+        type=int,
+        default=0,
+        help=(
+            "For autoregressive diagnostics, feed the first N ground-truth faces "
+            "before free-running. This isolates first-face/order collapse from later exposure bias."
+        ),
+    )
     parser.add_argument("--eos-threshold", type=float, default=0.5)
     parser.add_argument("--min-generated-faces", type=int, default=1)
     parser.add_argument(
@@ -435,6 +504,8 @@ def main() -> int:
         raise SystemExit("--eos-threshold must be in [0, 1]")
     if args.min_generated_faces < 1:
         raise SystemExit("--min-generated-faces must be >= 1")
+    if args.teacher_prefix_faces < 0:
+        raise SystemExit("--teacher-prefix-faces must be >= 0")
 
     import torch
 
@@ -512,6 +583,9 @@ def main() -> int:
                 decode_head,
             )
         else:
+            teacher_prefix = None
+            if args.teacher_prefix_faces > 0:
+                teacher_prefix = teacher_tokens[: min(int(args.teacher_prefix_faces), int(generation_cap), len(teacher_tokens))]
             generated_tokens, generation_meta = _generate_tokens(
                 model,
                 point_features,
@@ -523,6 +597,7 @@ def main() -> int:
                 stop_on_eos=args.face_count_mode == "predicted",
                 eos_threshold=args.eos_threshold,
                 min_faces=args.min_generated_faces,
+                teacher_prefix_tokens=teacher_prefix,
             )
         generated_face_count = int(len(generated_tokens))
         teacher_tokens_capped = teacher_tokens[:reference_face_count]
@@ -580,6 +655,7 @@ def main() -> int:
             "predicted_face_count": int(generation_meta.get("predicted_face_count") or generated_face_count),
             "predicted_to_reference_face_ratio": float(generated_face_count / max(1, reference_face_count)),
             "stopped_on_eos": bool(generation_meta.get("stopped_on_eos")),
+            "teacher_prefix_faces": int(generation_meta.get("teacher_prefix_faces") or 0),
             "last_eos_prob": generation_meta.get("last_eos_prob"),
             "sample_sec": float(sample_sec),
             "faces_per_sec": float(generated_face_count / sample_sec),
@@ -610,6 +686,7 @@ def main() -> int:
                         "path": path.name,
                         "generation_mode": args.generation_mode,
                         "incremental_generation": not args.disable_incremental_generation,
+                        "teacher_prefix_faces": int(generation_meta.get("teacher_prefix_faces") or 0),
                         "face_count": int(generated_face_count),
                         "reference_face_count": int(reference_face_count),
                         "stopped_on_eos": bool(generation_meta.get("stopped_on_eos")),
@@ -634,6 +711,7 @@ def main() -> int:
         "generation_face_limit": int(args.generation_face_limit),
         "generation_mode": args.generation_mode,
         "incremental_generation": bool(not args.disable_incremental_generation),
+        "teacher_prefix_faces": int(args.teacher_prefix_faces),
         "summary": _aggregate(results),
         "results": results,
     }

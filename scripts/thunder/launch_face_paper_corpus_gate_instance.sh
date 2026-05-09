@@ -68,6 +68,8 @@ CACHE_FPS_INDICES="${CACHE_FPS_INDICES:-0}"
 TEACHER_FORCED_LIMIT="${TEACHER_FORCED_LIMIT:-0}"
 AR_LIMIT="${AR_LIMIT:-20}"
 AR_FACE_LIMIT="${AR_FACE_LIMIT:-0}"
+TEACHER_PREFIX_LIMIT="${TEACHER_PREFIX_LIMIT:-0}"
+TEACHER_PREFIX_FACE_COUNTS="${TEACHER_PREFIX_FACE_COUNTS:-1 4 16}"
 PREDICTED_LIMIT="${PREDICTED_LIMIT:-5}"
 PREDICTED_FACE_LIMIT="${PREDICTED_FACE_LIMIT:-0}"
 PAIR_SAMPLES="${PAIR_SAMPLES:-500}"
@@ -359,6 +361,8 @@ export CACHE_FPS_INDICES=$(printf '%q' "$CACHE_FPS_INDICES")
 export TEACHER_FORCED_LIMIT=$(printf '%q' "$TEACHER_FORCED_LIMIT")
 export AR_LIMIT=$(printf '%q' "$AR_LIMIT")
 export AR_FACE_LIMIT=$(printf '%q' "$AR_FACE_LIMIT")
+export TEACHER_PREFIX_LIMIT=$(printf '%q' "$TEACHER_PREFIX_LIMIT")
+export TEACHER_PREFIX_FACE_COUNTS=$(printf '%q' "$TEACHER_PREFIX_FACE_COUNTS")
 export PREDICTED_LIMIT=$(printf '%q' "$PREDICTED_LIMIT")
 export PREDICTED_FACE_LIMIT=$(printf '%q' "$PREDICTED_FACE_LIMIT")
 export PAIR_SAMPLES=$(printf '%q' "$PAIR_SAMPLES")
@@ -450,6 +454,8 @@ cat > "$DOWNLOAD_ROOT/run_info.json" <<JSON
   "cache_fps_indices": $([ "$CACHE_FPS_INDICES" = "1" ] && echo true || echo false),
   "predicted_limit": $PREDICTED_LIMIT,
   "predicted_face_limit": $PREDICTED_FACE_LIMIT,
+  "teacher_prefix_limit": $TEACHER_PREFIX_LIMIT,
+  "teacher_prefix_face_counts": "$TEACHER_PREFIX_FACE_COUNTS",
   "min_scale_dataset_samples": $MIN_SCALE_DATASET_SAMPLES,
   "run_remote_tests": $([ "$RUN_REMOTE_TESTS" = "1" ] && echo true || echo false)
 }

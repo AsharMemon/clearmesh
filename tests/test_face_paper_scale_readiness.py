@@ -36,6 +36,16 @@ def _settings(*, disable_augment: bool = False):
     }
 
 
+def _settings_with_split_integrity(*, train_count: int, test_count: int):
+    run_summary = _settings()
+    run_summary["split_integrity"] = {
+        "ok": True,
+        "train": {"sample_count": train_count, "valid_count": train_count},
+        "test": {"sample_count": test_count, "valid_count": test_count},
+    }
+    return run_summary
+
+
 def _settings_with_capacity(**capacity):
     settings = _settings()
     settings["settings"].update(capacity)
@@ -211,3 +221,34 @@ def test_paper_scale_readiness_uses_true_free_run_accuracy_for_ar_gate():
     )
     assert not report.scale_ready
     assert "train autoregressive free-run tokens do not match the learned targets closely enough" in report.blockers
+
+
+def test_paper_scale_readiness_prefers_split_integrity_counts_over_eval_attempts():
+    module = _load_module()
+    report = module.assess(
+        run_summary=_settings_with_split_integrity(train_count=4362, test_count=1091),
+        train_teacher=_eval_report(
+            attempted=256,
+            watertight=256,
+            accuracy=0.99,
+            loss=0.02,
+            mean_boundary_edges=0,
+            edge_pairing=1.0,
+            generation_mode="teacher_forced",
+        ),
+        train_ar=_eval_report(attempted=32, watertight=30, accuracy=0.98, loss=0.03, mean_boundary_edges=1, edge_pairing=0.998),
+        test_teacher=_eval_report(
+            attempted=256,
+            watertight=128,
+            accuracy=0.30,
+            loss=2.0,
+            mean_boundary_edges=20,
+            edge_pairing=0.8,
+            generation_mode="teacher_forced",
+        ),
+        test_ar=_eval_report(attempted=32, watertight=10, accuracy=0.30, loss=2.0, mean_boundary_edges=20, edge_pairing=0.8),
+        min_dataset_samples=1000,
+    )
+
+    assert report.metrics["dataset"] == {"train": 4362, "test": 1091, "total": 5453}
+    assert "bounded corpus is too small to justify promotion" not in report.blockers

@@ -40,9 +40,12 @@ def _row(
     }
 
 
-def _write_eval(path: Path, rows: list[dict]):
+def _write_eval(path: Path, rows: list[dict], *, summary: dict | None = None):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"results": rows, "summary": {"attempted": len(rows)}}), encoding="utf-8")
+    payload_summary = {"attempted": len(rows)}
+    if summary:
+        payload_summary.update(summary)
+    path.write_text(json.dumps({"results": rows, "summary": payload_summary}), encoding="utf-8")
 
 
 def test_analyzer_reports_early_divergence_and_generalization_gap(tmp_path):
@@ -77,3 +80,45 @@ def test_analyzer_reports_early_divergence_and_generalization_gap(tmp_path):
     assert train_ar["face_count_bins"][0]["count"] == 3
     assert report["diagnosis"]["generalization_gap"]["test_teacher_accuracy_mean"] == 0.05
     assert "exposure bias" in report["diagnosis"]["next_debug_hint"]
+
+
+def test_analyzer_identifies_underfit_first_face_and_generic_closed_mesh(tmp_path):
+    module = _load_module()
+    run = tmp_path / "run"
+    _write_eval(
+        run / "eval" / "train_teacher_forced.json",
+        [
+            _row(watertight=False, acc=0.75, teacher_acc=0.75, boundary=900, first_face=0),
+            _row(watertight=False, acc=0.76, teacher_acc=0.76, boundary=850, first_face=0),
+        ],
+    )
+    _write_eval(
+        run / "eval" / "test_teacher_forced.json",
+        [_row(watertight=False, acc=0.75, teacher_acc=0.75, boundary=900, first_face=0)],
+    )
+    _write_eval(
+        run / "eval" / "train_autoregressive.json",
+        [
+            _row(watertight=True, acc=0.03, teacher_acc=0.75, boundary=0, first_face=0),
+            _row(watertight=False, acc=0.04, teacher_acc=0.75, boundary=8, first_face=0),
+        ],
+    )
+    _write_eval(
+        run / "eval" / "test_autoregressive.json",
+        [_row(watertight=True, acc=0.08, teacher_acc=0.75, boundary=0, first_face=0)],
+    )
+    _write_eval(
+        run / "eval" / "test_autoregressive_predicted_count.json",
+        [_row(watertight=True, acc=0.08, teacher_acc=0.75, boundary=0, first_face=0)],
+        summary={"mean_predicted_to_reference_face_ratio": 12.0},
+    )
+
+    report = module.analyze(run)
+    modes = {mode["name"] for mode in report["diagnosis"]["failure_modes"]}
+
+    assert "teacher_forced_underfit" in modes
+    assert "first_face_collapse" in modes
+    assert "coordinate_close_but_topologically_broken" in modes
+    assert "generic_closed_mesh_not_target_reconstruction" in modes
+    assert "predicted_count_overrun" in modes
+    assert "teacher-forced reconstruction is still underfit" in report["diagnosis"]["next_debug_hint"]
