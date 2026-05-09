@@ -25,6 +25,15 @@ EVAL_NAMES = (
     "test_autoregressive_predicted_count",
 )
 
+PREFIX_EVAL_NAMES = (
+    "train_autoregressive_prefix1",
+    "train_autoregressive_prefix4",
+    "train_autoregressive_prefix16",
+    "test_autoregressive_prefix1",
+    "test_autoregressive_prefix4",
+    "test_autoregressive_prefix16",
+)
+
 
 FACE_BINS = ((0, 128), (129, 256), (257, 384), (385, 512), (513, 10_000_000))
 
@@ -220,7 +229,7 @@ def analyze(run_dir: Path, *, limit: int = 8) -> dict[str, Any]:
     eval_dir = run_dir / "eval"
     evals = {
         name: _eval_report(_load_json(eval_dir / f"{name}.json"), limit=limit)
-        for name in EVAL_NAMES
+        for name in (*EVAL_NAMES, *PREFIX_EVAL_NAMES)
     }
     train_ar = evals.get("train_autoregressive") or {}
     train_tf = evals.get("train_teacher_forced") or {}
@@ -228,6 +237,7 @@ def analyze(run_dir: Path, *, limit: int = 8) -> dict[str, Any]:
     test_ar = evals.get("test_autoregressive") or {}
     train_pred = evals.get("train_autoregressive_predicted_count") or {}
     test_pred = evals.get("test_autoregressive_predicted_count") or {}
+    prefix_diagnostics = _prefix_diagnostics(evals)
 
     return {
         "run_dir": str(run_dir),
@@ -250,7 +260,16 @@ def analyze(run_dir: Path, *, limit: int = 8) -> dict[str, Any]:
                 "train_ar_accuracy_mean": ((train_ar.get("metrics") or {}).get("generated_token_accuracy") or {}).get("mean"),
                 "test_ar_accuracy_mean": ((test_ar.get("metrics") or {}).get("generated_token_accuracy") or {}).get("mean"),
             },
-            "failure_modes": _failure_modes(train_tf, train_ar, test_tf, test_ar, train_pred, test_pred),
+            "prefix_diagnostics": prefix_diagnostics,
+            "failure_modes": _failure_modes(
+                train_tf,
+                train_ar,
+                test_tf,
+                test_ar,
+                train_pred,
+                test_pred,
+                prefix_diagnostics=prefix_diagnostics,
+            ),
             "next_debug_hint": _next_debug_hint(train_tf, train_ar, test_tf, test_ar),
         },
     }
@@ -268,6 +287,72 @@ def _first_face_rate(report: dict[str, Any]) -> float:
     return float(((report.get("early_divergence") or {}).get("first_face_rate")) or 0.0)
 
 
+def _prefix_faces_from_name(name: str) -> int:
+    suffix = name.rsplit("prefix", maxsplit=1)[-1]
+    try:
+        return int(suffix)
+    except ValueError:
+        return 0
+
+
+def _prefix_row(base: dict[str, Any], prefix: dict[str, Any], name: str) -> dict[str, Any]:
+    base_acc = _metric_mean(base, "generated_token_accuracy") or 0.0
+    prefix_acc = _metric_mean(prefix, "generated_token_accuracy") or 0.0
+    base_boundary = _metric_mean(base, "boundary_edges")
+    prefix_boundary = _metric_mean(prefix, "boundary_edges")
+    base_watertight = base.get("watertight_rate") or 0.0
+    prefix_watertight = prefix.get("watertight_rate") or 0.0
+    boundary_delta = None
+    if base_boundary is not None and prefix_boundary is not None:
+        boundary_delta = float(base_boundary - prefix_boundary)
+    return {
+        "name": name,
+        "teacher_prefix_faces": _prefix_faces_from_name(name),
+        "attempted": prefix.get("attempted"),
+        "generated_token_accuracy_mean": prefix_acc,
+        "generated_token_accuracy_gain": float(prefix_acc - base_acc),
+        "watertight_rate": prefix_watertight,
+        "watertight_rate_gain": float(prefix_watertight - base_watertight),
+        "boundary_edges_mean": prefix_boundary,
+        "boundary_edges_reduction": boundary_delta,
+        "edge_pairing_ratio_mean": _metric_mean(prefix, "edge_pairing_ratio"),
+        "first_face_rate": _first_face_rate(prefix),
+    }
+
+
+def _prefix_group_diagnostics(evals: dict[str, dict[str, Any] | None], split: str) -> dict[str, Any]:
+    base_name = f"{split}_autoregressive"
+    base = evals.get(base_name) or {}
+    prefix_rows = [
+        _prefix_row(base, prefix, name)
+        for name in PREFIX_EVAL_NAMES
+        if name.startswith(f"{split}_") and (prefix := evals.get(name))
+    ]
+    best_by_accuracy = max(prefix_rows, key=lambda row: row["generated_token_accuracy_mean"], default=None)
+    best_by_watertight = max(prefix_rows, key=lambda row: row["watertight_rate"], default=None)
+    best_boundary = min(
+        (row for row in prefix_rows if row["boundary_edges_mean"] is not None),
+        key=lambda row: row["boundary_edges_mean"],
+        default=None,
+    )
+    return {
+        "base_generated_token_accuracy_mean": _metric_mean(base, "generated_token_accuracy"),
+        "base_watertight_rate": base.get("watertight_rate"),
+        "base_boundary_edges_mean": _metric_mean(base, "boundary_edges"),
+        "prefixes": sorted(prefix_rows, key=lambda row: row["teacher_prefix_faces"]),
+        "best_by_accuracy": best_by_accuracy,
+        "best_by_watertight": best_by_watertight,
+        "best_by_boundary": best_boundary,
+    }
+
+
+def _prefix_diagnostics(evals: dict[str, dict[str, Any] | None]) -> dict[str, Any]:
+    return {
+        "train": _prefix_group_diagnostics(evals, "train"),
+        "test": _prefix_group_diagnostics(evals, "test"),
+    }
+
+
 def _failure_modes(
     train_tf: dict[str, Any],
     train_ar: dict[str, Any],
@@ -275,6 +360,8 @@ def _failure_modes(
     test_ar: dict[str, Any],
     train_pred: dict[str, Any],
     test_pred: dict[str, Any],
+    *,
+    prefix_diagnostics: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     modes: list[dict[str, Any]] = []
 
@@ -358,6 +445,40 @@ def _failure_modes(
                 "interpretation": "The model often fails to terminate at the right face count in product-style predicted-count inference.",
             }
         )
+
+    if prefix_diagnostics:
+        train_prefix = prefix_diagnostics.get("train") or {}
+        test_prefix = prefix_diagnostics.get("test") or {}
+        train_best = train_prefix.get("best_by_accuracy") or {}
+        test_best = test_prefix.get("best_by_accuracy") or {}
+        if train_ar_acc >= 0.90 and train_ar_wat < 0.80 and (train_best.get("watertight_rate") or 0.0) < 0.80:
+            modes.append(
+                {
+                    "name": "prefix_does_not_close_train_topology",
+                    "severity": "blocker",
+                    "evidence": {
+                        "train_ar_token_accuracy_mean": train_ar_acc,
+                        "train_ar_watertight_rate": train_ar_wat,
+                        "best_prefix_train_watertight_rate": train_best.get("watertight_rate"),
+                        "best_prefix_train_accuracy_gain": train_best.get("generated_token_accuracy_gain"),
+                    },
+                    "interpretation": "Even when early rollout is partially teacher-forced, a small number of remaining token mistakes can still break exact edge pairing.",
+                }
+            )
+        if test_tf_acc < 0.20 and (test_best.get("generated_token_accuracy_mean") or 0.0) < 0.20:
+            modes.append(
+                {
+                    "name": "prefix_does_not_rescue_heldout",
+                    "severity": "blocker",
+                    "evidence": {
+                        "test_teacher_accuracy_mean": test_tf_acc,
+                        "test_ar_token_accuracy_mean": test_ar_acc,
+                        "best_prefix_test_token_accuracy_mean": test_best.get("generated_token_accuracy_mean"),
+                        "best_prefix_test_accuracy_gain": test_best.get("generated_token_accuracy_gain"),
+                    },
+                    "interpretation": "Supplying correct early faces does not recover held-out rollouts, so the problem is not only first-face selection; the conditional distribution has not generalized.",
+                }
+            )
 
     return modes
 

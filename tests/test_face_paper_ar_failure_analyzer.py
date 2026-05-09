@@ -122,3 +122,48 @@ def test_analyzer_identifies_underfit_first_face_and_generic_closed_mesh(tmp_pat
     assert "generic_closed_mesh_not_target_reconstruction" in modes
     assert "predicted_count_overrun" in modes
     assert "teacher-forced reconstruction is still underfit" in report["diagnosis"]["next_debug_hint"]
+
+
+def test_analyzer_reports_teacher_prefix_diagnostics(tmp_path):
+    module = _load_module()
+    run = tmp_path / "run"
+    _write_eval(
+        run / "eval" / "train_teacher_forced.json",
+        [_row(watertight=True, acc=0.999, teacher_acc=0.999)],
+    )
+    _write_eval(
+        run / "eval" / "test_teacher_forced.json",
+        [_row(watertight=False, acc=0.1, teacher_acc=0.1, boundary=1000, first_face=0)],
+    )
+    _write_eval(
+        run / "eval" / "train_autoregressive.json",
+        [
+            _row(watertight=False, acc=0.95, teacher_acc=0.999, boundary=32, first_face=12),
+            _row(watertight=True, acc=1.0, teacher_acc=1.0),
+        ],
+    )
+    _write_eval(
+        run / "eval" / "train_autoregressive_prefix1.json",
+        [
+            _row(watertight=False, acc=0.96, teacher_acc=0.999, boundary=30, first_face=12),
+            _row(watertight=True, acc=1.0, teacher_acc=1.0),
+        ],
+    )
+    _write_eval(
+        run / "eval" / "test_autoregressive.json",
+        [_row(watertight=False, acc=0.03, teacher_acc=0.1, boundary=700, first_face=0)],
+    )
+    _write_eval(
+        run / "eval" / "test_autoregressive_prefix1.json",
+        [_row(watertight=False, acc=0.05, teacher_acc=0.1, boundary=650, first_face=0)],
+    )
+
+    report = module.analyze(run)
+    diagnosis = report["diagnosis"]
+    train_prefix = diagnosis["prefix_diagnostics"]["train"]
+    modes = {mode["name"] for mode in diagnosis["failure_modes"]}
+
+    assert train_prefix["best_by_accuracy"]["teacher_prefix_faces"] == 1
+    assert train_prefix["best_by_accuracy"]["generated_token_accuracy_gain"] > 0
+    assert "prefix_does_not_close_train_topology" in modes
+    assert "prefix_does_not_rescue_heldout" in modes
