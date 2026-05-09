@@ -31,3 +31,18 @@ Thumbs.db
 
 # Local Codex automation/report config
 .codex/
+
+# Local generated outputs and transfer artifacts
+.codex_outputs/
+eval_results/
+root@ssh2.vast.ai:/
+17590/
+scp/
+-P/
+-o/
+StrictHostKeyChecking=no/
+.clearmesh_state/
+artifacts/
+pointclouds/
+outputs/
+refs/

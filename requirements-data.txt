@@ -1,0 +1,10 @@
+# Data/corpus tooling for FACE/LATTICE training runs.
+# Keep this separate from the API runtime so production workers can stay lean.
+
+datasets>=2.20.0
+huggingface-hub>=0.23.0
+objaverse>=0.1.7
+fast-simplification>=0.1.13
+trimesh>=4.0.0
+scikit-image>=0.22.0
+networkx>=3.0
