@@ -294,7 +294,7 @@ def build_parser() -> argparse.ArgumentParser:
     tokens.add_argument(
         "--paper-within-face-order",
         choices=["preserve", "rotate_min_zyx", "sort_zyx"],
-        default="preserve",
+        default="rotate_min_zyx",
     )
     tokens.add_argument("--indexed-face-order", choices=["lex", "boundary_growth"], default="lex")
 
