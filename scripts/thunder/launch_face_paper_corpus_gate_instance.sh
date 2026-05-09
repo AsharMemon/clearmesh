@@ -65,6 +65,7 @@ CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-1000}"
 SAVE_CURRENT_CHECKPOINT="${SAVE_CURRENT_CHECKPOINT:-1}"
 PREFETCH_BATCHES="${PREFETCH_BATCHES:-1}"
 CACHE_FPS_INDICES="${CACHE_FPS_INDICES:-0}"
+DISABLE_AUGMENT="${DISABLE_AUGMENT:-0}"
 TEACHER_FORCED_LIMIT="${TEACHER_FORCED_LIMIT:-0}"
 AR_LIMIT="${AR_LIMIT:-20}"
 AR_FACE_LIMIT="${AR_FACE_LIMIT:-0}"
@@ -358,6 +359,7 @@ export CHECKPOINT_EVERY=$(printf '%q' "$CHECKPOINT_EVERY")
 export SAVE_CURRENT_CHECKPOINT=$(printf '%q' "$SAVE_CURRENT_CHECKPOINT")
 export PREFETCH_BATCHES=$(printf '%q' "$PREFETCH_BATCHES")
 export CACHE_FPS_INDICES=$(printf '%q' "$CACHE_FPS_INDICES")
+export DISABLE_AUGMENT=$(printf '%q' "$DISABLE_AUGMENT")
 export TEACHER_FORCED_LIMIT=$(printf '%q' "$TEACHER_FORCED_LIMIT")
 export AR_LIMIT=$(printf '%q' "$AR_LIMIT")
 export AR_FACE_LIMIT=$(printf '%q' "$AR_FACE_LIMIT")
@@ -452,6 +454,7 @@ cat > "$DOWNLOAD_ROOT/run_info.json" <<JSON
   "checkpoint_every": $CHECKPOINT_EVERY,
   "save_current_checkpoint": $([ "$SAVE_CURRENT_CHECKPOINT" = "1" ] && echo true || echo false),
   "cache_fps_indices": $([ "$CACHE_FPS_INDICES" = "1" ] && echo true || echo false),
+  "disable_augment": $([ "$DISABLE_AUGMENT" = "1" ] && echo true || echo false),
   "predicted_limit": $PREDICTED_LIMIT,
   "predicted_face_limit": $PREDICTED_FACE_LIMIT,
   "teacher_prefix_limit": $TEACHER_PREFIX_LIMIT,
