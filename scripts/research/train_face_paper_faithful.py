@@ -629,6 +629,11 @@ def main() -> int:
     )
     parser.add_argument("--selection-eval-batch-size", type=int, default=1)
     parser.add_argument(
+        "--skip-initial-selection-eval",
+        action="store_true",
+        help="Skip the step-1 selection pass; useful for large corpora where the first full eval dominates wall time.",
+    )
+    parser.add_argument(
         "--prefetch-batches",
         type=int,
         default=0,
@@ -837,7 +842,9 @@ def main() -> int:
             losses.append(loss_value)
             selection_loss_value = None
             selection_loss_elapsed_sec = None
-            if selection_eval_every > 0 and (step == 1 or step == args.steps or step % selection_eval_every == 0):
+            run_initial_selection = step == 1 and not args.skip_initial_selection_eval
+            run_periodic_selection = step == args.steps or step % selection_eval_every == 0
+            if selection_eval_every > 0 and (run_initial_selection or run_periodic_selection):
                 selection_started_at = time.perf_counter()
                 selection_loss_value = _evaluate_dataset_loss(
                     F,
