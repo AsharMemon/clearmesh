@@ -78,6 +78,9 @@ STRICT_ENGINE="${STRICT_ENGINE:-voxel_shell}"
 FALLBACK="${FALLBACK:-convex_hull}"
 TEST_RATIO="${TEST_RATIO:-0.2}"
 SEED="${SEED:-303}"
+DEDUPE_TOKEN_SPLIT="${DEDUPE_TOKEN_SPLIT:-1}"
+DEDUPE_COPY_MODE="${DEDUPE_COPY_MODE:-hardlink}"
+DEDUPED_SPLIT_DIR="${DEDUPED_SPLIT_DIR:-$CORPUS_DIR/split_pass_dedup_tokenhash}"
 
 # Paper training knobs.
 STEPS="${STEPS:-30000}"
@@ -184,11 +187,45 @@ if [ ! -d "$CORPUS_DIR/split_pass/train" ] || [ ! -d "$CORPUS_DIR/split_pass/tes
   exit 10
 fi
 
+TRAIN_SPLIT_PARENT="$CORPUS_DIR/split_pass"
+TRAIN_SPLIT_DIR="$TRAIN_SPLIT_PARENT/train"
+TEST_SPLIT_DIR="$TRAIN_SPLIT_PARENT/test"
+
+if [ "$DEDUPE_TOKEN_SPLIT" = "1" ]; then
+  COMBINED_SPLIT_MANIFEST="$CORPUS_DIR/split_pass_combined_manifest.jsonl"
+  run_step dedupe_token_split env \
+    SOURCE_SPLIT_DIR="$CORPUS_DIR/split_pass" \
+    COMBINED_SPLIT_MANIFEST="$COMBINED_SPLIT_MANIFEST" \
+    DEDUPED_SPLIT_DIR="$DEDUPED_SPLIT_DIR" \
+    DEDUPE_COPY_MODE="$DEDUPE_COPY_MODE" \
+    TEST_RATIO="$TEST_RATIO" \
+    SEED="$SEED" \
+    bash -c '
+      set -euo pipefail
+      rm -rf "$DEDUPED_SPLIT_DIR"
+      cat "$SOURCE_SPLIT_DIR/train/manifest.jsonl" "$SOURCE_SPLIT_DIR/test/manifest.jsonl" > "$COMBINED_SPLIT_MANIFEST"
+      python scripts/research/dedupe_face_token_split.py \
+        --manifest "$COMBINED_SPLIT_MANIFEST" \
+        --output-dir "$DEDUPED_SPLIT_DIR" \
+        --seed "$SEED" \
+        --test-ratio "$TEST_RATIO" \
+        --copy-mode "$DEDUPE_COPY_MODE" \
+        --path-mode absolute
+    '
+  run_step check_deduped_leakage python scripts/research/check_face_token_leakage.py \
+    --train-dir "$DEDUPED_SPLIT_DIR/train" \
+    --test-dir "$DEDUPED_SPLIT_DIR/test" \
+    --output "$DEDUPED_SPLIT_DIR/leakage_check.json"
+  TRAIN_SPLIT_PARENT="$DEDUPED_SPLIT_DIR"
+  TRAIN_SPLIT_DIR="$DEDUPED_SPLIT_DIR/train"
+  TEST_SPLIT_DIR="$DEDUPED_SPLIT_DIR/test"
+fi
+
 run_step train_eval env \
   DATA_RUN="$CORPUS_DIR" \
-  SPLIT_DIR="$CORPUS_DIR/split_pass" \
-  TRAIN_DIR="$CORPUS_DIR/split_pass/train" \
-  TEST_DIR="$CORPUS_DIR/split_pass/test" \
+  SPLIT_DIR="$TRAIN_SPLIT_PARENT" \
+  TRAIN_DIR="$TRAIN_SPLIT_DIR" \
+  TEST_DIR="$TEST_SPLIT_DIR" \
   RUN_NAME="$RUN_LABEL" \
   RUN_DIR="$RUN_DIR" \
   STEPS="$STEPS" \
@@ -253,13 +290,14 @@ for split in train test; do
   fi
 done
 
-run_step summary python - "$LAB_ROOT" "$CORPUS_DIR" "$RUN_DIR" <<'PY'
+run_step summary python - "$LAB_ROOT" "$CORPUS_DIR" "$RUN_DIR" "$TRAIN_SPLIT_PARENT" <<'PY'
 import json
 import sys
 from pathlib import Path
 lab = Path(sys.argv[1])
 corpus = Path(sys.argv[2])
 run = Path(sys.argv[3])
+split_parent = Path(sys.argv[4])
 
 def read(path):
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
@@ -267,7 +305,10 @@ summary = {
     "lab_root": str(lab),
     "corpus_dir": str(corpus),
     "run_dir": str(run),
+    "training_split_dir": str(split_parent),
     "corpus_summary": read(corpus / "pilot_summary.json"),
+    "deduped_split_summary": read(split_parent / "split_summary.json"),
+    "deduped_leakage": read(split_parent / "leakage_check.json"),
     "run_summary": read(run / "summary.json"),
     "scale_readiness": read(run / "scale_readiness.json"),
     "galleries": sorted(str(path) for path in lab.glob("*_contact_sheet.png")),
