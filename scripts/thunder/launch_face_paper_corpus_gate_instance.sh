@@ -31,6 +31,7 @@ REMOTE_PID="${REMOTE_PID:-/tmp/clearmesh_face_paper_corpus_gate.pid}"
 REMOTE_LAB_ROOT="${REMOTE_LAB_ROOT:-/tmp/clearmesh_face_paper_corpus_gate_$RUN_STAMP}"
 REQUIRE_NATIVE_MUON="${REQUIRE_NATIVE_MUON:-1}"
 RUN_REMOTE_TESTS="${RUN_REMOTE_TESTS:-1}"
+SYNC_HF_TOKEN="${SYNC_HF_TOKEN:-1}"
 
 # Bounded rung defaults. Override these for larger rungs after the gate passes.
 SELECT_TARGET="${SELECT_TARGET:-512}"
@@ -248,6 +249,15 @@ fi
 
 echo "Syncing repo to $INSTANCE_ID..."
 THUNDER_INSTANCE_ID="$INSTANCE_ID" "$REPO_ROOT/scripts/thunder/sync_repo.sh" "$INSTANCE_ID"
+
+if [ "$SYNC_HF_TOKEN" = "1" ]; then
+  if [ -n "${HF_TOKEN:-${HUGGINGFACE_HUB_TOKEN:-}}" ]; then
+    echo "Syncing Hugging Face token to $INSTANCE_ID..."
+    THUNDER_INSTANCE_ID="$INSTANCE_ID" "$REPO_ROOT/scripts/thunder/sync_hf_token.sh" "$INSTANCE_ID"
+  else
+    echo "HF_TOKEN/HUGGINGFACE_HUB_TOKEN not set locally; remote corpus downloads may be rate limited." >&2
+  fi
+fi
 
 remote_setup_log="$DOWNLOAD_ROOT/remote_setup_and_launch.log"
 setup_status=0

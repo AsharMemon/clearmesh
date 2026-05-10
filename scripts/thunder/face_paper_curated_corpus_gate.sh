@@ -6,6 +6,15 @@ set -euo pipefail
 
 cd "${REMOTE_REPO:-/home/ubuntu/clearmesh}"
 
+HF_ENV_PATH="${HF_ENV_PATH:-/home/ubuntu/.clearmesh_hf.env}"
+if [ -f "$HF_ENV_PATH" ]; then
+  # Source optional synced Hugging Face credentials without printing secrets.
+  set +u
+  # shellcheck disable=SC1090
+  . "$HF_ENV_PATH"
+  set -u
+fi
+
 LAB_ROOT="${LAB_ROOT:-/tmp/clearmesh_face_paper_corpus_gate_$(date -u +%Y%m%d_%H%M%S)}"
 CORPUS_DIR="${CORPUS_DIR:-$LAB_ROOT/corpus}"
 RUN_LABEL="${RUN_LABEL:-paper_corpus_gate_128_vec2048_muon_aug}"
