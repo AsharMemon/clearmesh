@@ -1,0 +1,291 @@
+#!/usr/bin/env bash
+# Launch one Thunder worker that turns a local Objaverse++ annotation shard into
+# a lean FACE strict-token corpus archive. Use many copies of this worker for
+# embarrassingly parallel 500k-scale corpus prep.
+set -euo pipefail
+
+TNR_BIN="${TNR_BIN:-/Users/Ashar/.tnr/bin/tnr}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+INSTANCE_ID="${1:-${THUNDER_INSTANCE_ID:-}}"
+CREATE_INSTANCE="${CREATE_INSTANCE:-1}"
+DELETE_ON_FAILURE="${DELETE_ON_FAILURE:-1}"
+CREATED_INSTANCE=0
+
+LOCAL_ANNOTATIONS_FILE="${LOCAL_ANNOTATIONS_FILE:-}"
+if [ -z "$LOCAL_ANNOTATIONS_FILE" ]; then
+  echo "Set LOCAL_ANNOTATIONS_FILE to a local shard JSONL." >&2
+  exit 2
+fi
+if [ ! -f "$LOCAL_ANNOTATIONS_FILE" ]; then
+  echo "Annotation shard not found: $LOCAL_ANNOTATIONS_FILE" >&2
+  exit 2
+fi
+
+GPU="${GPU:-a6000}"
+MODE="${MODE:-prototyping}"
+VCPUS="${VCPUS:-16}"
+PRIMARY_DISK="${PRIMARY_DISK:-300}"
+TEMPLATE="${TEMPLATE:-base}"
+WAIT_INTERVAL_SEC="${WAIT_INTERVAL_SEC:-10}"
+WAIT_TIMEOUT_SEC="${WAIT_TIMEOUT_SEC:-1800}"
+RUN_STAMP="${RUN_STAMP:-$(date -u +%Y%m%d_%H%M%S)_$(basename "$LOCAL_ANNOTATIONS_FILE" .jsonl)}"
+DOWNLOAD_ROOT="${DOWNLOAD_ROOT:-$REPO_ROOT/.codex_outputs/face_corpus_shard_setup_$RUN_STAMP}"
+REMOTE_REPO="${REMOTE_REPO:-/home/ubuntu/clearmesh}"
+REMOTE_VENV="${REMOTE_VENV:-/home/ubuntu/clearmesh-data-venv}"
+REMOTE_LOG="${REMOTE_LOG:-/tmp/clearmesh_face_corpus_shard.nohup.log}"
+REMOTE_PID="${REMOTE_PID:-/tmp/clearmesh_face_corpus_shard.pid}"
+REMOTE_LAB_ROOT="${REMOTE_LAB_ROOT:-/tmp/clearmesh_face_corpus_shard_$RUN_STAMP}"
+REMOTE_ANNOTATIONS="${REMOTE_ANNOTATIONS:-$REMOTE_LAB_ROOT/source_annotations.jsonl}"
+SYNC_HF_TOKEN="${SYNC_HF_TOKEN:-1}"
+
+line_count="$(grep -cve '^\s*$' "$LOCAL_ANNOTATIONS_FILE" || true)"
+SELECT_TARGET="${SELECT_TARGET:-$line_count}"
+SCAN_LIMIT="${SCAN_LIMIT:-0}"
+CURATION_TARGET="${CURATION_TARGET:-$SELECT_TARGET}"
+MIN_QUALITY="${MIN_QUALITY:-2}"
+OVERSAMPLE_FACTOR="${OVERSAMPLE_FACTOR:-1}"
+SHUFFLE="${SHUFFLE:-0}"
+SEED="${SEED:-303}"
+DOWNLOAD_PROCESSES="${DOWNLOAD_PROCESSES:-16}"
+DOWNLOAD_BATCH_SIZE="${DOWNLOAD_BATCH_SIZE:-50}"
+TARGET_FACES="${TARGET_FACES:-512}"
+TOKEN_MAX_FACES="${TOKEN_MAX_FACES:-512}"
+POINT_SAMPLES="${POINT_SAMPLES:-8192}"
+NUM_BINS="${NUM_BINS:-128}"
+PAPER_WITHIN_FACE_ORDER="${PAPER_WITHIN_FACE_ORDER:-rotate_min_zyx}"
+STRICT_ENGINE="${STRICT_ENGINE:-voxel_shell}"
+FALLBACK="${FALLBACK:-convex_hull}"
+VOXEL_RESOLUTION="${VOXEL_RESOLUTION:-64}"
+MESH_VOXEL_MAX_FACES="${MESH_VOXEL_MAX_FACES:-5000}"
+STRICT_TARGET_PROGRESS_EVERY="${STRICT_TARGET_PROGRESS_EVERY:-100}"
+TEST_RATIO="${TEST_RATIO:-0.02}"
+LEAN_ARCHIVE_PATH="${LEAN_ARCHIVE_PATH:-$REMOTE_LAB_ROOT/lean_face_corpus.tar.gz}"
+
+if [ -z "${THUNDER_TOKEN:-}" ]; then
+  echo "THUNDER_TOKEN is not set." >&2
+  exit 1
+fi
+if [ ! -x "$TNR_BIN" ]; then
+  echo "tnr binary not found or not executable: $TNR_BIN" >&2
+  exit 1
+fi
+case "$MODE:$GPU" in
+  production:a100|production:h100|prototyping:a6000|prototyping:a100|prototyping:h100)
+    ;;
+  *)
+    echo "Unsupported Thunder mode/GPU '$MODE:$GPU'." >&2
+    exit 5
+    ;;
+esac
+mkdir -p "$DOWNLOAD_ROOT"
+
+cleanup_instance() {
+  local exit_code=$?
+  if [ "$exit_code" -ne 0 ] && [ "$CREATED_INSTANCE" = "1" ] && [ "$DELETE_ON_FAILURE" = "1" ] && [ -n "$INSTANCE_ID" ]; then
+    echo "Shard launcher failed with status $exit_code; deleting created Thunder instance $INSTANCE_ID." >&2
+    "$TNR_BIN" delete "$INSTANCE_ID" --yes || true
+  fi
+}
+trap cleanup_instance EXIT INT TERM HUP
+
+parse_create_id() {
+  CREATE_OUTPUT="$1" python3 - <<'PY'
+import json
+import os
+import re
+text = os.environ.get("CREATE_OUTPUT", "")
+decoder = json.JSONDecoder()
+for match in re.finditer(r"[\[{]", text):
+    try:
+        payload, _ = decoder.raw_decode(text[match.start():])
+    except json.JSONDecodeError:
+        continue
+    items = payload if isinstance(payload, list) else [payload]
+    for item in items:
+        if isinstance(item, dict):
+            for key in ("id", "identifier", "instance_id", "instanceId", "uuid"):
+                if item.get(key) is not None:
+                    print(item[key])
+                    raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+if [ "$CREATE_INSTANCE" = "1" ]; then
+  create_args=(create --gpu "$GPU" --mode "$MODE" --num-gpus 1 --primary-disk "$PRIMARY_DISK" --template "$TEMPLATE")
+  if [ "$MODE" = "prototyping" ]; then
+    create_args+=(--vcpus "$VCPUS")
+  fi
+  create_args+=(--yes --json)
+  create_output="$($TNR_BIN "${create_args[@]}")" || {
+    echo "Thunder create failed." >&2
+    exit 3
+  }
+  printf '%s\n' "$create_output" > "$DOWNLOAD_ROOT/create.json"
+  CREATED_INSTANCE=1
+  if [ -z "$INSTANCE_ID" ]; then
+    INSTANCE_ID="$(parse_create_id "$create_output")" || INSTANCE_ID=""
+  fi
+  echo "Created Thunder shard instance $INSTANCE_ID."
+fi
+if [ -z "$INSTANCE_ID" ]; then
+  echo "Set THUNDER_INSTANCE_ID or CREATE_INSTANCE=1." >&2
+  exit 4
+fi
+
+echo "Waiting for Thunder instance $INSTANCE_ID to RUNNING..."
+running_seen=0
+wait_deadline=$(( $(date +%s) + WAIT_TIMEOUT_SEC ))
+while [ "$(date +%s)" -lt "$wait_deadline" ]; do
+  status_json="$($TNR_BIN status --json || true)"
+  printf '%s\n' "$status_json" > "$DOWNLOAD_ROOT/status.latest.json"
+  if python3 - "$INSTANCE_ID" "$DOWNLOAD_ROOT/status.latest.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+target = str(sys.argv[1])
+text = Path(sys.argv[2]).read_text(errors="ignore")
+start = text.find("[")
+data = json.loads(text[start:]) if start >= 0 else []
+for item in data:
+    if str(item.get("id")) == target and item.get("status") == "RUNNING":
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+  then
+    running_seen=1
+    break
+  fi
+  sleep "$WAIT_INTERVAL_SEC"
+done
+if [ "$running_seen" != "1" ]; then
+  echo "Thunder instance $INSTANCE_ID did not reach RUNNING within ${WAIT_TIMEOUT_SEC}s." >&2
+  exit 21
+fi
+
+echo "Syncing repo to shard worker $INSTANCE_ID..."
+THUNDER_INSTANCE_ID="$INSTANCE_ID" "$REPO_ROOT/scripts/thunder/sync_repo.sh" "$INSTANCE_ID"
+
+if [ "$SYNC_HF_TOKEN" = "1" ]; then
+  if [ -n "${HF_TOKEN:-${HUGGINGFACE_HUB_TOKEN:-}}" ]; then
+    echo "Syncing Hugging Face token to shard worker $INSTANCE_ID..."
+    THUNDER_INSTANCE_ID="$INSTANCE_ID" "$REPO_ROOT/scripts/thunder/sync_hf_token.sh" "$INSTANCE_ID"
+  else
+    echo "HF_TOKEN/HUGGINGFACE_HUB_TOKEN not set locally; remote downloads may be rate limited." >&2
+  fi
+fi
+
+printf 'mkdir -p %q\nexit\n' "$REMOTE_LAB_ROOT" | "$TNR_BIN" connect "$INSTANCE_ID"
+"$TNR_BIN" scp "$LOCAL_ANNOTATIONS_FILE" "$INSTANCE_ID:$REMOTE_ANNOTATIONS"
+
+remote_setup_log="$DOWNLOAD_ROOT/remote_setup_and_launch.log"
+setup_status=0
+cat <<REMOTE_SETUP | "$TNR_BIN" connect "$INSTANCE_ID" 2>&1 | tee "$remote_setup_log" || setup_status=$?
+set -euo pipefail
+REMOTE_REPO=$(printf '%q' "$REMOTE_REPO")
+REMOTE_VENV=$(printf '%q' "$REMOTE_VENV")
+REMOTE_LOG=$(printf '%q' "$REMOTE_LOG")
+REMOTE_PID=$(printf '%q' "$REMOTE_PID")
+REMOTE_LAB_ROOT=$(printf '%q' "$REMOTE_LAB_ROOT")
+REMOTE_ANNOTATIONS=$(printf '%q' "$REMOTE_ANNOTATIONS")
+cd "\$REMOTE_REPO"
+if [ -f /home/ubuntu/.clearmesh_hf.env ]; then
+  # shellcheck disable=SC1091
+  source /home/ubuntu/.clearmesh_hf.env
+fi
+if [ ! -x "\$REMOTE_VENV/bin/python" ]; then
+  python3 -m venv "\$REMOTE_VENV" || (sudo apt-get update && sudo apt-get install -y python3-venv && python3 -m venv "\$REMOTE_VENV")
+fi
+# shellcheck disable=SC1091
+source "\$REMOTE_VENV/bin/activate"
+python -m pip install -U pip setuptools wheel
+python -m pip install -q -r requirements-data.txt pillow scipy
+python - <<'PY'
+import fast_simplification  # noqa: F401
+import networkx  # noqa: F401
+import objaverse  # noqa: F401
+import scipy  # noqa: F401
+import skimage  # noqa: F401
+import trimesh  # noqa: F401
+print('face_corpus_shard_python_deps_ok')
+PY
+
+export RUN_DIR="\$REMOTE_LAB_ROOT/corpus"
+export ANNOTATIONS="\$REMOTE_ANNOTATIONS"
+export SPLIT=train
+export SELECT_TARGET=$(printf '%q' "$SELECT_TARGET")
+export SCAN_LIMIT=$(printf '%q' "$SCAN_LIMIT")
+export CURATION_TARGET=$(printf '%q' "$CURATION_TARGET")
+export MIN_QUALITY=$(printf '%q' "$MIN_QUALITY")
+export OVERSAMPLE_FACTOR=$(printf '%q' "$OVERSAMPLE_FACTOR")
+export SHUFFLE=$(printf '%q' "$SHUFFLE")
+export SEED=$(printf '%q' "$SEED")
+export DOWNLOAD_PROCESSES=$(printf '%q' "$DOWNLOAD_PROCESSES")
+export DOWNLOAD_BATCH_SIZE=$(printf '%q' "$DOWNLOAD_BATCH_SIZE")
+export TARGET_FACES=$(printf '%q' "$TARGET_FACES")
+export TOKEN_MAX_FACES=$(printf '%q' "$TOKEN_MAX_FACES")
+export POINT_SAMPLES=$(printf '%q' "$POINT_SAMPLES")
+export NUM_BINS=$(printf '%q' "$NUM_BINS")
+export PAPER_WITHIN_FACE_ORDER=$(printf '%q' "$PAPER_WITHIN_FACE_ORDER")
+export STRICT_ENGINE=$(printf '%q' "$STRICT_ENGINE")
+export FALLBACK=$(printf '%q' "$FALLBACK")
+export VOXEL_RESOLUTION=$(printf '%q' "$VOXEL_RESOLUTION")
+export MESH_VOXEL_MAX_FACES=$(printf '%q' "$MESH_VOXEL_MAX_FACES")
+export STRICT_TARGET_PROGRESS_EVERY=$(printf '%q' "$STRICT_TARGET_PROGRESS_EVERY")
+export TEST_RATIO=$(printf '%q' "$TEST_RATIO")
+export LEAN_ARCHIVE_PATH=$(printf '%q' "$LEAN_ARCHIVE_PATH")
+export ARCHIVE_PATH=""
+
+nohup bash scripts/thunder/face_objaversepp_corpus_pilot.sh > "\$REMOTE_LOG" 2>&1 &
+echo \$! > "\$REMOTE_PID"
+echo "face_corpus_shard_pid=\$(cat "\$REMOTE_PID")"
+echo "face_corpus_shard_log=\$REMOTE_LOG"
+echo "face_corpus_shard_lab_root=\$REMOTE_LAB_ROOT"
+echo CLEARMESH_FACE_CORPUS_SHARD_LAUNCHED
+exit
+REMOTE_SETUP
+
+if [ "$setup_status" -ne 0 ]; then
+  if ! grep -q 'CLEARMESH_FACE_CORPUS_SHARD_LAUNCHED' "$remote_setup_log"; then
+    echo "Remote shard setup failed before launch marker." >&2
+    exit "$setup_status"
+  fi
+fi
+if ! grep -q 'CLEARMESH_FACE_CORPUS_SHARD_LAUNCHED' "$remote_setup_log"; then
+  echo "Remote shard setup completed without launch marker; treating as failure." >&2
+  exit 22
+fi
+
+cat > "$DOWNLOAD_ROOT/run_info.json" <<JSON
+{
+  "instance_id": "$INSTANCE_ID",
+  "created_instance": $CREATED_INSTANCE,
+  "gpu": "$GPU",
+  "mode": "$MODE",
+  "local_annotations_file": "$LOCAL_ANNOTATIONS_FILE",
+  "remote_annotations": "$REMOTE_ANNOTATIONS",
+  "remote_log": "$REMOTE_LOG",
+  "remote_pid": "$REMOTE_PID",
+  "remote_lab_root": "$REMOTE_LAB_ROOT",
+  "download_root": "$DOWNLOAD_ROOT",
+  "lean_archive_path": "$LEAN_ARCHIVE_PATH",
+  "select_target": $SELECT_TARGET,
+  "curation_target": $CURATION_TARGET,
+  "min_quality": $MIN_QUALITY,
+  "target_faces": $TARGET_FACES,
+  "token_max_faces": $TOKEN_MAX_FACES,
+  "num_bins": $NUM_BINS,
+  "point_samples": $POINT_SAMPLES,
+  "paper_within_face_order": "$PAPER_WITHIN_FACE_ORDER",
+  "strict_engine": "$STRICT_ENGINE",
+  "fallback": "$FALLBACK",
+  "test_ratio": $TEST_RATIO
+}
+JSON
+
+echo "FACE corpus shard launched on Thunder instance $INSTANCE_ID."
+echo "Local setup logs: $DOWNLOAD_ROOT"
+echo "Remote nohup log: $REMOTE_LOG"
+echo "Remote lab root: $REMOTE_LAB_ROOT"
+echo "Lean archive: $LEAN_ARCHIVE_PATH"

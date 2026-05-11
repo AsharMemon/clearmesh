@@ -41,6 +41,7 @@ SPLIT_PASSING="${SPLIT_PASSING:-1}"
 TEST_RATIO="${TEST_RATIO:-0.2}"
 TEST_COUNT="${TEST_COUNT:-0}"
 ARCHIVE_PATH="${ARCHIVE_PATH:-}"
+LEAN_ARCHIVE_PATH="${LEAN_ARCHIVE_PATH:-}"
 
 cd /home/ubuntu/clearmesh
 
@@ -198,4 +199,12 @@ PY
 if [ -n "$ARCHIVE_PATH" ]; then
   tar -czf "$ARCHIVE_PATH" -C "$(dirname "$RUN_DIR")" "$(basename "$RUN_DIR")"
   echo "Archived $RUN_DIR to $ARCHIVE_PATH"
+fi
+
+if [ -n "$LEAN_ARCHIVE_PATH" ]; then
+  python scripts/research/package_face_corpus.py \
+    --data-run "$RUN_DIR" \
+    --output "$LEAN_ARCHIVE_PATH" \
+    --manifest-output "$LEAN_ARCHIVE_PATH.json"
+  echo "Packaged lean corpus archive to $LEAN_ARCHIVE_PATH"
 fi

@@ -62,6 +62,7 @@ PRECISION="${PRECISION:-bf16}"
 LOG_EVERY="${LOG_EVERY:-50}"
 SELECTION_EVAL_EVERY="${SELECTION_EVAL_EVERY:-1000}"
 SELECTION_EVAL_BATCH_SIZE="${SELECTION_EVAL_BATCH_SIZE:-1}"
+SKIP_INITIAL_SELECTION_EVAL="${SKIP_INITIAL_SELECTION_EVAL:-0}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-1000}"
 SAVE_CURRENT_CHECKPOINT="${SAVE_CURRENT_CHECKPOINT:-1}"
 PREFETCH_BATCHES="${PREFETCH_BATCHES:-1}"
@@ -365,6 +366,7 @@ export PRECISION=$(printf '%q' "$PRECISION")
 export LOG_EVERY=$(printf '%q' "$LOG_EVERY")
 export SELECTION_EVAL_EVERY=$(printf '%q' "$SELECTION_EVAL_EVERY")
 export SELECTION_EVAL_BATCH_SIZE=$(printf '%q' "$SELECTION_EVAL_BATCH_SIZE")
+export SKIP_INITIAL_SELECTION_EVAL=$(printf '%q' "$SKIP_INITIAL_SELECTION_EVAL")
 export CHECKPOINT_EVERY=$(printf '%q' "$CHECKPOINT_EVERY")
 export SAVE_CURRENT_CHECKPOINT=$(printf '%q' "$SAVE_CURRENT_CHECKPOINT")
 export PREFETCH_BATCHES=$(printf '%q' "$PREFETCH_BATCHES")
@@ -461,6 +463,7 @@ cat > "$DOWNLOAD_ROOT/run_info.json" <<JSON
   "decode_head": "$DECODE_HEAD",
   "selection_eval_every": $SELECTION_EVAL_EVERY,
   "selection_eval_batch_size": $SELECTION_EVAL_BATCH_SIZE,
+  "skip_initial_selection_eval": $([ "$SKIP_INITIAL_SELECTION_EVAL" = "1" ] && echo true || echo false),
   "checkpoint_every": $CHECKPOINT_EVERY,
   "save_current_checkpoint": $([ "$SAVE_CURRENT_CHECKPOINT" = "1" ] && echo true || echo false),
   "cache_fps_indices": $([ "$CACHE_FPS_INDICES" = "1" ] && echo true || echo false),
