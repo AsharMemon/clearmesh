@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing as mp
 import os
 import random
+import signal
 import sys
 from pathlib import Path
 from typing import Any, Iterable
@@ -145,7 +147,60 @@ def _select_rows(args: argparse.Namespace) -> list[dict[str, Any]]:
     return selected
 
 
-def _download(selected: list[dict[str, Any]], output_dir: Path, processes: int, batch_size: int) -> dict[str, str]:
+def _download_batch_worker(batch: list[str], processes: int, queue: Any) -> None:
+    """Run one Objaverse batch in an isolated process so it can be killed on hangs."""
+    try:
+        if hasattr(os, "setsid"):
+            os.setsid()
+    except Exception:
+        pass
+    try:
+        import objaverse
+
+        paths = objaverse.load_objects(batch, download_processes=processes)
+        queue.put({"ok": True, "paths": {str(uid): str(path) for uid, path in paths.items()}})
+    except BaseException as exc:  # noqa: BLE001 - isolate failures from parent.
+        queue.put({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+
+
+def _load_batch(batch: list[str], processes: int, batch_timeout_seconds: int) -> dict[str, str]:
+    if batch_timeout_seconds <= 0:
+        import objaverse
+
+        return {str(uid): str(path) for uid, path in objaverse.load_objects(batch, download_processes=processes).items()}
+
+    ctx = mp.get_context("fork" if hasattr(os, "fork") else "spawn")
+    queue: Any = ctx.Queue(maxsize=1)
+    proc = ctx.Process(target=_download_batch_worker, args=(batch, processes, queue))
+    proc.start()
+    proc.join(batch_timeout_seconds)
+    if proc.is_alive():
+        if hasattr(os, "killpg"):
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except Exception:
+                proc.terminate()
+        else:
+            proc.terminate()
+        proc.join(10)
+        raise TimeoutError(f"download batch timed out after {batch_timeout_seconds}s")
+    if proc.exitcode not in (0, None) and queue.empty():
+        raise RuntimeError(f"download batch subprocess exited with code {proc.exitcode}")
+    if queue.empty():
+        return {}
+    result = queue.get()
+    if not result.get("ok"):
+        raise RuntimeError(str(result.get("error", "unknown batch error")))
+    return dict(result.get("paths", {}))
+
+
+def _download(
+    selected: list[dict[str, Any]],
+    output_dir: Path,
+    processes: int,
+    batch_size: int,
+    batch_timeout_seconds: int,
+) -> dict[str, str]:
     try:
         import objaverse
     except Exception as exc:  # pragma: no cover - environment dependent.
@@ -173,14 +228,25 @@ def _download(selected: list[dict[str, Any]], output_dir: Path, processes: int, 
     uids = [row["uid"] for row in selected]
     for start in range(0, len(uids), max(1, batch_size)):
         batch = uids[start : start + max(1, batch_size)]
+        batch_index = start // max(1, batch_size)
+        print(
+            f"starting download batch {batch_index} ({len(batch)} objects, timeout={batch_timeout_seconds}s)",
+            flush=True,
+        )
         try:
-            paths = objaverse.load_objects(batch, download_processes=processes)
+            paths = _load_batch(batch, processes, batch_timeout_seconds)
         except Exception as exc:  # noqa: BLE001 - keep partial progress.
-            print(f"download batch {start // max(1, batch_size)} failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+            print(f"download batch {batch_index} failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
             continue
+        downloaded = 0
         for uid, path in paths.items():
             if path and Path(path).exists():
                 manifest[str(uid)] = str(path)
+                downloaded += 1
+        print(
+            f"completed download batch {batch_index}: downloaded={downloaded} manifest_total={len(manifest)}",
+            flush=True,
+        )
     return manifest
 
 
@@ -198,6 +264,12 @@ def main() -> int:
     parser.add_argument("--download", action="store_true")
     parser.add_argument("--processes", type=int, default=8)
     parser.add_argument("--batch-size", type=int, default=100)
+    parser.add_argument(
+        "--batch-timeout-seconds",
+        type=int,
+        default=0,
+        help="Kill and skip a download batch if objaverse.load_objects hangs. 0 disables timeout.",
+    )
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -209,7 +281,13 @@ def main() -> int:
 
     manifest = {}
     if args.download and selected:
-        manifest = _download(selected, args.output_dir / "downloads", args.processes, args.batch_size)
+        manifest = _download(
+            selected,
+            args.output_dir / "downloads",
+            args.processes,
+            args.batch_size,
+            args.batch_timeout_seconds,
+        )
         (args.output_dir / "download_manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
         candidates_path = args.output_dir / "downloaded_candidates.json"
         candidates = []
