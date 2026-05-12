@@ -504,6 +504,42 @@ def _teacher_forced_faces(
     }
 
 
+def _prefilter_boundary_edge_rows(
+    boundary_edges: list[tuple[int, int]],
+    logits0: np.ndarray,
+    *,
+    edge_choice_by_boundary: np.ndarray | None,
+    edge_choice_bonus: float,
+    edge_limit: int,
+    edge_action_candidate_top_k: int,
+    edge_choice_candidate_top_k: int,
+) -> list[int]:
+    """Cheaply prune boundary rows before expensive per-edge action logits."""
+
+    prefilter_limit = min(
+        len(boundary_edges),
+        max(
+            int(edge_limit) * 8,
+            int(edge_action_candidate_top_k) * 4,
+            int(edge_choice_candidate_top_k) * 4,
+            32,
+        ),
+    )
+    rows = sorted(
+        range(len(boundary_edges)),
+        key=lambda row: (
+            max(float(logits0[int(boundary_edges[row][0])]), float(logits0[int(boundary_edges[row][1])]))
+            + (float(edge_choice_bonus) * float(edge_choice_by_boundary[row]) if edge_choice_by_boundary is not None else 0.0)
+        ),
+        reverse=True,
+    )[:prefilter_limit]
+    if edge_choice_by_boundary is not None and edge_choice_candidate_top_k > 0:
+        for row in np.argsort(edge_choice_by_boundary)[-edge_choice_candidate_top_k:][::-1].tolist():
+            if int(row) not in rows:
+                rows.append(int(row))
+    return rows
+
+
 def _select_corner_causal_face(
     model,
     point_features,
@@ -907,16 +943,8 @@ def _select_corner_causal_boundary_face(
     third_vertices = np.argsort(logits0[:vertex_count])[-top_k:][::-1].tolist()
     edge_limit = min(len(boundary_edges), max(top_k, top_k * 2))
 
-    edge_action_by_boundary: np.ndarray | None = None
     edge_action_candidate_top_k = max(0, int(edge_action_candidate_top_k))
     use_edge_action_candidates = edge_action_candidate_top_k > 0
-    if (edge_action_bonus != 0.0 or use_edge_action_candidates) and hasattr(model, "_edge_action_logits_from_hidden"):
-        edge_prefix = np.asarray(boundary_edges, dtype=np.int64).reshape(len(boundary_edges), 1, 2)
-        edge_action_by_boundary = model._edge_action_logits_from_hidden(
-            hidden.expand(len(boundary_edges), -1, -1),
-            torch.as_tensor(edge_prefix, dtype=torch.long, device=device),
-            vertex_table=vertex_table,
-        )[:, 0, :vertex_count].detach().cpu().numpy()
     edge_choice_by_boundary: np.ndarray | None = None
     edge_choice_candidate_top_k = max(0, int(edge_choice_candidate_top_k))
     use_edge_choice_candidates = edge_choice_candidate_top_k > 0
@@ -928,25 +956,34 @@ def _select_corner_causal_boundary_face(
             vertex_table=vertex_table,
         )[0, 0].detach().cpu().numpy()
 
-    if edge_action_by_boundary is not None:
-        ranked_edge_rows = sorted(
-            range(len(boundary_edges)),
-            key=lambda row: (
-                max(float(logits0[int(boundary_edges[row][0])]), float(logits0[int(boundary_edges[row][1])]))
-                + float(edge_action_bonus) * float(np.max(edge_action_by_boundary[row]))
-                + (float(edge_choice_bonus) * float(edge_choice_by_boundary[row]) if edge_choice_by_boundary is not None else 0.0)
-            ),
-            reverse=True,
-        )[:edge_limit]
-    else:
-        ranked_edge_rows = sorted(
-            range(len(boundary_edges)),
-            key=lambda row: (
-                max(float(logits0[int(boundary_edges[row][0])]), float(logits0[int(boundary_edges[row][1])]))
-                + (float(edge_choice_bonus) * float(edge_choice_by_boundary[row]) if edge_choice_by_boundary is not None else 0.0)
-            ),
-            reverse=True,
-        )[:edge_limit]
+    prefilter_edge_rows = _prefilter_boundary_edge_rows(
+        boundary_edges,
+        logits0,
+        edge_choice_by_boundary=edge_choice_by_boundary,
+        edge_choice_bonus=edge_choice_bonus,
+        edge_limit=edge_limit,
+        edge_action_candidate_top_k=edge_action_candidate_top_k,
+        edge_choice_candidate_top_k=edge_choice_candidate_top_k,
+    )
+    edge_action_by_row: dict[int, np.ndarray] = {}
+    if (edge_action_bonus != 0.0 or use_edge_action_candidates) and hasattr(model, "_edge_action_logits_from_hidden"):
+        edge_prefix = np.asarray([boundary_edges[row] for row in prefilter_edge_rows], dtype=np.int64).reshape(len(prefilter_edge_rows), 1, 2)
+        edge_action_subset = model._edge_action_logits_from_hidden(
+            hidden.expand(len(prefilter_edge_rows), -1, -1),
+            torch.as_tensor(edge_prefix, dtype=torch.long, device=device),
+            vertex_table=vertex_table,
+        )[:, 0, :vertex_count].detach().cpu().numpy()
+        edge_action_by_row = {int(row): edge_action_subset[idx] for idx, row in enumerate(prefilter_edge_rows)}
+
+    ranked_edge_rows = sorted(
+        prefilter_edge_rows,
+        key=lambda row: (
+            max(float(logits0[int(boundary_edges[row][0])]), float(logits0[int(boundary_edges[row][1])]))
+            + (float(edge_action_bonus) * float(np.max(edge_action_by_row[row])) if row in edge_action_by_row else 0.0)
+            + (float(edge_choice_bonus) * float(edge_choice_by_boundary[row]) if edge_choice_by_boundary is not None else 0.0)
+        ),
+        reverse=True,
+    )[:edge_limit]
     if edge_choice_by_boundary is not None and edge_choice_candidate_top_k > 0:
         for row in np.argsort(edge_choice_by_boundary)[-edge_choice_candidate_top_k:][::-1].tolist():
             if int(row) not in ranked_edge_rows:
@@ -959,8 +996,9 @@ def _select_corner_causal_boundary_face(
         edge = boundary_edges[edge_row]
         edge_vertices = {int(edge[0]), int(edge[1])}
         edge_thirds = list(third_vertices)
-        if edge_action_by_boundary is not None and edge_action_candidate_top_k > 0:
-            edge_action_top = np.argsort(edge_action_by_boundary[edge_row])[-edge_action_candidate_top_k:][::-1].tolist()
+        edge_action_logits = edge_action_by_row.get(int(edge_row))
+        if edge_action_logits is not None and edge_action_candidate_top_k > 0:
+            edge_action_top = np.argsort(edge_action_logits)[-edge_action_candidate_top_k:][::-1].tolist()
             edge_thirds = edge_action_top + edge_thirds
         if vertices is not None and local_candidate_neighbors > 0:
             q_vertices = np.asarray(vertices, dtype=np.float64)[:vertex_count]
@@ -1012,8 +1050,9 @@ def _select_corner_causal_boundary_face(
             + logits1_unique[first_inverse[row], face[1]]
             + logits2_unique[pair_inverse[row], face[2]]
         )
-        if edge_action_by_boundary is not None:
-            model_score += float(edge_action_bonus) * float(edge_action_by_boundary[candidate_edge_rows[row], face[2]])
+        edge_action_logits = edge_action_by_row.get(int(candidate_edge_rows[row]))
+        if edge_action_logits is not None:
+            model_score += float(edge_action_bonus) * float(edge_action_logits[face[2]])
         if edge_choice_by_boundary is not None:
             model_score += float(edge_choice_bonus) * float(edge_choice_by_boundary[candidate_edge_rows[row]])
         score = score_indexed_face_candidate(
@@ -1078,16 +1117,8 @@ def _select_corner_causal_boundary_face_candidates(
     third_vertices = np.argsort(logits0[:vertex_count])[-top_k:][::-1].tolist()
     edge_limit = min(len(boundary_edges), max(top_k, top_k * 2))
 
-    edge_action_by_boundary: np.ndarray | None = None
     edge_action_candidate_top_k = max(0, int(edge_action_candidate_top_k))
     use_edge_action_candidates = edge_action_candidate_top_k > 0
-    if (edge_action_bonus != 0.0 or use_edge_action_candidates) and hasattr(model, "_edge_action_logits_from_hidden"):
-        edge_prefix = np.asarray(boundary_edges, dtype=np.int64).reshape(len(boundary_edges), 1, 2)
-        edge_action_by_boundary = model._edge_action_logits_from_hidden(
-            hidden.expand(len(boundary_edges), -1, -1),
-            torch.as_tensor(edge_prefix, dtype=torch.long, device=device),
-            vertex_table=vertex_table,
-        )[:, 0, :vertex_count].detach().cpu().numpy()
     edge_choice_by_boundary: np.ndarray | None = None
     edge_choice_candidate_top_k = max(0, int(edge_choice_candidate_top_k))
     use_edge_choice_candidates = edge_choice_candidate_top_k > 0
@@ -1099,25 +1130,34 @@ def _select_corner_causal_boundary_face_candidates(
             vertex_table=vertex_table,
         )[0, 0].detach().cpu().numpy()
 
-    if edge_action_by_boundary is not None:
-        ranked_edge_rows = sorted(
-            range(len(boundary_edges)),
-            key=lambda row: (
-                max(float(logits0[int(boundary_edges[row][0])]), float(logits0[int(boundary_edges[row][1])]))
-                + float(edge_action_bonus) * float(np.max(edge_action_by_boundary[row]))
-                + (float(edge_choice_bonus) * float(edge_choice_by_boundary[row]) if edge_choice_by_boundary is not None else 0.0)
-            ),
-            reverse=True,
-        )[:edge_limit]
-    else:
-        ranked_edge_rows = sorted(
-            range(len(boundary_edges)),
-            key=lambda row: (
-                max(float(logits0[int(boundary_edges[row][0])]), float(logits0[int(boundary_edges[row][1])]))
-                + (float(edge_choice_bonus) * float(edge_choice_by_boundary[row]) if edge_choice_by_boundary is not None else 0.0)
-            ),
-            reverse=True,
-        )[:edge_limit]
+    prefilter_edge_rows = _prefilter_boundary_edge_rows(
+        boundary_edges,
+        logits0,
+        edge_choice_by_boundary=edge_choice_by_boundary,
+        edge_choice_bonus=edge_choice_bonus,
+        edge_limit=edge_limit,
+        edge_action_candidate_top_k=edge_action_candidate_top_k,
+        edge_choice_candidate_top_k=edge_choice_candidate_top_k,
+    )
+    edge_action_by_row: dict[int, np.ndarray] = {}
+    if (edge_action_bonus != 0.0 or use_edge_action_candidates) and hasattr(model, "_edge_action_logits_from_hidden"):
+        edge_prefix = np.asarray([boundary_edges[row] for row in prefilter_edge_rows], dtype=np.int64).reshape(len(prefilter_edge_rows), 1, 2)
+        edge_action_subset = model._edge_action_logits_from_hidden(
+            hidden.expand(len(prefilter_edge_rows), -1, -1),
+            torch.as_tensor(edge_prefix, dtype=torch.long, device=device),
+            vertex_table=vertex_table,
+        )[:, 0, :vertex_count].detach().cpu().numpy()
+        edge_action_by_row = {int(row): edge_action_subset[idx] for idx, row in enumerate(prefilter_edge_rows)}
+
+    ranked_edge_rows = sorted(
+        prefilter_edge_rows,
+        key=lambda row: (
+            max(float(logits0[int(boundary_edges[row][0])]), float(logits0[int(boundary_edges[row][1])]))
+            + (float(edge_action_bonus) * float(np.max(edge_action_by_row[row])) if row in edge_action_by_row else 0.0)
+            + (float(edge_choice_bonus) * float(edge_choice_by_boundary[row]) if edge_choice_by_boundary is not None else 0.0)
+        ),
+        reverse=True,
+    )[:edge_limit]
     if edge_choice_by_boundary is not None and edge_choice_candidate_top_k > 0:
         for row in np.argsort(edge_choice_by_boundary)[-edge_choice_candidate_top_k:][::-1].tolist():
             if int(row) not in ranked_edge_rows:
@@ -1130,8 +1170,9 @@ def _select_corner_causal_boundary_face_candidates(
         edge = boundary_edges[edge_row]
         edge_vertices = {int(edge[0]), int(edge[1])}
         edge_thirds = list(third_vertices)
-        if edge_action_by_boundary is not None and edge_action_candidate_top_k > 0:
-            edge_action_top = np.argsort(edge_action_by_boundary[edge_row])[-edge_action_candidate_top_k:][::-1].tolist()
+        edge_action_logits = edge_action_by_row.get(int(edge_row))
+        if edge_action_logits is not None and edge_action_candidate_top_k > 0:
+            edge_action_top = np.argsort(edge_action_logits)[-edge_action_candidate_top_k:][::-1].tolist()
             edge_thirds = edge_action_top + edge_thirds
         if vertices is not None and local_candidate_neighbors > 0:
             q_vertices = np.asarray(vertices, dtype=np.float64)[:vertex_count]
@@ -1180,8 +1221,9 @@ def _select_corner_causal_boundary_face_candidates(
             + logits1_unique[first_inverse[row], face[1]]
             + logits2_unique[pair_inverse[row], face[2]]
         )
-        if edge_action_by_boundary is not None:
-            model_score += float(edge_action_bonus) * float(edge_action_by_boundary[candidate_edge_rows[row], face[2]])
+        edge_action_logits = edge_action_by_row.get(int(candidate_edge_rows[row]))
+        if edge_action_logits is not None:
+            model_score += float(edge_action_bonus) * float(edge_action_logits[face[2]])
         if edge_choice_by_boundary is not None:
             model_score += float(edge_choice_bonus) * float(edge_choice_by_boundary[candidate_edge_rows[row]])
         score = score_indexed_face_candidate(

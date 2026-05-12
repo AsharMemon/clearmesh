@@ -665,3 +665,37 @@ Interpretation:
 ```text
 This was not a repair-heavy success. The decoder did not need topology fallback faces; it stopped two faces early rather than violating edge capacity, and the resulting mesh was already closed and manifold. That is the right failure behavior for production: prefer a slightly shorter valid shell over forcing invalid late faces into the mesh.
 ```
+
+### Boundary Edge-Action Prefilter Speed Update
+
+The boundary decoder also computed the learned third-vertex action head over every currently open boundary edge, even though only a ranked subset is used for candidate search. We now cheaply prefilter boundary edges using endpoint logits and edge-choice scores, then run the expensive edge-action head only on that subset.
+
+Same-sample rerun:
+
+```text
+sample: 0000001_0001_014e926cd0944429be350ca97f9022bb_strict.npz
+watertight: true
+boundary_edges: 0
+nonmanifold_edges: 0
+token_edge_pairing_ratio: 1.0
+topology_fallbacks: 0
+topology_stop_early: 1
+generated_faces: 434 / 436
+decode_elapsed_sec: 51.93
+chamfer_l2_normalized: 0.11016
+normal_consistency: 0.5536
+```
+
+Latency progression on this sample:
+
+```text
+validated topology path:      114.21s
+canonical orientations:        81.29s
+edge-action prefilter:         51.93s
+```
+
+Interpretation:
+
+```text
+This is another safe speed win: the topology result and geometry metrics are unchanged, fallback rate remains 0, and decode time improves by ~36% over canonical orientation alone. We still need transformer/KV or batched decode work for production latency, but candidate-side algebra is no longer the dominant obvious waste.
+```
