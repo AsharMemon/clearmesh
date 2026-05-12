@@ -605,6 +605,14 @@ def select_constrained_indexed_face(
             continue
         if not enforce_vertex_link_manifold or _candidate_preserves_vertex_links(state, face):
             return np.asarray(candidate, dtype=np.int64)
+    fallback = select_topology_fallback_indexed_face(
+        state,
+        vertex_count=vertex_count,
+        target_face_count=target_face_count,
+        enforce_vertex_link_manifold=enforce_vertex_link_manifold,
+    )
+    if fallback is not None:
+        return fallback
     return np.asarray([0, 1, 2], dtype=np.int64)
 
 
@@ -812,6 +820,11 @@ def score_indexed_face_candidate(
         return None
     edges = _indexed_face_edges(face)
     edge_uses = [state.edge_counts[edge] for edge in edges]
+    if target_face_count is not None and any(count >= 2 for count in edge_uses):
+        # The boundary-budget proof assumes a 2-manifold edge graph. Once an
+        # edge is already paired, reusing it can make the boundary count look
+        # closed while producing non-manifold shells.
+        return None
     if strict_manifold and any(count >= 2 for count in edge_uses):
         return None
     if enforce_vertex_link_manifold and not _candidate_preserves_vertex_links(state, face):
@@ -859,6 +872,8 @@ def _candidate_boundary_budget_allows(
 ) -> bool:
     edges = _indexed_face_edges(face)
     edge_uses = [state.edge_counts[edge] for edge in edges]
+    if any(count >= 2 for count in edge_uses):
+        return False
     return _boundary_budget_allows(
         boundary_edge_count=state.boundary_edge_count,
         closures=sum(1 for count in edge_uses if count == 1),
@@ -866,6 +881,108 @@ def _candidate_boundary_budget_allows(
         accepted_faces=state.accepted_faces,
         target_face_count=target_face_count,
     )
+
+
+def select_topology_fallback_indexed_face(
+    state: IndexedDecodeState,
+    *,
+    vertex_count: int,
+    target_face_count: int | None = None,
+    enforce_vertex_link_manifold: bool = False,
+) -> np.ndarray | None:
+    """Return a deterministic legal fallback face, or ``None`` if none exists.
+
+    This is deliberately model-agnostic and used only after the learned/top-k
+    candidates fail. The production invariant is more important than squeezing
+    out one more model-preferred triangle: never exceed edge capacity, and when
+    a target face count is active, prefer candidates that can still close by
+    that horizon.
+    """
+
+    vertex_count = int(vertex_count)
+    if vertex_count < 3:
+        return None
+
+    def valid(face: tuple[int, int, int], *, require_budget: bool) -> bool:
+        if len(set(face)) != 3:
+            return False
+        if _indexed_face_key(face) in state.seen_faces:
+            return False
+        edge_uses = [state.edge_counts[edge] for edge in _indexed_face_edges(face)]
+        if any(count >= 2 for count in edge_uses):
+            return False
+        if enforce_vertex_link_manifold and not _candidate_preserves_vertex_links(state, face):
+            return False
+        if require_budget and target_face_count is not None:
+            return _candidate_boundary_budget_allows(
+                state,
+                face,
+                target_face_count=target_face_count,
+            )
+        return True
+
+    def rank(face: tuple[int, int, int]) -> tuple[int, int, int, tuple[int, int, int]]:
+        edge_uses = [state.edge_counts[edge] for edge in _indexed_face_edges(face)]
+        closures = sum(1 for count in edge_uses if count == 1)
+        new_edges = sum(1 for count in edge_uses if count == 0)
+        next_boundary = state.boundary_edge_count + new_edges - closures
+        return (closures, -new_edges, -next_boundary, tuple(-int(value) for value in face))
+
+    def best_from(candidates: list[tuple[int, int, int]], *, require_budget: bool) -> tuple[int, int, int] | None:
+        best_face: tuple[int, int, int] | None = None
+        best_rank: tuple[int, int, int, tuple[int, int, int]] | None = None
+        for face in candidates:
+            if not valid(face, require_budget=require_budget):
+                continue
+            candidate_rank = rank(face)
+            if best_rank is None or candidate_rank > best_rank:
+                best_rank = candidate_rank
+                best_face = face
+        return best_face
+
+    def bounded_vertex_pool() -> list[int]:
+        frontier = sorted({int(value) for edge in boundary_edges for value in edge})
+        pool = frontier + list(range(min(vertex_count, 48)))
+        return _dedupe_ints(pool)[:64]
+
+    phases = (True, False) if target_face_count is not None else (False,)
+    boundary_edges = state.boundary_edges
+    for require_budget in phases:
+        if boundary_edges:
+            boundary_candidates: list[tuple[int, int, int]] = []
+            for edge in boundary_edges:
+                for third in range(vertex_count):
+                    if third == edge[0] or third == edge[1]:
+                        continue
+                    boundary_candidates.extend(
+                        tuple(int(value) for value in face)
+                        for face in permutations((int(edge[0]), int(edge[1]), int(third)), 3)
+                    )
+            best = best_from(boundary_candidates, require_budget=require_budget)
+            if best is not None:
+                return np.asarray(best, dtype=np.int64)
+
+        # Last resort: if the current frontier is unsalvageable, start or add a
+        # capacity-valid triangle rather than creating a non-manifold edge. Keep
+        # this bounded; the fallback runs inside autoregressive decoding.
+        pool = bounded_vertex_pool()
+        best: tuple[int, int, int] | None = None
+        best_rank: tuple[int, int, int, tuple[int, int, int]] | None = None
+        for i, a in enumerate(pool[:-2]):
+            for j in range(i + 1, len(pool) - 1):
+                b = pool[j]
+                for c in pool[j + 1 :]:
+                    for face in ((a, b, c), (a, c, b)):
+                        face_values = tuple(int(value) for value in face)
+                        if not valid(face_values, require_budget=require_budget):
+                            continue
+                        candidate_rank = rank(face_values)
+                        if best_rank is None or candidate_rank > best_rank:
+                            best_rank = candidate_rank
+                            best = face_values
+        if best is not None:
+            return np.asarray(best, dtype=np.int64)
+    return None
 
 
 def _boundary_budget_allows(

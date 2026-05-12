@@ -32,6 +32,7 @@ from clearmesh.mesh_heads.face_indexed import (
     indexed_to_coordinate_tokens,
     select_boundary_edge_action_face,
     select_constrained_indexed_face,
+    select_topology_fallback_indexed_face,
     score_indexed_face_candidate,
 )
 from clearmesh.mesh_heads.face_tokens import FaceTokenTransform
@@ -88,6 +89,36 @@ def _append_face_tensor(input_faces, face: np.ndarray):  # type: ignore[no-untyp
 
     next_face = torch.as_tensor(face, dtype=torch.long, device=input_faces.device)
     return torch.cat([input_faces, next_face.reshape(1, 1, 3)], dim=1)
+
+
+def _validate_or_fallback_face(
+    face: np.ndarray,
+    state: IndexedDecodeState,
+    *,
+    vertex_count: int,
+    target_face_count: int | None,
+    enforce_vertex_link_manifold: bool,
+) -> np.ndarray | None:
+    face_arr = np.asarray(face, dtype=np.int64).reshape(3)
+    if np.any(face_arr < 0) or np.any(face_arr >= int(vertex_count)):
+        score = None
+    else:
+        score = score_indexed_face_candidate(
+            tuple(int(value) for value in face_arr),
+            0.0,
+            state,
+            target_face_count=target_face_count,
+            enforce_vertex_link_manifold=enforce_vertex_link_manifold,
+            strict_manifold=target_face_count is not None,
+        )
+    if score is not None:
+        return face_arr
+    return select_topology_fallback_indexed_face(
+        state,
+        vertex_count=vertex_count,
+        target_face_count=target_face_count,
+        enforce_vertex_link_manifold=enforce_vertex_link_manifold,
+    )
 
 
 def _generate_faces(
@@ -264,9 +295,18 @@ def _generate_faces(
                         repaired.append(chosen)
                         used.add(chosen)
                     next_face = torch.as_tensor(repaired, dtype=torch.long, device=device)
-            state.add_face(next_face.detach().cpu().numpy())
-            generated.append(next_face.detach().cpu().numpy())
-            input_faces = _append_face_tensor(input_faces, next_face.detach().cpu().numpy())
+            next_face_np = _validate_or_fallback_face(
+                next_face.detach().cpu().numpy(),
+                state,
+                vertex_count=vertex_count,
+                target_face_count=target_face_count,
+                enforce_vertex_link_manifold=enforce_vertex_link_manifold,
+            )
+            if next_face_np is None:
+                break
+            state.add_face(next_face_np)
+            generated.append(next_face_np)
+            input_faces = _append_face_tensor(input_faces, next_face_np)
     return np.asarray(generated, dtype=np.int64)
 
 
@@ -526,7 +566,13 @@ def _select_corner_causal_face(
                 continue
             pairs.append((int(a), int(b), float(logits0[a] + logits1[row, b])))
     if not pairs:
-        return np.asarray([0, 1, 2], dtype=np.int64)
+        fallback = select_topology_fallback_indexed_face(
+            state,
+            vertex_count=vertex_count,
+            target_face_count=target_face_count,
+            enforce_vertex_link_manifold=enforce_vertex_link_manifold,
+        )
+        return fallback if fallback is not None else np.asarray([0, 1, 2], dtype=np.int64)
 
     prefix2 = np.full((len(pairs), 1, 3), -1, dtype=np.int64)
     for row, (a, b, _) in enumerate(pairs):
@@ -602,7 +648,13 @@ def _select_corner_causal_face(
                 strict_manifold=False,
             ) is not None:
                 return np.asarray([a, b, int(c)], dtype=np.int64)
-    return np.asarray([0, 1, 2], dtype=np.int64)
+    fallback = select_topology_fallback_indexed_face(
+        state,
+        vertex_count=vertex_count,
+        target_face_count=target_face_count,
+        enforce_vertex_link_manifold=enforce_vertex_link_manifold,
+    )
+    return fallback if fallback is not None else np.asarray([0, 1, 2], dtype=np.int64)
 
 
 def _select_corner_causal_face_candidates(
@@ -699,7 +751,13 @@ def _select_corner_causal_face_candidates(
                 continue
             pairs.append((int(a), int(b), float(logits0[a] + logits1[row, b])))
     if not pairs:
-        return [(np.asarray([0, 1, 2], dtype=np.int64), 0.0)]
+        fallback = select_topology_fallback_indexed_face(
+            state,
+            vertex_count=vertex_count,
+            target_face_count=target_face_count,
+            enforce_vertex_link_manifold=enforce_vertex_link_manifold,
+        )
+        return [(fallback, 0.0)] if fallback is not None else [(np.asarray([0, 1, 2], dtype=np.int64), 0.0)]
 
     prefix2 = np.full((len(pairs), 1, 3), -1, dtype=np.int64)
     for row, (a, b, _) in enumerate(pairs):
@@ -771,7 +829,13 @@ def _select_corner_causal_face_candidates(
                 strict_manifold=False,
             ) is not None:
                 return [(np.asarray(face, dtype=np.int64), 0.0)]
-    return [(np.asarray([0, 1, 2], dtype=np.int64), 0.0)]
+    fallback = select_topology_fallback_indexed_face(
+        state,
+        vertex_count=vertex_count,
+        target_face_count=target_face_count,
+        enforce_vertex_link_manifold=enforce_vertex_link_manifold,
+    )
+    return [(fallback, 0.0)] if fallback is not None else [(np.asarray([0, 1, 2], dtype=np.int64), 0.0)]
 
 
 def _select_corner_causal_boundary_face(

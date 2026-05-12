@@ -537,3 +537,61 @@ paper-faithful FACE backbone
 - TreeMeshGPT: Autoregressive Tree Sequencing over triangle adjacency. https://arxiv.org/abs/2503.11629
 - Mesh Silksong: topology-preserved autoregressive mesh generation. https://arxiv.org/abs/2507.02477
 - MeshRipple: frontier-aware BFS/ripple generation for topological completeness. https://arxiv.org/abs/2512.07514
+
+## 2026-05-12 Boundary-Budget Smoke Update
+
+A local FACE-Q smoke exposed and then fixed a concrete decoder loophole.
+
+Initial bounded result:
+
+```text
+sample: 0000000_0000_004e04979b674049b4c7363af9074a6d_strict.npz
+checkpoint: .codex_outputs/faceq_boundary_budget_smoke_20260512/faceq_indexed.pt
+training: 16 samples, 700 steps, 512-face target, MPS
+```
+
+Before hard fallback validation:
+
+```text
+boundary_edges: 0
+nonmanifold_edges: 3
+token_edge_pairing_ratio: 0.98698
+watertight: false
+```
+
+Interpretation: boundary accounting alone was insufficient. The decoder could still reach zero boundary edges while overusing a few full edges, producing closed-looking but non-manifold topology.
+
+Patch applied:
+
+```text
+1. Boundary-budget mode now treats edge capacity as a hard invariant.
+2. Relaxed candidate scoring cannot reuse an edge with count >= 2 when a target face count is active.
+3. The emergency fallback is topology-aware and bounded, not cubic over all vertices.
+4. Generation now validates every selected face before appending it; if the face violates topology, it uses a legal fallback or stops.
+```
+
+Validated one-sample result after patch:
+
+```text
+watertight: true
+boundary_edges: 0
+nonmanifold_edges: 0
+token_boundary_edge_count: 0
+token_nonmanifold_edge_count: 0
+token_edge_pairing_ratio: 1.0
+generated_faces: 506 / 512
+decode_elapsed_sec: 217.95
+chamfer_l2_normalized: 0.09618
+normal_consistency: 0.3862
+```
+
+This is a topology win, not a visual-quality win. The tiny checkpoint still has poor geometry, and the decoder remains too slow for production. But the discrete invariant is now doing what we wanted: it can produce a watertight, edge-manifold mesh even when the learned geometry is weak.
+
+Next engineering targets:
+
+```text
+1. Vectorize/cache boundary candidate scoring so 512-face decode is seconds, not minutes.
+2. Run a small 16-64 sample FACE-Q A/B to verify watertightness persists beyond one mesh.
+3. Add a FACE-Q scale gate alongside coordinate FACE, using the same curated corpus.
+4. Keep coordinate FACE scaling as paper-faithful evidence, but treat FACE-Q as the topology-native production lane.
+```

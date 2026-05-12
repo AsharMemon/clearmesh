@@ -15,8 +15,10 @@ from clearmesh.mesh_heads.face_indexed import (
     indexed_face_stats,
     indexed_to_coordinate_tokens,
     order_indexed_faces_boundary_growth,
+    score_indexed_face_candidate,
     select_boundary_edge_action_face,
     select_constrained_indexed_face,
+    select_topology_fallback_indexed_face,
     _boundary_loops,
 )
 from clearmesh.mesh_heads.face_arae import build_tiny_point_conditioned_indexed_face_decoder
@@ -340,6 +342,38 @@ def test_constrained_selector_rejects_impossible_boundary_budget():
     )
 
     assert set(selected.tolist()) == {1, 2, 3}
+
+
+def test_boundary_budget_makes_edge_capacity_hard_even_when_relaxed():
+    state = IndexedDecodeState.from_faces(np.asarray([[0, 1, 2], [0, 1, 3]], dtype=np.int64))
+
+    score = score_indexed_face_candidate(
+        (0, 1, 4),
+        100.0,
+        state,
+        target_face_count=4,
+        strict_manifold=False,
+    )
+
+    assert score is None
+
+
+def test_topology_fallback_never_reuses_full_edges():
+    state = IndexedDecodeState.from_faces(np.asarray([[0, 1, 2], [0, 1, 3]], dtype=np.int64))
+
+    selected = select_topology_fallback_indexed_face(
+        state,
+        vertex_count=6,
+        target_face_count=4,
+    )
+
+    assert selected is not None
+    edges = (
+        tuple(sorted((int(selected[0]), int(selected[1])))),
+        tuple(sorted((int(selected[1]), int(selected[2])))),
+        tuple(sorted((int(selected[2]), int(selected[0])))),
+    )
+    assert max(state.edge_counts[edge] for edge in edges) < 2
 
 
 def test_boundary_edge_action_selector_forces_open_edge_completion():
