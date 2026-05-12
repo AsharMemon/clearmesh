@@ -412,6 +412,15 @@ def _generate_faces_beam(
                     candidates = [(np.asarray(fallback, dtype=np.int64), 0.0)]
                 for face, face_score in candidates[:beam_candidates]:
                     face_arr = np.asarray(face, dtype=np.int64).reshape(3)
+                    face_arr = _validate_or_fallback_face(
+                        face_arr,
+                        beam_state,
+                        vertex_count=vertex_count,
+                        target_face_count=target_face_count,
+                        enforce_vertex_link_manifold=enforce_vertex_link_manifold,
+                    )
+                    if face_arr is None:
+                        continue
                     next_state = _clone_decode_state(beam_state)
                     next_state.add_face(face_arr)
                     next_generated = beam_generated + [face_arr.copy()]
