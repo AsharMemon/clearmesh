@@ -24,8 +24,8 @@ fi
 
 GPU="${GPU:-a6000}"
 MODE="${MODE:-prototyping}"
-VCPUS="${VCPUS:-16}"
-PRIMARY_DISK="${PRIMARY_DISK:-300}"
+VCPUS="${VCPUS:-8}"
+PRIMARY_DISK="${PRIMARY_DISK:-200}"
 TEMPLATE="${TEMPLATE:-base}"
 WAIT_INTERVAL_SEC="${WAIT_INTERVAL_SEC:-10}"
 WAIT_TIMEOUT_SEC="${WAIT_TIMEOUT_SEC:-1800}"
@@ -48,7 +48,12 @@ OVERSAMPLE_FACTOR="${OVERSAMPLE_FACTOR:-1}"
 SHUFFLE="${SHUFFLE:-0}"
 SEED="${SEED:-303}"
 DOWNLOAD_PROCESSES="${DOWNLOAD_PROCESSES:-16}"
+DOWNLOAD_FALLBACK_PROCESSES="${DOWNLOAD_FALLBACK_PROCESSES:-1}"
 DOWNLOAD_BATCH_SIZE="${DOWNLOAD_BATCH_SIZE:-50}"
+DOWNLOAD_BATCH_TIMEOUT_SECONDS="${DOWNLOAD_BATCH_TIMEOUT_SECONDS:-600}"
+DOWNLOAD_BATCH_RETRIES="${DOWNLOAD_BATCH_RETRIES:-2}"
+DOWNLOAD_RETRY_SLEEP_SECONDS="${DOWNLOAD_RETRY_SLEEP_SECONDS:-15}"
+DOWNLOAD_RATE_LIMIT_SLEEP_SECONDS="${DOWNLOAD_RATE_LIMIT_SLEEP_SECONDS:-600}"
 TARGET_FACES="${TARGET_FACES:-512}"
 TOKEN_MAX_FACES="${TOKEN_MAX_FACES:-512}"
 POINT_SAMPLES="${POINT_SAMPLES:-8192}"
@@ -61,6 +66,13 @@ MESH_VOXEL_MAX_FACES="${MESH_VOXEL_MAX_FACES:-5000}"
 STRICT_TARGET_PROGRESS_EVERY="${STRICT_TARGET_PROGRESS_EVERY:-100}"
 TEST_RATIO="${TEST_RATIO:-0.02}"
 LEAN_ARCHIVE_PATH="${LEAN_ARCHIVE_PATH:-$REMOTE_LAB_ROOT/lean_face_corpus.tar.gz}"
+START_B2_UPLOAD="${START_B2_UPLOAD:-0}"
+B2_BUCKET="${B2_BUCKET:-clearmesh-pairs}"
+B2_PREFIX="${B2_PREFIX:-face-corpora/poolA-shards/$(basename "$REMOTE_LAB_ROOT")}"
+B2_UPLOAD_INTERVAL_SECONDS="${B2_UPLOAD_INTERVAL_SECONDS:-600}"
+B2_UPLOAD_PID="${B2_UPLOAD_PID:-$REMOTE_LAB_ROOT/b2_upload.pid}"
+B2_UPLOAD_LOG="${B2_UPLOAD_LOG:-$REMOTE_LAB_ROOT/b2_upload.log}"
+REMOTE_B2_ENV="${REMOTE_B2_ENV:-$REMOTE_LAB_ROOT/.clearmesh_b2.env}"
 
 if [ -z "${THUNDER_TOKEN:-}" ]; then
   echo "THUNDER_TOKEN is not set." >&2
@@ -179,6 +191,18 @@ fi
 printf 'mkdir -p %q\nexit\n' "$REMOTE_LAB_ROOT" | "$TNR_BIN" connect "$INSTANCE_ID"
 "$TNR_BIN" scp "$LOCAL_ANNOTATIONS_FILE" "$INSTANCE_ID:$REMOTE_ANNOTATIONS"
 
+if [ "$START_B2_UPLOAD" = "1" ]; then
+  b2_env_file="$(mktemp "$DOWNLOAD_ROOT/b2_env.XXXXXX")"
+  {
+    printf 'export B2_KEY_ID=%q\n' "${B2_KEY_ID:-}"
+    printf 'export B2_APP_KEY=%q\n' "${B2_APP_KEY:-}"
+    printf 'export B2_TOKEN=%q\n' "${B2_TOKEN:-}"
+  } > "$b2_env_file"
+  chmod 600 "$b2_env_file"
+  "$TNR_BIN" scp "$b2_env_file" "$INSTANCE_ID:$REMOTE_B2_ENV"
+  rm -f "$b2_env_file"
+fi
+
 remote_setup_log="$DOWNLOAD_ROOT/remote_setup_and_launch.log"
 setup_status=0
 cat <<REMOTE_SETUP | "$TNR_BIN" connect "$INSTANCE_ID" 2>&1 | tee "$remote_setup_log" || setup_status=$?
@@ -222,7 +246,12 @@ export OVERSAMPLE_FACTOR=$(printf '%q' "$OVERSAMPLE_FACTOR")
 export SHUFFLE=$(printf '%q' "$SHUFFLE")
 export SEED=$(printf '%q' "$SEED")
 export DOWNLOAD_PROCESSES=$(printf '%q' "$DOWNLOAD_PROCESSES")
+export DOWNLOAD_FALLBACK_PROCESSES=$(printf '%q' "$DOWNLOAD_FALLBACK_PROCESSES")
 export DOWNLOAD_BATCH_SIZE=$(printf '%q' "$DOWNLOAD_BATCH_SIZE")
+export DOWNLOAD_BATCH_TIMEOUT_SECONDS=$(printf '%q' "$DOWNLOAD_BATCH_TIMEOUT_SECONDS")
+export DOWNLOAD_BATCH_RETRIES=$(printf '%q' "$DOWNLOAD_BATCH_RETRIES")
+export DOWNLOAD_RETRY_SLEEP_SECONDS=$(printf '%q' "$DOWNLOAD_RETRY_SLEEP_SECONDS")
+export DOWNLOAD_RATE_LIMIT_SLEEP_SECONDS=$(printf '%q' "$DOWNLOAD_RATE_LIMIT_SLEEP_SECONDS")
 export TARGET_FACES=$(printf '%q' "$TARGET_FACES")
 export TOKEN_MAX_FACES=$(printf '%q' "$TOKEN_MAX_FACES")
 export POINT_SAMPLES=$(printf '%q' "$POINT_SAMPLES")
@@ -236,12 +265,51 @@ export STRICT_TARGET_PROGRESS_EVERY=$(printf '%q' "$STRICT_TARGET_PROGRESS_EVERY
 export TEST_RATIO=$(printf '%q' "$TEST_RATIO")
 export LEAN_ARCHIVE_PATH=$(printf '%q' "$LEAN_ARCHIVE_PATH")
 export ARCHIVE_PATH=""
+export START_B2_UPLOAD=$(printf '%q' "$START_B2_UPLOAD")
+export B2_BUCKET=$(printf '%q' "$B2_BUCKET")
+export B2_PREFIX=$(printf '%q' "$B2_PREFIX")
+export B2_UPLOAD_INTERVAL_SECONDS=$(printf '%q' "$B2_UPLOAD_INTERVAL_SECONDS")
+export B2_UPLOAD_PID=$(printf '%q' "$B2_UPLOAD_PID")
+export B2_UPLOAD_LOG=$(printf '%q' "$B2_UPLOAD_LOG")
+export B2_ENV_FILE=$(printf '%q' "$REMOTE_B2_ENV")
 
 nohup bash scripts/thunder/face_objaversepp_corpus_pilot.sh > "\$REMOTE_LOG" 2>&1 &
 echo \$! > "\$REMOTE_PID"
+if [ "\$START_B2_UPLOAD" = "1" ]; then
+  if [ -f "\$B2_ENV_FILE" ]; then
+    # shellcheck disable=SC1090
+    source "\$B2_ENV_FILE"
+  else
+    echo "b2_continuous_upload_skipped=missing_b2_env_file"
+    START_B2_UPLOAD=0
+  fi
+fi
+if [ "\$START_B2_UPLOAD" = "1" ]; then
+  B2_KEY_ID="\${B2_KEY_ID:-}"
+  B2_APP_KEY="\${B2_APP_KEY:-}"
+  B2_TOKEN="\${B2_TOKEN:-}"
+  if command -v rclone >/dev/null 2>&1 || (command -v curl >/dev/null 2>&1 && curl -fsSL https://rclone.org/install.sh | sudo bash >/dev/null 2>&1); then
+    MODE=face_shard \
+    LOCAL_ROOT="\$REMOTE_LAB_ROOT" \
+    B2_BUCKET="\$B2_BUCKET" \
+    B2_PREFIX="\$B2_PREFIX" \
+    INTERVAL_SECONDS="\$B2_UPLOAD_INTERVAL_SECONDS" \
+    B2_KEY_ID="\$B2_KEY_ID" \
+    B2_APP_KEY="\$B2_APP_KEY" \
+    B2_TOKEN="\$B2_TOKEN" \
+      nohup bash scripts/thunder/b2_continuous_upload.sh > "\$B2_UPLOAD_LOG" 2>&1 &
+    echo \$! > "\$B2_UPLOAD_PID"
+  else
+    echo "b2_continuous_upload_skipped=rclone_unavailable"
+  fi
+fi
 echo "face_corpus_shard_pid=\$(cat "\$REMOTE_PID")"
 echo "face_corpus_shard_log=\$REMOTE_LOG"
 echo "face_corpus_shard_lab_root=\$REMOTE_LAB_ROOT"
+if [ "\$START_B2_UPLOAD" = "1" ] && [ -f "\$B2_UPLOAD_PID" ]; then
+  echo "face_corpus_shard_b2_upload_pid=\$(cat "\$B2_UPLOAD_PID")"
+  echo "face_corpus_shard_b2_upload_log=\$B2_UPLOAD_LOG"
+fi
 echo CLEARMESH_FACE_CORPUS_SHARD_LAUNCHED
 exit
 REMOTE_SETUP
@@ -270,9 +338,21 @@ cat > "$DOWNLOAD_ROOT/run_info.json" <<JSON
   "remote_lab_root": "$REMOTE_LAB_ROOT",
   "download_root": "$DOWNLOAD_ROOT",
   "lean_archive_path": "$LEAN_ARCHIVE_PATH",
+  "b2_upload_started": "$START_B2_UPLOAD",
+  "b2_bucket": "$B2_BUCKET",
+  "b2_prefix": "$B2_PREFIX",
+  "b2_upload_log": "$B2_UPLOAD_LOG",
+  "remote_b2_env": "$REMOTE_B2_ENV",
   "select_target": $SELECT_TARGET,
   "curation_target": $CURATION_TARGET,
   "min_quality": $MIN_QUALITY,
+  "download_processes": $DOWNLOAD_PROCESSES,
+  "download_fallback_processes": $DOWNLOAD_FALLBACK_PROCESSES,
+  "download_batch_size": $DOWNLOAD_BATCH_SIZE,
+  "download_batch_timeout_seconds": $DOWNLOAD_BATCH_TIMEOUT_SECONDS,
+  "download_batch_retries": $DOWNLOAD_BATCH_RETRIES,
+  "download_retry_sleep_seconds": $DOWNLOAD_RETRY_SLEEP_SECONDS,
+  "download_rate_limit_sleep_seconds": $DOWNLOAD_RATE_LIMIT_SLEEP_SECONDS,
   "target_faces": $TARGET_FACES,
   "token_max_faces": $TOKEN_MAX_FACES,
   "num_bins": $NUM_BINS,

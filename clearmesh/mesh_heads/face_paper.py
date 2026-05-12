@@ -524,8 +524,25 @@ def build_paper_face_arae(
                 x = block(x, vecset, mask)
             return self.decoder_norm(x)
 
-        def forward(self, point_features, input_faces, target_faces, query_indices=None):  # type: ignore[no-untyped-def]
-            return self.forward_causal(point_features, input_faces, target_faces, query_indices=query_indices)
+        def forward(  # type: ignore[no-untyped-def]
+            self,
+            point_features,
+            input_faces,
+            target_faces,
+            query_indices=None,
+            decode_head: str = "causal",
+            return_hidden: bool = False,
+        ):
+            hidden = self.hidden(point_features, input_faces, query_indices=query_indices)
+            if decode_head == "parallel":
+                logits = self.parallel_head(hidden).reshape(hidden.shape[0], hidden.shape[1], 9, self.num_bins)
+            elif decode_head == "causal":
+                logits = self._causal_logits_from_hidden(hidden, target_faces)
+            else:
+                raise ValueError(f"unknown decode_head: {decode_head}")
+            if return_hidden:
+                return logits, self.eos_logits_from_hidden(hidden), hidden
+            return logits
 
         def forward_causal(self, point_features, input_faces, target_faces, query_indices=None):  # type: ignore[no-untyped-def]
             hidden = self.hidden(point_features, input_faces, query_indices=query_indices)

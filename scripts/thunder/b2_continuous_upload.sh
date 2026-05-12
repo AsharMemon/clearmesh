@@ -14,6 +14,32 @@ RCLONE_REMOTE="${RCLONE_REMOTE:-b2env}"
 LOG_TIME() { date -u +'%Y-%m-%dT%H:%M:%SZ'; }
 mkdir -p "$STATE_DIR"
 
+if [[ -z "${B2_KEY_ID:-}" || -z "${B2_APP_KEY:-}" ]] && [[ -n "${B2_TOKEN:-}" ]]; then
+  parsed_b2="$(
+    python3 - <<'PY'
+import json
+import os
+import sys
+
+token = os.environ.get("B2_TOKEN", "").strip()
+key_id = app_key = ""
+if token:
+    if token.startswith("{"):
+        payload = json.loads(token)
+        key_id = payload.get("keyId") or payload.get("key_id") or payload.get("accountId") or ""
+        app_key = payload.get("applicationKey") or payload.get("application_key") or payload.get("appKey") or ""
+    elif ":" in token:
+        key_id, app_key = token.split(":", 1)
+if key_id and app_key:
+    sys.stdout.write(key_id + "\n" + app_key)
+PY
+  )"
+  if [[ -n "$parsed_b2" ]]; then
+    B2_KEY_ID="${B2_KEY_ID:-$(printf '%s\n' "$parsed_b2" | sed -n '1p')}"
+    B2_APP_KEY="${B2_APP_KEY:-$(printf '%s\n' "$parsed_b2" | sed -n '2p')}"
+  fi
+fi
+
 if [[ -n "${B2_KEY_ID:-}" && -n "${B2_APP_KEY:-}" ]]; then
   export RCLONE_CONFIG_${RCLONE_REMOTE^^}_TYPE=b2
   export RCLONE_CONFIG_${RCLONE_REMOTE^^}_ACCOUNT="$B2_KEY_ID"

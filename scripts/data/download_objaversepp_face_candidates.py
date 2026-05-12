@@ -16,6 +16,7 @@ import os
 import random
 import signal
 import sys
+import time
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -194,12 +195,21 @@ def _load_batch(batch: list[str], processes: int, batch_timeout_seconds: int) ->
     return dict(result.get("paths", {}))
 
 
+def _is_rate_limit_error(exc: BaseException | str) -> bool:
+    text = str(exc).lower()
+    return "429" in text or "too many requests" in text or "rate limit" in text
+
+
 def _download(
     selected: list[dict[str, Any]],
     output_dir: Path,
     processes: int,
+    fallback_processes: int,
     batch_size: int,
     batch_timeout_seconds: int,
+    batch_retries: int,
+    retry_sleep_seconds: int,
+    rate_limit_sleep_seconds: int,
 ) -> dict[str, str]:
     try:
         import objaverse
@@ -233,10 +243,50 @@ def _download(
             f"starting download batch {batch_index} ({len(batch)} objects, timeout={batch_timeout_seconds}s)",
             flush=True,
         )
-        try:
-            paths = _load_batch(batch, processes, batch_timeout_seconds)
-        except Exception as exc:  # noqa: BLE001 - keep partial progress.
-            print(f"download batch {batch_index} failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+        paths = {}
+        for attempt in range(max(0, batch_retries) + 1):
+            last_error: BaseException | None = None
+            try:
+                paths = _load_batch(batch, processes, batch_timeout_seconds)
+                break
+            except Exception as exc:  # noqa: BLE001 - keep partial progress.
+                last_error = exc
+                print(
+                    f"download batch {batch_index} attempt {attempt + 1} failed: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            if fallback_processes > 0 and fallback_processes != processes:
+                print(
+                    "retrying download batch "
+                    f"{batch_index} attempt {attempt + 1} with fallback_processes={fallback_processes}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                try:
+                    paths = _load_batch(batch, fallback_processes, batch_timeout_seconds)
+                    break
+                except Exception as fallback_exc:  # noqa: BLE001 - keep partial progress.
+                    last_error = fallback_exc
+                    print(
+                        "download batch "
+                        f"{batch_index} attempt {attempt + 1} fallback failed: "
+                        f"{type(fallback_exc).__name__}: {fallback_exc}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+            if attempt < max(0, batch_retries):
+                sleep_seconds = rate_limit_sleep_seconds if last_error and _is_rate_limit_error(last_error) else retry_sleep_seconds
+                if sleep_seconds > 0:
+                    print(
+                        f"sleeping {sleep_seconds}s before retrying download batch {batch_index}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    time.sleep(sleep_seconds)
+            else:
+                paths = {}
+        if not paths:
             continue
         downloaded = 0
         for uid, path in paths.items():
@@ -263,7 +313,19 @@ def main() -> int:
     parser.add_argument("--shuffle", action="store_true")
     parser.add_argument("--download", action="store_true")
     parser.add_argument("--processes", type=int, default=8)
+    parser.add_argument(
+        "--fallback-processes",
+        type=int,
+        default=1,
+        help=(
+            "Retry a failed Objaverse download batch with this many processes. "
+            "Use 1 to avoid multiprocessing pickling failures; 0 disables retry."
+        ),
+    )
     parser.add_argument("--batch-size", type=int, default=100)
+    parser.add_argument("--batch-retries", type=int, default=2)
+    parser.add_argument("--retry-sleep-seconds", type=int, default=15)
+    parser.add_argument("--rate-limit-sleep-seconds", type=int, default=300)
     parser.add_argument(
         "--batch-timeout-seconds",
         type=int,
@@ -285,8 +347,12 @@ def main() -> int:
             selected,
             args.output_dir / "downloads",
             args.processes,
+            args.fallback_processes,
             args.batch_size,
             args.batch_timeout_seconds,
+            args.batch_retries,
+            args.retry_sleep_seconds,
+            args.rate_limit_sleep_seconds,
         )
         (args.output_dir / "download_manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
         candidates_path = args.output_dir / "downloaded_candidates.json"

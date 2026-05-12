@@ -14,6 +14,7 @@ CREATED_INSTANCE=0
 
 GPU="${GPU:-a100}"
 MODE="${MODE:-production}"
+NUM_GPUS="${NUM_GPUS:-1}"
 VCPUS="${VCPUS:-8}"
 PRIMARY_DISK="${PRIMARY_DISK:-300}"
 TEMPLATE="${TEMPLATE:-base}"
@@ -60,6 +61,9 @@ ENCODER_LAYERS="${ENCODER_LAYERS:-4}"
 DECODER_LAYERS="${DECODER_LAYERS:-8}"
 HEADS="${HEADS:-8}"
 PRECISION="${PRECISION:-bf16}"
+DISTRIBUTED="${DISTRIBUTED:-auto}"
+DISTRIBUTED_BACKEND="${DISTRIBUTED_BACKEND:-nccl}"
+TORCHRUN_NPROC_PER_NODE="${TORCHRUN_NPROC_PER_NODE:-0}"
 LOG_EVERY="${LOG_EVERY:-50}"
 SELECTION_EVAL_EVERY="${SELECTION_EVAL_EVERY:-1000}"
 SELECTION_EVAL_BATCH_SIZE="${SELECTION_EVAL_BATCH_SIZE:-1}"
@@ -84,7 +88,22 @@ FACE_EMBEDDING_VARIANT="${FACE_EMBEDDING_VARIANT:-token_concat_project}"
 DECODE_HEAD="${DECODE_HEAD:-causal}"
 ALLOW_DEPRECATED_FACE_EMBEDDING="${ALLOW_DEPRECATED_FACE_EMBEDDING:-0}"
 STRICT_FACE_PAPER_GATE="${STRICT_FACE_PAPER_GATE:-1}"
+FIRST_FACE_LOSS_WEIGHT="${FIRST_FACE_LOSS_WEIGHT:-1.0}"
+LOSS_FACE_PREFIX_COUNT="${LOSS_FACE_PREFIX_COUNT:-0}"
+FIRST_FACE_TIE_MARGINAL_LOSS="${FIRST_FACE_TIE_MARGINAL_LOSS:-0}"
+INPUT_FACE_TOKEN_NOISE_PROB="${INPUT_FACE_TOKEN_NOISE_PROB:-0.0}"
+INPUT_FACE_TOKEN_NOISE_MAX_OFFSET="${INPUT_FACE_TOKEN_NOISE_MAX_OFFSET:-1}"
+INPUT_FACE_NOISE_PREFIX_COUNT="${INPUT_FACE_NOISE_PREFIX_COUNT:-0}"
+TOPOLOGY_REUSE_WEIGHT="${TOPOLOGY_REUSE_WEIGHT:-0.0}"
+TOPOLOGY_EDGE_CLOSURE_WEIGHT="${TOPOLOGY_EDGE_CLOSURE_WEIGHT:-0.0}"
 SEED="${SEED:-303}"
+START_B2_UPLOAD="${START_B2_UPLOAD:-0}"
+B2_BUCKET="${B2_BUCKET:-clearmesh-pairs}"
+B2_PREFIX="${B2_PREFIX:-face-runs/$(basename "$REMOTE_LAB_ROOT")}"
+B2_UPLOAD_INTERVAL_SECONDS="${B2_UPLOAD_INTERVAL_SECONDS:-600}"
+B2_UPLOAD_PID="${B2_UPLOAD_PID:-$REMOTE_LAB_ROOT/b2_upload.pid}"
+B2_UPLOAD_LOG="${B2_UPLOAD_LOG:-$REMOTE_LAB_ROOT/b2_upload.log}"
+REMOTE_B2_ENV="${REMOTE_B2_ENV:-$REMOTE_LAB_ROOT/.clearmesh_b2.env}"
 
 if [ -z "${THUNDER_TOKEN:-}" ]; then
   echo "THUNDER_TOKEN is not set." >&2
@@ -122,6 +141,10 @@ case "$MODE:$GPU" in
     exit 5
     ;;
 esac
+if ! [[ "$NUM_GPUS" =~ ^[0-9]+$ ]] || [ "$NUM_GPUS" -lt 1 ] || [ "$NUM_GPUS" -gt 8 ]; then
+  echo "NUM_GPUS must be an integer in [1, 8]; got '$NUM_GPUS'." >&2
+  exit 5
+fi
 mkdir -p "$DOWNLOAD_ROOT"
 
 cleanup_instance() {
@@ -157,7 +180,7 @@ PY
 }
 
 if [ "$CREATE_INSTANCE" = "1" ]; then
-  create_args=(create --gpu "$GPU" --mode "$MODE" --num-gpus 1 --primary-disk "$PRIMARY_DISK" --template "$TEMPLATE" --yes --json)
+  create_args=(create --gpu "$GPU" --mode "$MODE" --num-gpus "$NUM_GPUS" --primary-disk "$PRIMARY_DISK" --template "$TEMPLATE" --yes --json)
   if [ "$MODE" = "prototyping" ]; then
     create_args+=(--vcpus "$VCPUS")
   fi
@@ -259,6 +282,19 @@ if [ "$SYNC_HF_TOKEN" = "1" ]; then
   else
     echo "HF_TOKEN/HUGGINGFACE_HUB_TOKEN not set locally; remote corpus downloads may be rate limited." >&2
   fi
+fi
+
+if [ "$START_B2_UPLOAD" = "1" ]; then
+  printf 'mkdir -p %q\nexit\n' "$REMOTE_LAB_ROOT" | "$TNR_BIN" connect "$INSTANCE_ID"
+  b2_env_file="$(mktemp "$DOWNLOAD_ROOT/b2_env.XXXXXX")"
+  {
+    printf 'export B2_KEY_ID=%q\n' "${B2_KEY_ID:-}"
+    printf 'export B2_APP_KEY=%q\n' "${B2_APP_KEY:-}"
+    printf 'export B2_TOKEN=%q\n' "${B2_TOKEN:-}"
+  } > "$b2_env_file"
+  chmod 600 "$b2_env_file"
+  "$TNR_BIN" scp "$b2_env_file" "$INSTANCE_ID:$REMOTE_B2_ENV"
+  rm -f "$b2_env_file"
 fi
 
 remote_setup_log="$DOWNLOAD_ROOT/remote_setup_and_launch.log"
@@ -365,6 +401,9 @@ export ENCODER_LAYERS=$(printf '%q' "$ENCODER_LAYERS")
 export DECODER_LAYERS=$(printf '%q' "$DECODER_LAYERS")
 export HEADS=$(printf '%q' "$HEADS")
 export PRECISION=$(printf '%q' "$PRECISION")
+export DISTRIBUTED=$(printf '%q' "$DISTRIBUTED")
+export DISTRIBUTED_BACKEND=$(printf '%q' "$DISTRIBUTED_BACKEND")
+export TORCHRUN_NPROC_PER_NODE=$(printf '%q' "$TORCHRUN_NPROC_PER_NODE")
 export LOG_EVERY=$(printf '%q' "$LOG_EVERY")
 export SELECTION_EVAL_EVERY=$(printf '%q' "$SELECTION_EVAL_EVERY")
 export SELECTION_EVAL_BATCH_SIZE=$(printf '%q' "$SELECTION_EVAL_BATCH_SIZE")
@@ -389,14 +428,61 @@ export FACE_EMBEDDING_VARIANT=$(printf '%q' "$FACE_EMBEDDING_VARIANT")
 export DECODE_HEAD=$(printf '%q' "$DECODE_HEAD")
 export ALLOW_DEPRECATED_FACE_EMBEDDING=$(printf '%q' "$ALLOW_DEPRECATED_FACE_EMBEDDING")
 export STRICT_FACE_PAPER_GATE=$(printf '%q' "$STRICT_FACE_PAPER_GATE")
+export FIRST_FACE_LOSS_WEIGHT=$(printf '%q' "$FIRST_FACE_LOSS_WEIGHT")
+export LOSS_FACE_PREFIX_COUNT=$(printf '%q' "$LOSS_FACE_PREFIX_COUNT")
+export FIRST_FACE_TIE_MARGINAL_LOSS=$(printf '%q' "$FIRST_FACE_TIE_MARGINAL_LOSS")
+export INPUT_FACE_TOKEN_NOISE_PROB=$(printf '%q' "$INPUT_FACE_TOKEN_NOISE_PROB")
+export INPUT_FACE_TOKEN_NOISE_MAX_OFFSET=$(printf '%q' "$INPUT_FACE_TOKEN_NOISE_MAX_OFFSET")
+export INPUT_FACE_NOISE_PREFIX_COUNT=$(printf '%q' "$INPUT_FACE_NOISE_PREFIX_COUNT")
+export TOPOLOGY_REUSE_WEIGHT=$(printf '%q' "$TOPOLOGY_REUSE_WEIGHT")
+export TOPOLOGY_EDGE_CLOSURE_WEIGHT=$(printf '%q' "$TOPOLOGY_EDGE_CLOSURE_WEIGHT")
 export SEED=$(printf '%q' "$SEED")
+export START_B2_UPLOAD=$(printf '%q' "$START_B2_UPLOAD")
+export B2_BUCKET=$(printf '%q' "$B2_BUCKET")
+export B2_PREFIX=$(printf '%q' "$B2_PREFIX")
+export B2_UPLOAD_INTERVAL_SECONDS=$(printf '%q' "$B2_UPLOAD_INTERVAL_SECONDS")
+export B2_UPLOAD_PID=$(printf '%q' "$B2_UPLOAD_PID")
+export B2_UPLOAD_LOG=$(printf '%q' "$B2_UPLOAD_LOG")
+export B2_ENV_FILE=$(printf '%q' "$REMOTE_B2_ENV")
 
 nohup bash scripts/thunder/face_paper_curated_corpus_gate.sh > "\$REMOTE_LOG" 2>&1 &
 echo \$! > "\$REMOTE_PID"
+if [ "\$START_B2_UPLOAD" = "1" ]; then
+  if [ -f "\$B2_ENV_FILE" ]; then
+    # shellcheck disable=SC1090
+    source "\$B2_ENV_FILE"
+  else
+    echo "b2_continuous_upload_skipped=missing_b2_env_file"
+    START_B2_UPLOAD=0
+  fi
+fi
+if [ "\$START_B2_UPLOAD" = "1" ]; then
+  B2_KEY_ID="\${B2_KEY_ID:-}"
+  B2_APP_KEY="\${B2_APP_KEY:-}"
+  B2_TOKEN="\${B2_TOKEN:-}"
+  if command -v rclone >/dev/null 2>&1 || (command -v curl >/dev/null 2>&1 && curl -fsSL https://rclone.org/install.sh | sudo bash >/dev/null 2>&1); then
+    MODE=face_run \
+    LOCAL_ROOT="\$REMOTE_LAB_ROOT" \
+    B2_BUCKET="\$B2_BUCKET" \
+    B2_PREFIX="\$B2_PREFIX" \
+    INTERVAL_SECONDS="\$B2_UPLOAD_INTERVAL_SECONDS" \
+    B2_KEY_ID="\$B2_KEY_ID" \
+    B2_APP_KEY="\$B2_APP_KEY" \
+    B2_TOKEN="\$B2_TOKEN" \
+      nohup bash scripts/thunder/b2_continuous_upload.sh > "\$B2_UPLOAD_LOG" 2>&1 &
+    echo \$! > "\$B2_UPLOAD_PID"
+  else
+    echo "b2_continuous_upload_skipped=rclone_unavailable"
+  fi
+fi
 probe_pid="\$(cat "\$REMOTE_PID")"
 echo "paper_corpus_gate_pid=\$probe_pid"
 echo "paper_corpus_gate_log=\$REMOTE_LOG"
 echo "paper_corpus_gate_lab_root=\$REMOTE_LAB_ROOT"
+if [ "\$START_B2_UPLOAD" = "1" ] && [ -f "\$B2_UPLOAD_PID" ]; then
+  echo "paper_corpus_gate_b2_upload_pid=\$(cat "\$B2_UPLOAD_PID")"
+  echo "paper_corpus_gate_b2_upload_log=\$B2_UPLOAD_LOG"
+fi
 echo "paper_corpus_gate_latest=/tmp/clearmesh_latest_face_paper_corpus_gate_run.txt"
 echo CLEARMESH_FACE_PAPER_CORPUS_GATE_LAUNCHED
 exit
@@ -442,11 +528,17 @@ cat > "$DOWNLOAD_ROOT/run_info.json" <<JSON
   "created_instance": $CREATED_INSTANCE,
   "gpu": "$GPU",
   "mode": "$MODE",
+  "num_gpus": $NUM_GPUS,
   "remote_log": "$REMOTE_LOG",
   "remote_pid": "$REMOTE_PID",
   "remote_lab_root": "$REMOTE_LAB_ROOT",
   "remote_latest_file": "/tmp/clearmesh_latest_face_paper_corpus_gate_run.txt",
   "download_root": "$DOWNLOAD_ROOT",
+  "start_b2_upload": "$START_B2_UPLOAD",
+  "b2_bucket": "$B2_BUCKET",
+  "b2_prefix": "$B2_PREFIX",
+  "b2_upload_log": "$B2_UPLOAD_LOG",
+  "remote_b2_env": "$REMOTE_B2_ENV",
   "select_target": $SELECT_TARGET,
   "curation_target": $CURATION_TARGET,
   "steps": $STEPS,
@@ -458,11 +550,22 @@ cat > "$DOWNLOAD_ROOT/run_info.json" <<JSON
   "vecset_tokens": $VECSET_TOKENS,
   "latent_dim": $LATENT_DIM,
   "precision": "$PRECISION",
+  "distributed": "$DISTRIBUTED",
+  "distributed_backend": "$DISTRIBUTED_BACKEND",
+  "torchrun_nproc_per_node": $TORCHRUN_NPROC_PER_NODE,
   "causal_mlp_variant": "$CAUSAL_MLP_VARIANT",
   "face_embedding_variant": "$FACE_EMBEDDING_VARIANT",
   "allow_deprecated_face_embedding": $([ "$ALLOW_DEPRECATED_FACE_EMBEDDING" = "1" ] && echo true || echo false),
   "strict_face_paper_gate": $([ "$STRICT_FACE_PAPER_GATE" = "1" ] && echo true || echo false),
   "decode_head": "$DECODE_HEAD",
+  "first_face_loss_weight": $FIRST_FACE_LOSS_WEIGHT,
+  "loss_face_prefix_count": $LOSS_FACE_PREFIX_COUNT,
+  "first_face_tie_marginal_loss": $([ "$FIRST_FACE_TIE_MARGINAL_LOSS" = "1" ] && echo true || echo false),
+  "input_face_token_noise_prob": $INPUT_FACE_TOKEN_NOISE_PROB,
+  "input_face_token_noise_max_offset": $INPUT_FACE_TOKEN_NOISE_MAX_OFFSET,
+  "input_face_noise_prefix_count": $INPUT_FACE_NOISE_PREFIX_COUNT,
+  "topology_reuse_weight": $TOPOLOGY_REUSE_WEIGHT,
+  "topology_edge_closure_weight": $TOPOLOGY_EDGE_CLOSURE_WEIGHT,
   "selection_eval_every": $SELECTION_EVAL_EVERY,
   "selection_eval_batch_size": $SELECTION_EVAL_BATCH_SIZE,
   "skip_initial_selection_eval": $([ "$SKIP_INITIAL_SELECTION_EVAL" = "1" ] && echo true || echo false),

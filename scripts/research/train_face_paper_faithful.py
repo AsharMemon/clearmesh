@@ -29,6 +29,7 @@ from clearmesh.mesh_heads.face_tokens import (
     dequantize_normalized_points,
     fit_face_token_transform,
 )
+from clearmesh.mesh_heads.face_topology import topology_coordinate_weights
 from clearmesh.utils.checkpoint import args_to_json_safe
 from clearmesh.utils.muon_fallback import build_muon_fallback
 
@@ -303,6 +304,13 @@ def _make_batch(
     augment_flip_prob: float = 0.5,
     augment_diagnostics: AugmentDiagnostics | None = None,
     fps_index_cache: dict[Path, np.ndarray] | None = None,
+    first_face_loss_weight: float = 1.0,
+    loss_face_prefix_count: int = 0,
+    topology_reuse_weight: float = 0.0,
+    topology_edge_closure_weight: float = 0.0,
+    input_face_token_noise_prob: float = 0.0,
+    input_face_token_noise_max_offset: int = 1,
+    input_face_noise_prefix_count: int = 0,
 ):  # type: ignore[no-untyped-def]
     import torch
 
@@ -333,10 +341,38 @@ def _make_batch(
         if len(tokens):
             target_faces[row, : len(tokens)] = torch.as_tensor(tokens, dtype=torch.long, device=device)
             valid_weights[row, : len(tokens)] = 1.0
+            if topology_reuse_weight or topology_edge_closure_weight:
+                topo_weights = topology_coordinate_weights(
+                    tokens,
+                    reuse_vertex_weight=topology_reuse_weight,
+                    edge_closure_weight=topology_edge_closure_weight,
+                )
+                valid_weights[row, : len(tokens)] *= torch.as_tensor(topo_weights, dtype=torch.float32, device=device)
+            if first_face_loss_weight != 1.0:
+                valid_weights[row, 0] *= float(first_face_loss_weight)
+            if loss_face_prefix_count > 0:
+                valid_weights[row, int(loss_face_prefix_count) :] = 0.0
             eos_weights[row, : len(tokens)] = 1.0
             eos_targets[row, len(tokens) - 1] = 1.0
         if len(tokens) > 1:
             input_faces[row, 1 : len(tokens)] = torch.as_tensor(tokens[:-1], dtype=torch.long, device=device)
+            if input_face_token_noise_prob > 0.0 and input_face_token_noise_max_offset > 0:
+                noise_end = len(tokens)
+                if input_face_noise_prefix_count > 0:
+                    noise_end = min(noise_end, int(input_face_noise_prefix_count) + 1)
+                if noise_end > 1:
+                    noise_region = input_faces[row, 1:noise_end]
+                    valid_noise = noise_region.ge(0)
+                    mask = torch.rand(noise_region.shape, device=device).lt(float(input_face_token_noise_prob)) & valid_noise
+                    offsets = torch.randint(
+                        -int(input_face_token_noise_max_offset),
+                        int(input_face_token_noise_max_offset) + 1,
+                        noise_region.shape,
+                        device=device,
+                    )
+                    offsets = torch.where(offsets.eq(0), torch.ones_like(offsets), offsets)
+                    corrupted = (noise_region + offsets).clamp(0, int(num_bins) - 1)
+                    noise_region.copy_(torch.where(mask, corrupted, noise_region))
         points = _sample_point_features(points, point_samples)
         point_batches.append(torch.as_tensor(points, dtype=torch.float32, device=device))
         if fps_index_cache is not None and not augment:
@@ -396,6 +432,83 @@ def _compute_loss(F, logits, target_faces, valid_weights, num_bins: int):  # typ
     return (losses_raw * valid_weights * valid).sum() / denom, denom
 
 
+def _face_min_vertices_torch(torch, target_faces, *, num_bins: int):  # type: ignore[no-untyped-def]
+    faces = target_faces.reshape(target_faces.shape[0], target_faces.shape[1], 3, 3)
+    clamped = faces.clamp(min=0, max=int(num_bins) - 1)
+    # FACE paper order is lexicographic ZYX. Pack each vertex to a scalar key so
+    # argmin gives the same minimum-anchor vertex used by the tokenization audit.
+    key = clamped[..., 0] * (int(num_bins) ** 2) + clamped[..., 1] * int(num_bins) + clamped[..., 2]
+    min_idx = torch.argmin(key, dim=2)
+    gather = min_idx.reshape(target_faces.shape[0], target_faces.shape[1], 1, 1).expand(-1, -1, 1, 3)
+    return torch.gather(clamped, 2, gather).squeeze(2)
+
+
+def _compute_loss_with_first_face_tie_marginal(
+    F,
+    model,
+    hidden,
+    logits,
+    target_faces,
+    valid_weights,
+    num_bins: int,
+):  # type: ignore[no-untyped-def]
+    """Coordinate loss with a set-valued face-0 target over same-min ties.
+
+    FACE's mesh-level ordering sorts triangles by the ZYX minimum vertex. Our
+    audits found many meshes where several faces share exactly the same first
+    minimum anchor, making row 0 an arbitrary tie break. For face 0 only, this
+    loss gives credit to any unique face in that same-anchor tie group by
+    marginalizing sequence probability with logsumexp. With a singleton group it
+    reduces to the ordinary nine-token teacher-forced CE, up to numerical noise.
+    """
+
+    import torch
+
+    valid = target_faces.ne(-100).to(logits.dtype)
+    exact_weights = valid_weights.clone()
+    valid_faces = target_faces[:, :, 0].ne(-100)
+    min_vertices = _face_min_vertices_torch(torch, target_faces, num_bins=num_bins)
+    first_min = min_vertices[:, :1, :]
+    tie_mask = valid_faces & torch.all(min_vertices == first_min, dim=-1)
+    active_rows = valid_faces[:, 0] & tie_mask[:, 0]
+    exact_weights[active_rows, 0, :] = 0.0
+
+    losses_raw = F.cross_entropy(
+        logits.reshape(-1, num_bins),
+        target_faces.reshape(-1),
+        ignore_index=-100,
+        reduction="none",
+    ).reshape_as(target_faces)
+    numerator = (losses_raw * exact_weights * valid).sum()
+    denom = (exact_weights * valid).sum()
+
+    hidden_face0 = hidden[:, :1, :]
+    core_model = _model_core(model)
+    for row in torch.nonzero(active_rows, as_tuple=False).flatten().tolist():
+        candidate_indices = torch.nonzero(tie_mask[row], as_tuple=False).flatten()
+        candidates = target_faces[row, candidate_indices].clamp(min=0, max=int(num_bins) - 1)
+        if candidates.numel() == 0:
+            continue
+        candidates = torch.unique(candidates, dim=0)
+        candidate_hidden = hidden_face0[row : row + 1].expand(candidates.shape[0], -1, -1)
+        candidate_faces = candidates.reshape(candidates.shape[0], 1, 9)
+        candidate_logits = core_model._causal_logits_from_hidden(candidate_hidden, candidate_faces)[:, 0, :, :]
+        candidate_log_probs = F.log_softmax(candidate_logits, dim=-1).gather(
+            -1,
+            candidates.unsqueeze(-1),
+        ).squeeze(-1).sum(dim=-1)
+        sequence_nll = -torch.logsumexp(candidate_log_probs, dim=0)
+        row_weights = valid_weights[row, 0] * valid[row, 0]
+        row_denom = row_weights.sum()
+        if float(row_denom.detach().cpu()) <= 0.0:
+            continue
+        numerator = numerator + (row_denom / 9.0) * sequence_nll
+        denom = denom + row_denom
+
+    denom = denom.clamp_min(1.0)
+    return numerator / denom, denom
+
+
 def _compute_eos_loss(F, eos_logits, eos_targets, eos_weights):  # type: ignore[no-untyped-def]
     if eos_logits is None:
         return None
@@ -404,13 +517,42 @@ def _compute_eos_loss(F, eos_logits, eos_targets, eos_weights):  # type: ignore[
     return (raw * eos_weights).sum() / denom
 
 
-def _forward_outputs(model, decode_head: str, point_features, input_faces, target_faces, query_indices=None):  # type: ignore[no-untyped-def]
-    hidden = model.hidden(point_features, input_faces, query_indices=query_indices)
+def _model_core(model):  # type: ignore[no-untyped-def]
+    """Return the underlying FACE module when wrapped in DDP."""
+
+    return getattr(model, "module", model)
+
+
+def _forward_outputs_with_hidden(model, decode_head: str, point_features, input_faces, target_faces, query_indices=None):  # type: ignore[no-untyped-def]
+    core_model = _model_core(model)
+    if hasattr(core_model, "forward"):
+        logits, eos_logits, hidden = model(
+            point_features,
+            input_faces,
+            target_faces,
+            query_indices=query_indices,
+            decode_head=decode_head,
+            return_hidden=True,
+        )
+        return logits, eos_logits, hidden
+    hidden = core_model.hidden(point_features, input_faces, query_indices=query_indices)
     if decode_head == "parallel":
-        logits = model.parallel_head(hidden).reshape(hidden.shape[0], hidden.shape[1], 9, model.num_bins)
+        logits = core_model.parallel_head(hidden).reshape(hidden.shape[0], hidden.shape[1], 9, core_model.num_bins)
     else:
-        logits = model._causal_logits_from_hidden(hidden, target_faces)
-    eos_logits = model.eos_logits_from_hidden(hidden) if hasattr(model, "eos_logits_from_hidden") else None
+        logits = core_model._causal_logits_from_hidden(hidden, target_faces)
+    eos_logits = core_model.eos_logits_from_hidden(hidden) if hasattr(core_model, "eos_logits_from_hidden") else None
+    return logits, eos_logits, hidden
+
+
+def _forward_outputs(model, decode_head: str, point_features, input_faces, target_faces, query_indices=None):  # type: ignore[no-untyped-def]
+    logits, eos_logits, _ = _forward_outputs_with_hidden(
+        model,
+        decode_head,
+        point_features,
+        input_faces,
+        target_faces,
+        query_indices=query_indices,
+    )
     return logits, eos_logits
 
 
@@ -433,6 +575,11 @@ def _evaluate_dataset_loss(
     eos_loss_weight: float,
     precision: str,
     fps_index_cache: dict[Path, np.ndarray] | None = None,
+    first_face_loss_weight: float = 1.0,
+    loss_face_prefix_count: int = 0,
+    first_face_tie_marginal_loss: bool = False,
+    topology_reuse_weight: float = 0.0,
+    topology_edge_closure_weight: float = 0.0,
 ) -> float:
     import torch
 
@@ -451,9 +598,13 @@ def _evaluate_dataset_loss(
                 num_bins=num_bins,
                 augment=False,
                 fps_index_cache=fps_index_cache,
+                first_face_loss_weight=first_face_loss_weight,
+                loss_face_prefix_count=loss_face_prefix_count,
+                topology_reuse_weight=topology_reuse_weight,
+                topology_edge_closure_weight=topology_edge_closure_weight,
             )
             with _autocast_context(torch, device, precision):
-                logits, eos_logits = _forward_outputs(
+                logits, eos_logits, hidden = _forward_outputs_with_hidden(
                     model,
                     decode_head,
                     point_features,
@@ -461,7 +612,18 @@ def _evaluate_dataset_loss(
                     target_faces,
                     query_indices=query_indices,
                 )
-                coord_loss, weight = _compute_loss(F, logits, target_faces, valid_weights, num_bins)
+                if first_face_tie_marginal_loss:
+                    coord_loss, weight = _compute_loss_with_first_face_tie_marginal(
+                        F,
+                        model,
+                        hidden,
+                        logits,
+                        target_faces,
+                        valid_weights,
+                        num_bins,
+                    )
+                else:
+                    coord_loss, weight = _compute_loss(F, logits, target_faces, valid_weights, num_bins)
                 eos_loss = _compute_eos_loss(F, eos_logits, eos_targets, eos_weights)
             loss = coord_loss if eos_loss is None else coord_loss + float(eos_loss_weight) * eos_loss
             weight_value = float(weight.detach().cpu())
@@ -529,6 +691,14 @@ def _checkpoint_payload(
         "face_embedding_variant": args.face_embedding_variant,
         "has_eos_head": not args.disable_eos_head,
         "eos_loss_weight": float(args.eos_loss_weight),
+        "first_face_loss_weight": float(args.first_face_loss_weight),
+        "loss_face_prefix_count": int(args.loss_face_prefix_count),
+        "first_face_tie_marginal_loss": bool(args.first_face_tie_marginal_loss),
+        "input_face_token_noise_prob": float(args.input_face_token_noise_prob),
+        "input_face_token_noise_max_offset": int(args.input_face_token_noise_max_offset),
+        "input_face_noise_prefix_count": int(args.input_face_noise_prefix_count),
+        "topology_reuse_weight": float(args.topology_reuse_weight),
+        "topology_edge_closure_weight": float(args.topology_edge_closure_weight),
         "decode_head": args.decode_head,
         "precision": args.precision,
         "augmentation": {
@@ -597,6 +767,75 @@ def main() -> int:
     )
     parser.add_argument("--disable-eos-head", action="store_true")
     parser.add_argument("--eos-loss-weight", type=float, default=0.05)
+    parser.add_argument(
+        "--first-face-loss-weight",
+        type=float,
+        default=1.0,
+        help=(
+            "Multiply coordinate CE weights for face 0. Default 1.0 preserves "
+            "the paper baseline; >1 is a first-face closure diagnostic ablation."
+        ),
+    )
+    parser.add_argument(
+        "--loss-face-prefix-count",
+        type=int,
+        default=0,
+        help=(
+            "If >0, compute coordinate CE only for the first N ordered faces. "
+            "Default 0 preserves the full paper loss; 1 is a face-0 curriculum diagnostic."
+        ),
+    )
+    parser.add_argument(
+        "--first-face-tie-marginal-loss",
+        action="store_true",
+        help=(
+            "For face 0, marginalize coordinate CE over all same-min-anchor faces "
+            "instead of only the arbitrary row-0 tie break. Default off preserves "
+            "the strict paper baseline; intended for rotate_min_zyx face-0 curriculum."
+        ),
+    )
+    parser.add_argument(
+        "--input-face-token-noise-prob",
+        type=float,
+        default=0.0,
+        help=(
+            "Training-only probability of perturbing decoder input coordinate tokens. "
+            "Targets are unchanged. Default 0 preserves paper teacher forcing."
+        ),
+    )
+    parser.add_argument(
+        "--input-face-token-noise-max-offset",
+        type=int,
+        default=1,
+        help="Maximum absolute integer perturbation for --input-face-token-noise-prob.",
+    )
+    parser.add_argument(
+        "--input-face-noise-prefix-count",
+        type=int,
+        default=0,
+        help=(
+            "If >0, apply decoder-input token noise only to input slots feeding the "
+            "first N target faces. Default 0 applies to all valid decoder inputs."
+        ),
+    )
+    parser.add_argument(
+        "--topology-reuse-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Add per-coordinate CE weight when a target vertex reuses an earlier "
+            "quantized vertex. Default 0 preserves the paper baseline."
+        ),
+    )
+    parser.add_argument(
+        "--topology-edge-closure-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Add per-coordinate CE weight when a target edge closes an existing "
+            "boundary edge. Default 0 preserves the paper baseline."
+        ),
+    )
     parser.add_argument("--decode-head", choices=["causal", "parallel"], default="causal")
     parser.add_argument("--optimizer", choices=["muon", "adamw"], default="muon")
     parser.add_argument("--lr", type=float, default=6e-4)
@@ -608,6 +847,20 @@ def main() -> int:
         choices=["fp32", "bf16", "fp16"],
         default="fp32",
         help="Autocast precision. bf16 is the practical A100 paper-scale setting; fp32 preserves old behavior.",
+    )
+    parser.add_argument(
+        "--distributed",
+        choices=["auto", "off", "on"],
+        default="auto",
+        help=(
+            "Enable torch.distributed DDP when WORLD_SIZE>1. Default auto keeps "
+            "single-process behavior unchanged and activates under torchrun."
+        ),
+    )
+    parser.add_argument(
+        "--distributed-backend",
+        default="nccl",
+        help="torch.distributed backend for --distributed=on/auto. Use nccl for CUDA.",
     )
     parser.add_argument("--disable-augment", action="store_true")
     parser.add_argument("--augment-rotation", choices=["none", "z", "so3"], default="so3")
@@ -665,6 +918,24 @@ def main() -> int:
         raise SystemExit("--augment-flip-prob must be in [0, 1]")
     if args.eos_loss_weight < 0.0:
         raise SystemExit("--eos-loss-weight must be >= 0")
+    if args.first_face_loss_weight <= 0.0:
+        raise SystemExit("--first-face-loss-weight must be > 0")
+    if args.loss_face_prefix_count < 0:
+        raise SystemExit("--loss-face-prefix-count must be >= 0")
+    if args.first_face_tie_marginal_loss and args.decode_head != "causal":
+        raise SystemExit("--first-face-tie-marginal-loss requires --decode-head causal")
+    if not 0.0 <= args.input_face_token_noise_prob <= 1.0:
+        raise SystemExit("--input-face-token-noise-prob must be in [0, 1]")
+    if args.input_face_token_noise_max_offset < 0:
+        raise SystemExit("--input-face-token-noise-max-offset must be >= 0")
+    if args.input_face_noise_prefix_count < 0:
+        raise SystemExit("--input-face-noise-prefix-count must be >= 0")
+    if args.input_face_token_noise_prob > 0.0 and args.input_face_token_noise_max_offset == 0:
+        raise SystemExit("--input-face-token-noise-max-offset must be > 0 when input token noise is enabled")
+    if args.topology_reuse_weight < 0.0:
+        raise SystemExit("--topology-reuse-weight must be >= 0")
+    if args.topology_edge_closure_weight < 0.0:
+        raise SystemExit("--topology-edge-closure-weight must be >= 0")
     if args.checkpoint_every < 0:
         raise SystemExit("--checkpoint-every must be >= 0")
     if args.prefetch_batches < 0:
@@ -695,26 +966,67 @@ def main() -> int:
         "causal_mlp_variant": args.causal_mlp_variant,
         "face_embedding_variant": args.face_embedding_variant,
         "eos_head": not args.disable_eos_head,
+        "first_face_loss_weight": float(args.first_face_loss_weight),
+        "loss_face_prefix_count": int(args.loss_face_prefix_count),
+        "first_face_tie_marginal_loss": bool(args.first_face_tie_marginal_loss),
+        "input_face_token_noise_prob": float(args.input_face_token_noise_prob),
+        "input_face_token_noise_max_offset": int(args.input_face_token_noise_max_offset),
+        "input_face_noise_prefix_count": int(args.input_face_noise_prefix_count),
+        "topology_reuse_weight": float(args.topology_reuse_weight),
+        "topology_edge_closure_weight": float(args.topology_edge_closure_weight),
         "precision": args.precision,
+        "distributed": args.distributed,
+        "distributed_backend": args.distributed_backend,
     }
     if args.augment_diagnostics:
         summary["augmentation_diagnostics_enabled"] = True
-    print(json.dumps(summary, indent=2, sort_keys=True))
+    env_rank_for_logging = int(os.environ.get("RANK", "0") or "0")
+    if env_rank_for_logging == 0:
+        print(json.dumps(summary, indent=2, sort_keys=True))
     if args.dry_run:
         return 0
 
     import torch
     import torch.nn.functional as F
 
+    world_size_env = int(os.environ.get("WORLD_SIZE", "1") or "1")
+    distributed = args.distributed == "on" or (args.distributed == "auto" and world_size_env > 1)
+    dist = None
+    DDP = None
+    rank = 0
+    world_size = 1
+    local_rank = 0
+    if distributed:
+        import torch.distributed as dist
+        from torch.nn.parallel import DistributedDataParallel as DDP
+
+        if not dist.is_available():
+            raise SystemExit("torch.distributed is not available")
+        dist.init_process_group(backend=args.distributed_backend)
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        local_rank = int(os.environ.get("LOCAL_RANK", str(rank)) or "0")
+    is_rank0 = rank == 0
+
     if args.device == "auto":
         if torch.cuda.is_available():
-            device = torch.device("cuda")
+            if distributed:
+                cuda_count = max(torch.cuda.device_count(), 1)
+                torch.cuda.set_device(local_rank % cuda_count)
+                device = torch.device("cuda", local_rank % cuda_count)
+            else:
+                device = torch.device("cuda")
         elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
             device = torch.device("mps")
         else:
             device = torch.device("cpu")
     else:
-        device = torch.device(args.device)
+        if distributed and args.device == "cuda":
+            cuda_count = max(torch.cuda.device_count(), 1)
+            torch.cuda.set_device(local_rank % cuda_count)
+            device = torch.device("cuda", local_rank % cuda_count)
+        else:
+            device = torch.device(args.device)
     torch.manual_seed(args.seed)
     if args.precision == "bf16" and device.type == "cuda" and not torch.cuda.is_bf16_supported():
         raise SystemExit("bf16 requested, but this CUDA device does not report bf16 support")
@@ -770,21 +1082,54 @@ def main() -> int:
             ),
             flush=True,
         )
+    if distributed:
+        if device.type == "cuda":
+            model = DDP(
+                model,
+                device_ids=[device.index],
+                output_device=device.index,
+                find_unused_parameters=True,
+            )
+        else:
+            model = DDP(model, find_unused_parameters=True)
+        if is_rank0:
+            print(
+                json.dumps(
+                    {
+                        "distributed": True,
+                        "backend": args.distributed_backend,
+                        "world_size": world_size,
+                        "rank": rank,
+                        "local_rank": local_rank,
+                        "device": str(device),
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+    # After model initialization/optional checkpoint broadcast, offset data/noise
+    # RNG per rank so DDP workers do not all train on identical sampled batches.
+    train_rng = random.Random(args.seed + 7919 * rank)
+    torch.manual_seed(args.seed + 104729 * rank)
     optimizer = _build_optimizer(torch, model, args)
-    augment_rng = np.random.default_rng(args.seed + 1009)
+    augment_rng = np.random.default_rng(args.seed + 1009 + 104729 * rank)
     augment_diagnostics = AugmentDiagnostics() if args.augment_diagnostics else None
     best_loss = float("inf")
     best_step = 0
     losses: list[float] = []
     selection_losses: list[dict[str, float | int]] = []
-    best_state = copy.deepcopy({key: value.detach().cpu() for key, value in model.state_dict().items()})
+    best_state = (
+        copy.deepcopy({key: value.detach().cpu() for key, value in _model_core(model).state_dict().items()})
+        if is_rank0
+        else {}
+    )
     log_every = int(args.log_every or max(1, args.steps // 5))
     selection_eval_every = int(args.selection_eval_every or 0)
     prefetch_enabled = bool(args.prefetch_batches > 0 and device.type == "cuda")
     cpu_device = torch.device("cpu")
 
     def build_train_batch(batch_device):  # type: ignore[no-untyped-def]
-        batch = random.choices(samples, k=args.batch_size)
+        batch = train_rng.choices(samples, k=args.batch_size)
         return _make_batch(
             batch,
             max_faces=max_faces,
@@ -799,6 +1144,13 @@ def main() -> int:
             augment_flip_prob=args.augment_flip_prob,
             augment_diagnostics=augment_diagnostics,
             fps_index_cache=fps_index_cache,
+            first_face_loss_weight=args.first_face_loss_weight,
+            loss_face_prefix_count=args.loss_face_prefix_count,
+            topology_reuse_weight=args.topology_reuse_weight,
+            topology_edge_closure_weight=args.topology_edge_closure_weight,
+            input_face_token_noise_prob=args.input_face_token_noise_prob,
+            input_face_token_noise_max_offset=args.input_face_token_noise_max_offset,
+            input_face_noise_prefix_count=args.input_face_noise_prefix_count,
         )
 
     executor: ThreadPoolExecutor | None = None
@@ -824,7 +1176,7 @@ def main() -> int:
             else:
                 point_features, input_faces, target_faces, valid_weights, eos_targets, eos_weights, query_indices = build_train_batch(device)
             with _autocast_context(torch, device, args.precision):
-                logits, eos_logits = _forward_outputs(
+                logits, eos_logits, hidden = _forward_outputs_with_hidden(
                     model,
                     args.decode_head,
                     point_features,
@@ -832,7 +1184,18 @@ def main() -> int:
                     target_faces,
                     query_indices=query_indices,
                 )
-                coord_loss, _ = _compute_loss(F, logits, target_faces, valid_weights, num_bins)
+                if args.first_face_tie_marginal_loss:
+                    coord_loss, _ = _compute_loss_with_first_face_tie_marginal(
+                        F,
+                        model,
+                        hidden,
+                        logits,
+                        target_faces,
+                        valid_weights,
+                        num_bins,
+                    )
+                else:
+                    coord_loss, _ = _compute_loss(F, logits, target_faces, valid_weights, num_bins)
                 eos_loss = _compute_eos_loss(F, eos_logits, eos_targets, eos_weights)
                 loss = coord_loss if eos_loss is None else coord_loss + args.eos_loss_weight * eos_loss
             optimizer.zero_grad(set_to_none=True)
@@ -843,37 +1206,45 @@ def main() -> int:
             selection_loss_value = None
             selection_loss_elapsed_sec = None
             run_initial_selection = step == 1 and not args.skip_initial_selection_eval
-            run_periodic_selection = step == args.steps or step % selection_eval_every == 0
+            run_periodic_selection = selection_eval_every > 0 and (step == args.steps or step % selection_eval_every == 0)
             if selection_eval_every > 0 and (run_initial_selection or run_periodic_selection):
-                selection_started_at = time.perf_counter()
-                selection_loss_value = _evaluate_dataset_loss(
-                    F,
-                    model,
-                    samples,
-                    max_faces=max_faces,
-                    device=device,
-                    point_samples=args.point_samples,
-                    num_bins=num_bins,
-                    decode_head=args.decode_head,
-                    batch_size=args.selection_eval_batch_size,
-                    eos_loss_weight=args.eos_loss_weight,
-                    precision=args.precision,
-                    fps_index_cache=fps_index_cache,
-                )
-                selection_loss_elapsed_sec = time.perf_counter() - selection_started_at
-                selection_eval_elapsed_sec += selection_loss_elapsed_sec
-                selection_losses.append({"step": step, "loss": selection_loss_value})
+                if is_rank0:
+                    selection_started_at = time.perf_counter()
+                    selection_loss_value = _evaluate_dataset_loss(
+                        F,
+                        model,
+                        samples,
+                        max_faces=max_faces,
+                        device=device,
+                        point_samples=args.point_samples,
+                        num_bins=num_bins,
+                        decode_head=args.decode_head,
+                        batch_size=args.selection_eval_batch_size,
+                        eos_loss_weight=args.eos_loss_weight,
+                        precision=args.precision,
+                        fps_index_cache=fps_index_cache,
+                        first_face_loss_weight=args.first_face_loss_weight,
+                        loss_face_prefix_count=args.loss_face_prefix_count,
+                        first_face_tie_marginal_loss=args.first_face_tie_marginal_loss,
+                        topology_reuse_weight=args.topology_reuse_weight,
+                        topology_edge_closure_weight=args.topology_edge_closure_weight,
+                    )
+                    selection_loss_elapsed_sec = time.perf_counter() - selection_started_at
+                    selection_eval_elapsed_sec += selection_loss_elapsed_sec
+                    selection_losses.append({"step": step, "loss": selection_loss_value})
+                if distributed:
+                    dist.barrier()
             if selection_eval_every > 0:
                 should_consider_checkpoint = selection_loss_value is not None
                 score_loss = selection_loss_value if selection_loss_value is not None else float("inf")
             else:
                 should_consider_checkpoint = True
                 score_loss = loss_value
-            if should_consider_checkpoint and score_loss < best_loss:
+            if is_rank0 and should_consider_checkpoint and score_loss < best_loss:
                 best_loss = score_loss
                 best_step = step
-                best_state = copy.deepcopy({key: value.detach().cpu() for key, value in model.state_dict().items()})
-            if step == 1 or step == args.steps or step % log_every == 0:
+                best_state = copy.deepcopy({key: value.detach().cpu() for key, value in _model_core(model).state_dict().items()})
+            if is_rank0 and (step == 1 or step == args.steps or step % log_every == 0):
                 elapsed_sec = max(time.perf_counter() - started_at, 1e-6)
                 train_elapsed_sec = max(elapsed_sec - selection_eval_elapsed_sec, 1e-6)
                 steps_per_sec = step / elapsed_sec
@@ -910,7 +1281,7 @@ def main() -> int:
                     ),
                     flush=True,
                 )
-            if args.checkpoint_every > 0 and step % args.checkpoint_every == 0:
+            if is_rank0 and args.checkpoint_every > 0 and step % args.checkpoint_every == 0:
                 args.output.parent.mkdir(parents=True, exist_ok=True)
                 latest_output = args.output.with_name(f"{args.output.stem}.latest{args.output.suffix}")
                 torch.save(
@@ -933,7 +1304,7 @@ def main() -> int:
                     current_score = selection_loss_value if selection_loss_value is not None else loss_value
                     current_payload = _checkpoint_payload(
                         args=args,
-                        model_state={key: value.detach().cpu() for key, value in model.state_dict().items()},
+                        model_state={key: value.detach().cpu() for key, value in _model_core(model).state_dict().items()},
                         losses=losses,
                         selection_losses=selection_losses,
                         selection_eval_every=selection_eval_every,
@@ -953,26 +1324,37 @@ def main() -> int:
         if executor is not None:
             executor.shutdown(wait=False, cancel_futures=True)
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        _checkpoint_payload(
-            args=args,
-            model_state=best_state,
-            losses=losses,
-            selection_losses=selection_losses,
-            selection_eval_every=selection_eval_every,
-            num_bins=num_bins,
-            max_faces=max_faces,
-            best_loss=best_loss,
-            best_step=best_step,
-            augment_diagnostics=augment_diagnostics.snapshot() if augment_diagnostics is not None else None,
-        ),
-        args.output,
-    )
-    final_log = {"checkpoint": str(args.output), "best_loss": best_loss, "best_step": best_step, "device": str(device)}
-    if augment_diagnostics is not None:
-        final_log["augmentation_diagnostics"] = augment_diagnostics.snapshot()
-    print(json.dumps(final_log))
+    if is_rank0:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            _checkpoint_payload(
+                args=args,
+                model_state=best_state,
+                losses=losses,
+                selection_losses=selection_losses,
+                selection_eval_every=selection_eval_every,
+                num_bins=num_bins,
+                max_faces=max_faces,
+                best_loss=best_loss,
+                best_step=best_step,
+                augment_diagnostics=augment_diagnostics.snapshot() if augment_diagnostics is not None else None,
+            ),
+            args.output,
+        )
+        final_log = {
+            "checkpoint": str(args.output),
+            "best_loss": best_loss,
+            "best_step": best_step,
+            "device": str(device),
+            "distributed": distributed,
+            "world_size": world_size,
+        }
+        if augment_diagnostics is not None:
+            final_log["augmentation_diagnostics"] = augment_diagnostics.snapshot()
+        print(json.dumps(final_log))
+    if distributed:
+        dist.barrier()
+        dist.destroy_process_group()
     return 0
 
 
