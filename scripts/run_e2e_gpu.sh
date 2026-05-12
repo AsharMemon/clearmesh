@@ -114,7 +114,7 @@ python3 scripts/e2e_smoke.py \
     --trellis2-dir "$TRELLIS2_DIR" \
     --format glb \
     --resolution 512 \
-    --octree-res 512
+    --octree-res 1024
 rc=$?
 
 echo ""

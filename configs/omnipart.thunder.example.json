@@ -1,0 +1,6 @@
+{
+  "repo_dir": "/home/ubuntu/mesh-heads/OmniPart",
+  "python": "/home/ubuntu/omnipart-venv/bin/python",
+  "timeout_seconds": 7200,
+  "extra_args": []
+}

@@ -113,7 +113,7 @@ def main() -> int:
     parser.add_argument("--trellis2-dir", default="/workspace/TRELLIS.2")
     parser.add_argument("--format", default="glb", choices=["stl", "glb", "obj", "fbx"])
     parser.add_argument("--resolution", type=int, default=512, choices=[512, 1024, 1536])
-    parser.add_argument("--octree-res", type=int, default=512, choices=[512, 1024])
+    parser.add_argument("--octree-res", type=int, default=1024, choices=[512, 1024])
     args = parser.parse_args()
 
     repo_root = str(Path(__file__).resolve().parent.parent)

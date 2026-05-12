@@ -132,7 +132,7 @@ def main() -> int:
     parser.add_argument(
         "--resolution", type=int, default=512, choices=[512, 1024, 1536]
     )
-    parser.add_argument("--octree-res", type=int, default=512, choices=[512, 1024])
+    parser.add_argument("--octree-res", type=int, default=1024, choices=[512, 1024])
     parser.add_argument(
         "--text-image-guidance",
         type=float,

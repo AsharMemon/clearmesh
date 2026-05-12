@@ -1,0 +1,3 @@
+case_id,method,mesh_path,reference_path
+mug_handle,trellis2,outputs/mug_trellis.glb,refs/mug_proxy.glb
+mug_handle,meshripple_40k,outputs/mug_meshripple_40k.obj,refs/mug_proxy.glb

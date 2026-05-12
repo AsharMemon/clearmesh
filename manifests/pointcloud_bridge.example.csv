@@ -1,0 +1,2 @@
+case_id,source_method,source_mesh_path,point_budget,npz_path,ply_path,reference_path
+mug_handle,trellis2,outputs/mug_trellis.glb,40960,pointclouds/mug_handle/trellis2/points_40960.npz,pointclouds/mug_handle/trellis2/points_40960.ply,refs/mug_proxy.glb

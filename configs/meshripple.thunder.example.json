@@ -1,0 +1,8 @@
+{
+  "repo_dir": "/home/ubuntu/mesh-heads/MeshRipple",
+  "python": "/home/ubuntu/meshripple-venv/bin/python",
+  "config_path": "config_loader/config_10k_full_dense_mesh.yaml",
+  "checkpoint_dir": "/home/ubuntu/mesh-heads/MeshRipple/ckpt",
+  "timeout_seconds": 7200,
+  "extra_args": []
+}

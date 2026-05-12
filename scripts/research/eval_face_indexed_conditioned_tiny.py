@@ -115,6 +115,7 @@ def _generate_faces(
     use_topology_head: bool = False,
     use_corner_causal: bool = False,
     enforce_vertex_link_manifold: bool = False,
+    boundary_budget_constraint: bool = False,
     seed_faces: np.ndarray | None = None,
     beam_width: int = 1,
     beam_candidates: int = 4,
@@ -124,6 +125,7 @@ def _generate_faces(
     input_faces = torch.full((1, 1, 3), -1, dtype=torch.long, device=device)
     state = IndexedDecodeState.empty()
     generated = []
+    target_face_count = int(face_count) if boundary_budget_constraint else None
     vertex_table_np = vertex_table.detach().cpu().numpy()[0] if hasattr(vertex_table, "detach") else None
     if seed_faces is not None:
         for seed_face in np.asarray(seed_faces, dtype=np.int64).reshape(-1, 3):
@@ -161,6 +163,7 @@ def _generate_faces(
             closure_target_bonus=closure_target_bonus,
             use_topology_head=use_topology_head,
             enforce_vertex_link_manifold=enforce_vertex_link_manifold,
+            target_face_count=target_face_count,
             beam_width=beam_width,
             beam_candidates=beam_candidates,
         )
@@ -192,6 +195,7 @@ def _generate_faces(
                     boundary_action=decode_mode == "boundary_edge",
                     strict_manifold=decode_mode in {"edge_constrained", "boundary_edge"},
                     enforce_vertex_link_manifold=enforce_vertex_link_manifold,
+                    target_face_count=target_face_count,
                 )
                 next_face = torch.as_tensor(next_face_np, dtype=torch.long, device=device)
             else:
@@ -226,6 +230,7 @@ def _generate_faces(
                         closure_target_scores=closure_target_scores,
                         closure_target_bonus=closure_target_bonus,
                         enforce_vertex_link_manifold=enforce_vertex_link_manifold,
+                        target_face_count=target_face_count,
                     )
                     next_face = torch.as_tensor(next_face_np, dtype=torch.long, device=device)
                 elif decode_mode == "edge_constrained":
@@ -244,6 +249,7 @@ def _generate_faces(
                         closure_target_scores=closure_target_scores,
                         closure_target_bonus=closure_target_bonus,
                         enforce_vertex_link_manifold=enforce_vertex_link_manifold,
+                        target_face_count=target_face_count,
                     )
                     next_face = torch.as_tensor(next_face_np, dtype=torch.long, device=device)
                 else:
@@ -291,6 +297,7 @@ def _generate_faces_beam(
     closure_target_bonus: float,
     use_topology_head: bool,
     enforce_vertex_link_manifold: bool,
+    target_face_count: int | None,
     beam_width: int,
     beam_candidates: int,
 ):  # type: ignore[no-untyped-def]
@@ -331,6 +338,7 @@ def _generate_faces_beam(
                     boundary_action=decode_mode == "boundary_edge",
                     strict_manifold=decode_mode in {"edge_constrained", "boundary_edge"},
                     enforce_vertex_link_manifold=enforce_vertex_link_manifold,
+                    target_face_count=target_face_count,
                     max_candidates=beam_candidates,
                 )
                 if not candidates:
@@ -359,6 +367,7 @@ def _generate_faces_beam(
                         boundary_action=decode_mode == "boundary_edge",
                         strict_manifold=decode_mode in {"edge_constrained", "boundary_edge"},
                         enforce_vertex_link_manifold=enforce_vertex_link_manifold,
+                        target_face_count=target_face_count,
                     )
                     candidates = [(np.asarray(fallback, dtype=np.int64), 0.0)]
                 for face, face_score in candidates[:beam_candidates]:
@@ -452,6 +461,7 @@ def _select_corner_causal_face(
     boundary_action: bool,
     strict_manifold: bool,
     enforce_vertex_link_manifold: bool,
+    target_face_count: int | None,
 ):  # type: ignore[no-untyped-def]
     import torch
 
@@ -492,6 +502,7 @@ def _select_corner_causal_face(
             closure_target_scores=closure_target_scores,
             closure_target_bonus=closure_target_bonus,
             enforce_vertex_link_manifold=enforce_vertex_link_manifold,
+            target_face_count=target_face_count,
         )
         if boundary_face is not None:
             return boundary_face
@@ -548,6 +559,7 @@ def _select_corner_causal_face(
                 closure_target_scores=closure_target_scores,
                 closure_target_bonus=closure_target_bonus,
                 enforce_vertex_link_manifold=enforce_vertex_link_manifold,
+                target_face_count=target_face_count,
                 vertices=vertices,
                 strict_manifold=strict_manifold,
             )
@@ -566,6 +578,7 @@ def _select_corner_causal_face(
                 closure_target_scores=closure_target_scores,
                 closure_target_bonus=closure_target_bonus,
                 enforce_vertex_link_manifold=enforce_vertex_link_manifold,
+                target_face_count=target_face_count,
                 vertices=vertices,
                 strict_manifold=False,
             )
@@ -585,6 +598,7 @@ def _select_corner_causal_face(
                 state,
                 require_boundary_closure_after=0,
                 enforce_vertex_link_manifold=enforce_vertex_link_manifold,
+                target_face_count=target_face_count,
                 strict_manifold=False,
             ) is not None:
                 return np.asarray([a, b, int(c)], dtype=np.int64)
@@ -617,6 +631,7 @@ def _select_corner_causal_face_candidates(
     boundary_action: bool,
     strict_manifold: bool,
     enforce_vertex_link_manifold: bool,
+    target_face_count: int | None,
     max_candidates: int,
 ) -> list[tuple[np.ndarray, float]]:  # type: ignore[no-untyped-def]
     import torch
@@ -660,6 +675,7 @@ def _select_corner_causal_face_candidates(
             closure_target_scores=closure_target_scores,
             closure_target_bonus=closure_target_bonus,
             enforce_vertex_link_manifold=enforce_vertex_link_manifold,
+            target_face_count=target_face_count,
             max_candidates=max_candidates,
         )
         if boundary_candidates:
@@ -714,6 +730,7 @@ def _select_corner_causal_face_candidates(
                 closure_target_scores=closure_target_scores,
                 closure_target_bonus=closure_target_bonus,
                 enforce_vertex_link_manifold=enforce_vertex_link_manifold,
+                target_face_count=target_face_count,
                 vertices=vertices,
                 strict_manifold=strict_manifold,
             )
@@ -731,6 +748,7 @@ def _select_corner_causal_face_candidates(
                 closure_target_scores=closure_target_scores,
                 closure_target_bonus=closure_target_bonus,
                 enforce_vertex_link_manifold=enforce_vertex_link_manifold,
+                target_face_count=target_face_count,
                 vertices=vertices,
                 strict_manifold=False,
             )
@@ -749,6 +767,7 @@ def _select_corner_causal_face_candidates(
                 state,
                 require_boundary_closure_after=0,
                 enforce_vertex_link_manifold=enforce_vertex_link_manifold,
+                target_face_count=target_face_count,
                 strict_manifold=False,
             ) is not None:
                 return [(np.asarray(face, dtype=np.int64), 0.0)]
@@ -779,6 +798,7 @@ def _select_corner_causal_boundary_face(
     closure_target_scores: np.ndarray | None,
     closure_target_bonus: float,
     enforce_vertex_link_manifold: bool,
+    target_face_count: int | None,
 ) -> np.ndarray | None:  # type: ignore[no-untyped-def]
     """Score causal FACE candidates as boundary-edge completion actions."""
 
@@ -915,6 +935,7 @@ def _select_corner_causal_boundary_face(
             closure_target_scores=closure_target_scores,
             closure_target_bonus=closure_target_bonus,
             enforce_vertex_link_manifold=enforce_vertex_link_manifold,
+            target_face_count=target_face_count,
             vertices=vertices,
             strict_manifold=True,
         )
@@ -948,6 +969,7 @@ def _select_corner_causal_boundary_face_candidates(
     closure_target_scores: np.ndarray | None,
     closure_target_bonus: float,
     enforce_vertex_link_manifold: bool,
+    target_face_count: int | None,
     max_candidates: int,
 ) -> list[tuple[np.ndarray, float]]:  # type: ignore[no-untyped-def]
     import torch
@@ -1081,6 +1103,7 @@ def _select_corner_causal_boundary_face_candidates(
             closure_target_scores=closure_target_scores,
             closure_target_bonus=closure_target_bonus,
             enforce_vertex_link_manifold=enforce_vertex_link_manifold,
+            target_face_count=target_face_count,
             vertices=vertices,
             strict_manifold=True,
         )
@@ -1144,6 +1167,7 @@ def main() -> int:
     parser.add_argument("--seed-face-bonus", type=float, default=0.0)
     parser.add_argument("--require-boundary-closure-after", type=int, default=1)
     parser.add_argument("--closure-target-bonus", type=float, default=0.0)
+    parser.add_argument("--boundary-budget-constraint", action="store_true")
     parser.add_argument("--teacher-seed-faces", type=int, default=0)
     parser.add_argument("--beam-width", type=int, default=1)
     parser.add_argument("--beam-candidates", type=int, default=4)
@@ -1273,6 +1297,7 @@ def main() -> int:
                 use_topology_head=use_topology_head,
                 use_corner_causal=use_corner_causal,
                 enforce_vertex_link_manifold=args.vertex_link_constraint,
+                boundary_budget_constraint=args.boundary_budget_constraint,
                 seed_faces=teacher_seq.faces[: max(0, int(args.teacher_seed_faces))] if args.teacher_seed_faces > 0 else None,
                 beam_width=args.beam_width,
                 beam_candidates=args.beam_candidates,
@@ -1446,6 +1471,7 @@ def main() -> int:
         "seed_face_bonus": float(seed_face_bonus),
         "require_boundary_closure_after": int(args.require_boundary_closure_after),
         "closure_target_bonus": float(args.closure_target_bonus),
+        "boundary_budget_constraint": bool(args.boundary_budget_constraint),
         "vertex_link_constraint": bool(args.vertex_link_constraint),
         "teacher_seed_faces": int(args.teacher_seed_faces),
         "beam_width": int(args.beam_width),

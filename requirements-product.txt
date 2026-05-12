@@ -1,0 +1,22 @@
+# Lightweight runtime for API, job worker, mesh evaluation, and adapters.
+# Heavy generator repos such as TRELLIS.2 and MeshRipple keep their own GPU envs.
+
+numpy>=1.24.0
+scipy>=1.11.0
+scikit-image>=0.22.0
+trimesh>=4.0.0
+fast-simplification>=0.1.13
+networkx>=3.0
+Pillow>=10.0.0
+pyyaml>=6.0
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.9
+pydantic>=2.0.0
+typing-extensions>=4.8.0
+stripe>=8.0.0
+pytest>=8.0.0
+httpx>=0.27.0
+psycopg[binary]>=3.1.0
+redis>=5.0.0
+boto3>=1.34.0

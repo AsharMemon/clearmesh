@@ -1,0 +1,7 @@
+case_id,input_uri,prompt,quality_tier,point_budgets,enable_parts,enable_rigging,project_id
+mug_handle,local://uploads/benchmark/mug_handle.webp,A clean product-style mug with a single handle,draft,40960,false,false,benchmark_v0
+headphones,local://uploads/benchmark/headphones.webp,Over-ear headphones with a visible headband,draft,40960,false,false,benchmark_v0
+eyeglasses,local://uploads/benchmark/eyeglasses.webp,Thin eyeglasses with two rims and bridge,draft,40960,false,false,benchmark_v0
+chair,local://uploads/benchmark/chair.webp,A chair with separated legs and back support,draft,40960,false,false,benchmark_v0
+robot,local://uploads/benchmark/robot.webp,A small hard-surface robot with arms and legs,draft,40960,false,false,benchmark_v0
+branching_tree,local://uploads/benchmark/branching_tree.webp,A stylized tree with branching limbs,draft,40960,false,false,benchmark_v0

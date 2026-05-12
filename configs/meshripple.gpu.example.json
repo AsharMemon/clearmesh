@@ -1,0 +1,8 @@
+{
+  "repo_dir": "/workspace/mesh-heads/MeshRipple",
+  "python": "/workspace/miniconda/envs/meshripple/bin/python",
+  "config_path": "config_loader/config_20k_nsa.yaml",
+  "checkpoint_dir": "/workspace/mesh-heads/MeshRipple/ckpt",
+  "timeout_seconds": 3600,
+  "extra_args": []
+}

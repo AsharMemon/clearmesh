@@ -47,6 +47,7 @@ from PIL import Image
 
 from clearmesh.mesh.export import export_mesh
 from clearmesh.mesh.repair import repair_mesh, validate_for_printing, orient_for_printing, full_print_preparation
+from clearmesh.stage2.ultrashape_refiner import ULTRASHAPE_PAPER_OCTREE_RESOLUTION
 from clearmesh.utils.background_removal import remove_background
 from clearmesh.utils.scale import scale_to_preset
 
@@ -66,7 +67,7 @@ class GenerationOptions:
     # Stage 2: Refinement (UltraShape)
     enable_refinement: bool = True
     refinement_steps: int = 50  # 50=quality, 25=fast
-    refinement_octree_res: int = 512  # 512 (fast) | 1024 (max detail)
+    refinement_octree_res: int = ULTRASHAPE_PAPER_OCTREE_RESOLUTION
     refinement_seed: int = 42
     refinement_low_vram: bool = False  # Enable for GPUs with <24GB VRAM
 
@@ -176,6 +177,7 @@ class ClearMeshPipeline:
                 ultrashape_dir=self._ultrashape_dir,
                 checkpoint=self._ultrashape_checkpoint,
                 device=self.device,
+                isolated_process=True,
             )
         return self._stage2
 
@@ -522,7 +524,7 @@ def main():
         help="Path to ultrashape_v1.pt checkpoint",
     )
     parser.add_argument("--no-refinement", action="store_true")
-    parser.add_argument("--octree-res", type=int, default=512, choices=[512, 1024])
+    parser.add_argument("--octree-res", type=int, default=ULTRASHAPE_PAPER_OCTREE_RESOLUTION, choices=[512, 1024])
     parser.add_argument("--low-vram", action="store_true", help="Enable CPU offload for Stage 2")
 
     # Optional pipeline stages

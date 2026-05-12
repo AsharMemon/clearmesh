@@ -7,6 +7,7 @@ torchvision>=0.19.0
 
 # 3D Mesh Processing
 trimesh>=4.0.0
+fast-simplification>=0.1.13
 pymeshfix>=0.17.0
 open3d>=0.18.0
 
@@ -39,3 +40,12 @@ pygltflib>=1.16.0
 
 # Scipy (mesh orientation, geometry ops)
 scipy>=1.11.0
+networkx>=3.0
+
+# API / production scaffold
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.9
+pydantic>=2.0.0
+typing-extensions>=4.8.0
+stripe>=8.0.0

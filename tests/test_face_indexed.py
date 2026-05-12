@@ -312,6 +312,36 @@ def test_constrained_indexed_selector_rejects_pinched_vertex_link():
     assert {0, 3}.issubset(set(selected.tolist()))
 
 
+def test_constrained_selector_rejects_impossible_boundary_budget():
+    state = IndexedDecodeState.from_faces(
+        np.asarray(
+            [
+                [0, 1, 2],
+                [0, 1, 3],
+                [0, 2, 3],
+            ],
+            dtype=np.int64,
+        )
+    )
+    logits = np.full((3, 5), -10.0, dtype=np.float64)
+    logits[0, 1] = 8.0
+    logits[1, 2] = 8.0
+    logits[2, 4] = 10.0
+    logits[2, 3] = 8.0
+
+    selected = select_constrained_indexed_face(
+        logits,
+        state,
+        vertex_count=5,
+        top_k=5,
+        closure_bonus=0.0,
+        new_edge_penalty=0.0,
+        target_face_count=4,
+    )
+
+    assert set(selected.tolist()) == {1, 2, 3}
+
+
 def test_boundary_edge_action_selector_forces_open_edge_completion():
     state = IndexedDecodeState.from_faces(np.asarray([[0, 1, 2]], dtype=np.int64))
     logits = np.zeros((3, 6), dtype=np.float64)

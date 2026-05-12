@@ -1,193 +1,157 @@
 # ClearMesh
 
-Unified 3D generation system: single image to high-fidelity, print-ready 3D asset.
+ClearMesh is a 3D generation research stack pivoting toward one practical goal:
+turn an image or prompt into an editable, production-survivable triangle mesh with semantic parts, with Easy3E editing preserved as an optional product mode.
 
-## Architecture
+## Current V1 Plan
 
+```text
+Image / prompt
+  -> TRELLIS.2 visual asset / proxy
+  -> evaluation harness
+  -> OmniPart-style semantic parts
+  -> one winning artist-mesh head
+  -> repair + validation + export
 ```
-Image → Background Removal → TRELLIS.2 (coarse) → Stage 2 DiT (refine)
-      → Part Decomposition → Geometry Super-Res → NDC/FlexiCubes (sharp edges)
-      → Mesh Repair → Retopology → Scale → Textures → Auto-Rig → Export
-```
 
-| Component | Role | Source |
-|-----------|------|--------|
-| TRELLIS.2 4B | Stage 1 coarse generation | microsoft/TRELLIS.2 (MIT) |
-| Custom DiT | Stage 2 refinement with FlexiCubes | Trained on 120K objects |
-| PartCrafter | Part decomposition (optional) | VAST-AI-Research/PartCrafter |
-| SuperCarver / CraftsMan3D | Geometry super-resolution (optional) | CraftsMan3D fallback available |
-| NDC / FlexiCubes | Sharp-edge mesh extraction | czq142857/NDC, NVIDIA Kaolin |
-| BPT | Retopology — clean topology (optional) | CVPR 2025 |
-| PyMeshFix + Trimesh | Mesh repair + print readiness | PyPI |
-| Puppeteer | Auto-rigging + animation (optional) | Seed3D/Puppeteer (MIT) |
-| UniRig | Auto-rigging fallback (optional) | VAST-AI-Research/UniRig (MIT) |
+The project is intentionally not building every possible output branch in v1. DualPrim, B-Rep/STEP, NURBS, quad-native generation, custom LATO/SATO reimplementation, and a custom SLAT-conditioned mesh transformer are parked until the harness proves they are necessary.
 
-## Quick Start
+## Current Priorities
 
-### 1. Set up GCP VM
+| Priority | Work | Status |
+|---|---|---|
+| 1 | Mesh evaluation harness | Starter implemented |
+| 2 | TRELLIS.2 point-cloud bridge at 16k / 40k / 100k samples | Next |
+| 3 | OmniPart-style part structure | Next integration target |
+| 4 | MeshRipple bake-off | First mesh-head candidate |
+| 5 | Mesh Silksong / DeepMesh / MeshMosaic / TreeMeshGPT baselines | Bake off after harness is useful |
+
+## Local Production Scaffold
+
+Create and advance a local async job without running the API server:
 
 ```bash
-# Create Spot A100 80GB VM
-./scripts/gcp/create_vm.sh
-
-# Create persistent storage
-./scripts/gcp/create_storage.sh
-
-# SSH in
-./scripts/gcp/ssh_connect.sh
+python scripts/product/create_local_job.py --input-uri local://example.png --grant-credits 10
+python scripts/product/run_local_worker.py --once
 ```
 
-### 2. Install everything
+Run the API scaffold:
 
 ```bash
-# On the VM:
-git clone https://github.com/AsharMemon/clearmesh.git
-cd clearmesh
-chmod +x scripts/**/*.sh
-
-# Full install (all optional components + rigging)
-./scripts/setup/setup_all.sh
-
-# Core only (skip optional components and rigging)
-./scripts/setup/setup_all.sh /mnt/data --skip-rigging --skip-optional
+export CLEAR_MESH_API_KEYS="dev_key:dev_secret:user_dev:team_dev"
+export CLEARMESH_ADMIN_KEY="admin_secret"
+uvicorn clearmesh.api.server:app --reload
 ```
 
-### 3. Prepare training data
+See [docs/api_scaffold.md](docs/api_scaffold.md).
+
+Run the staged product worker, which can become GPU-active with `--execute-heavy`:
 
 ```bash
-conda activate clearmesh
-
-# Download Objaverse (start with 1K for testing)
-python scripts/data/download_objaverse.py --limit 1000
-
-# Filter dataset
-python scripts/data/filter_dataset.py \
-    --manifest /mnt/data/objaverse/manifest.json
-
-# Generate coarse/fine pairs
-python scripts/data/generate_pairs.py \
-    --input_json /mnt/data/filtered/high_quality_models.json
-
-# Convert to O-Voxel format
-python scripts/data/convert_ovoxel.py \
-    --input_dir /mnt/data/training_pairs
+python scripts/product/run_pipeline_worker.py --once
 ```
 
-### 4. Train Stage 2
+Open the static product UI prototype at [dashboard/product.html](dashboard/product.html).
+
+## Evaluation Harness
+
+Run the starter harness with:
 
 ```bash
-# Start preemption handler (for Spot VM resilience)
-./scripts/utils/preemption_handler.sh &
-
-# Train with FlexiCubes in the loop (Option C)
-python -m clearmesh.stage2.train \
-    --config configs/train_stage2_flexicubes.yaml
-
-# Monitor progress
-python scripts/utils/monitor_training.py \
-    --checkpoint_dir /mnt/data/checkpoints/clearmesh_stage2 --watch
+python scripts/eval/evaluate_meshes.py \
+    --manifest manifests/mesh_bakeoff.example.csv \
+    --output eval_results/mesh_bakeoff_report.json
 ```
 
-### 5. Generate 3D models
+Optional Blender roundtrip check:
 
 ```bash
-# Basic generation
-python -m clearmesh.pipeline --input photo.png --output model.glb
-
-# Print-ready STL at 32mm scale with drain holes
-python -m clearmesh.pipeline \
-    --input photo.png \
-    --output mini.stl \
-    --format stl \
-    --scale 32mm \
-    --add-base \
-    --drain-holes
-
-# Full pipeline: decomposition + super-res + retopology + textures
-python -m clearmesh.pipeline \
-    --input photo.png \
-    --output model.glb \
-    --decompose \
-    --super-res \
-    --retopo \
-    --textures
-
-# With auto-rigging for animation (optional)
-python -m clearmesh.pipeline \
-    --input character.png \
-    --output rigged.fbx \
-    --format fbx \
-    --rig
-
-# Fast mode (12 diffusion steps instead of 50)
-python -m clearmesh.pipeline --input photo.png --fast
+python scripts/eval/evaluate_meshes.py \
+    --manifest manifests/mesh_bakeoff.example.csv \
+    --output eval_results/mesh_bakeoff_report.json \
+    --blender blender
 ```
 
-## Pipeline Stages
+Manifest format:
 
-| # | Stage | Default | Flag |
-|---|-------|---------|------|
-| 1 | Background removal | on | `--skip-bg-removal` |
-| 2 | TRELLIS.2 coarse generation | on | — |
-| 3 | Stage 2 DiT refinement | on | `--no-refine` |
-| 4 | Part decomposition (PartCrafter) | off | `--decompose` |
-| 5 | Geometry super-resolution | off | `--super-res` |
-| 6 | NDC mesh extraction | on | — |
-| 7 | Mesh repair + print prep | on | — |
-| 8 | Retopology (BPT) | off | `--retopo` |
-| 9 | Scale to miniature size | off | `--scale 32mm` |
-| 10 | PBR textures | off | `--textures` |
-| 11 | Auto-rigging | off | `--rig` |
-| 12 | Export (STL/GLB/OBJ/FBX) | on | `--format glb` |
+```csv
+case_id,method,mesh_path,reference_path
+mug_handle,trellis2,outputs/mug_trellis.glb,refs/mug_proxy.glb
+mug_handle,meshripple_40k,outputs/mug_meshripple_40k.obj,refs/mug_proxy.glb
+```
+
+The harness currently reports geometry, topology, editability, and production-adjacent metrics, including Chamfer/Hausdorff when a reference mesh is supplied, watertightness, boundary loops, non-manifold edges, connected components, valence histogram, triangle aspect ratios, subdivision smoke tests, and optional Blender import/export.
+
+## Mesh-Head Bake-Off
+
+Current candidate order:
+
+```text
+1. MeshRipple
+2. Mesh Silksong
+3. DeepMesh
+4. MeshMosaic
+5. TreeMeshGPT
+6. FastMesh, if inference and weights run cleanly
+```
+
+Selection rule:
+
+```text
+Pick the method that wins on topology and editability failures, not the method with the prettiest screenshot.
+```
+
+Install public mesh-head repos on a GPU host with:
+
+```bash
+MESH_HEAD_ROOT=/workspace/mesh-heads INSTALL_ENV=1 bash scripts/setup/install_mesh_heads.sh
+```
+
+Run MeshRipple through the adapter with `scripts/product/run_mesh_head.py` once checkpoints and point clouds are available.
+
+See [docs/architecture.md](docs/architecture.md), [docs/production_roadmap.md](docs/production_roadmap.md), [docs/thunder_runbook.md](docs/thunder_runbook.md), [PIPELINE_PLAN.md](PIPELINE_PLAN.md), [MASTER_PLAN.md](MASTER_PLAN.md), and [docs/mesh_head_bakeoff.md](docs/mesh_head_bakeoff.md) for the detailed roadmap.
+
+## Existing Assets Worth Keeping
+
+```text
+TRELLIS.2 setup and generation scripts
+Stage 2 refinement code and technical learnings
+mesh repair/export utilities
+text/image entry-point scaffolding
+PBR/export/optional autorigging modules as downstream tools
+RunPod/Vast.ai operational scripts
+```
 
 ## Project Structure
 
-```
+```text
 clearmesh/
-├── scripts/
-│   ├── gcp/              GCP VM management (create, start, stop, SSH)
-│   ├── setup/            Environment and dependency installation
-│   ├── data/             Dataset download, filtering, pair generation
-│   └── utils/            Preemption handler, training monitor
-├── configs/              Training and inference YAML configs
-├── clearmesh/            Main Python package
-│   ├── pipeline.py       ClearMeshPipeline (end-to-end, 12 stages)
-│   ├── stage2/           Refinement DiT model + training loop
-│   ├── mesh/             Extraction, repair, export
-│   ├── partcrafter/      Part decomposition (PartCrafter)
-│   ├── supercarver/      Geometry super-resolution
-│   ├── retopology/       BPT retopology
-│   ├── texture/          PBR texture handling
-│   ├── rigging/          Auto-rigging (Puppeteer/UniRig)
-│   └── utils/            Background removal, scaling
-└── requirements.txt
+  clearmesh/
+    api/               FastAPI production scaffold
+    product/           job, billing, auth, worker, and artifact scaffolding
+    mesh_heads/        external public repo adapters
+    eval/              mesh evaluation harness
+    pointcloud.py      TRELLIS.2 mesh -> point-cloud bridge
+    mesh/              extraction, repair, export utilities
+    stage2/            TRELLIS.2-aligned refinement research
+    editing/           Easy3E editing scaffolds kept intact
+    text_to_3d/        text/image entry-point scaffolds
+    texture/           PBR texture utilities
+    rigging/           optional downstream rigging
+  scripts/
+    product/           local job and worker scaffold CLIs
+    eval/              batch harness CLI
+    data/              dataset and TRELLIS.2 data scripts
+    setup/             environment setup scripts
+    runpod/            GPU pod helpers
+  docs/
+    mesh_head_bakeoff.md
+    archive/           parked/old strategy docs
 ```
 
-## Cost Estimate (Spot A100 80GB)
+## Environment
 
-| Phase | GPU Hours | Cost |
-|-------|-----------|------|
-| Environment setup | ~5 hrs | ~$4 |
-| Data preparation | ~10 hrs | ~$7 |
-| Training (Option C) | 120-200 hrs | $88-$146 |
-| Integration testing | ~30 hrs | ~$22 |
-| **Total** | | **$120-$180** |
-
-## Environments
-
-Two conda environments handle dependency conflicts:
-
-- **clearmesh**: PyTorch 2.6 + CUDA 12.4 (TRELLIS.2, training, inference)
-- **rigging**: PyTorch 2.1.1 + CUDA 11.8 (UniRig, Puppeteer)
-
-## Spot VM Resilience
-
-Training on Spot VMs saves 60-80% but VMs can be preempted with 30s notice:
-
-- Checkpoints saved every 1000 steps to persistent disk
-- `preemption_handler.sh` polls GCP metadata and sends SIGUSR1
-- Training auto-resumes from latest checkpoint
-- Persistent disk survives VM deletion
+The GPU project environment should install `requirements.txt` plus the TRELLIS.2-specific CUDA extensions and model dependencies described in the setup scripts. The local macOS shell may not have mesh dependencies like `trimesh`; run full harness jobs in the `clearmesh` environment or on the GPU pod.
 
 ## License
 

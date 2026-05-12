@@ -71,6 +71,7 @@ EDGE_CHOICE_CANDIDATE_TOP_K="${EDGE_CHOICE_CANDIDATE_TOP_K:-0}"
 SEED_FACE_BONUS="${SEED_FACE_BONUS:-0.0}"
 REQUIRE_BOUNDARY_CLOSURE_AFTER="${REQUIRE_BOUNDARY_CLOSURE_AFTER:-1}"
 CLOSURE_TARGET_BONUS="${CLOSURE_TARGET_BONUS:-0.0}"
+BOUNDARY_BUDGET_CONSTRAINT="${BOUNDARY_BUDGET_CONSTRAINT:-0}"
 BEAM_WIDTH="${BEAM_WIDTH:-1}"
 BEAM_CANDIDATES="${BEAM_CANDIDATES:-4}"
 VERTEX_LINK_CONSTRAINT="${VERTEX_LINK_CONSTRAINT:-0}"
@@ -227,6 +228,7 @@ python scripts/research/eval_face_indexed_conditioned_tiny.py \
   --seed-face-bonus "$SEED_FACE_BONUS" \
   --require-boundary-closure-after "$REQUIRE_BOUNDARY_CLOSURE_AFTER" \
   --closure-target-bonus "$CLOSURE_TARGET_BONUS" \
+  $([ "$BOUNDARY_BUDGET_CONSTRAINT" = "1" ] && printf %s "--boundary-budget-constraint") \
   --beam-width "$BEAM_WIDTH" \
   --beam-candidates "$BEAM_CANDIDATES" \
   $([ "$VERTEX_LINK_CONSTRAINT" = "1" ] && printf %s "--vertex-link-constraint")
@@ -261,6 +263,7 @@ if [ "$AUX_TEACHER_FORCED_EVAL" = "1" ]; then
     --seed-face-bonus "$SEED_FACE_BONUS" \
     --require-boundary-closure-after "$REQUIRE_BOUNDARY_CLOSURE_AFTER" \
     --closure-target-bonus "$CLOSURE_TARGET_BONUS" \
+    $([ "$BOUNDARY_BUDGET_CONSTRAINT" = "1" ] && printf %s "--boundary-budget-constraint") \
     --beam-width "$BEAM_WIDTH" \
     --beam-candidates "$BEAM_CANDIDATES" \
     $([ "$VERTEX_LINK_CONSTRAINT" = "1" ] && printf %s "--vertex-link-constraint")

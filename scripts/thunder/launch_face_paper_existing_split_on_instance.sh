@@ -41,6 +41,9 @@ ENCODER_LAYERS="${ENCODER_LAYERS:-4}"
 DECODER_LAYERS="${DECODER_LAYERS:-8}"
 HEADS="${HEADS:-8}"
 PRECISION="${PRECISION:-bf16}"
+DISTRIBUTED="${DISTRIBUTED:-auto}"
+DISTRIBUTED_BACKEND="${DISTRIBUTED_BACKEND:-nccl}"
+TORCHRUN_NPROC_PER_NODE="${TORCHRUN_NPROC_PER_NODE:-0}"
 LOG_EVERY="${LOG_EVERY:-50}"
 SELECTION_EVAL_EVERY="${SELECTION_EVAL_EVERY:-1000}"
 SELECTION_EVAL_BATCH_SIZE="${SELECTION_EVAL_BATCH_SIZE:-1}"
@@ -79,6 +82,14 @@ FACE_EMBEDDING_VARIANT="${FACE_EMBEDDING_VARIANT:-token_concat_project}"
 ALLOW_DEPRECATED_FACE_EMBEDDING="${ALLOW_DEPRECATED_FACE_EMBEDDING:-0}"
 DECODE_HEAD="${DECODE_HEAD:-causal}"
 STRICT_FACE_PAPER_GATE="${STRICT_FACE_PAPER_GATE:-1}"
+FIRST_FACE_LOSS_WEIGHT="${FIRST_FACE_LOSS_WEIGHT:-1.0}"
+LOSS_FACE_PREFIX_COUNT="${LOSS_FACE_PREFIX_COUNT:-0}"
+FIRST_FACE_TIE_MARGINAL_LOSS="${FIRST_FACE_TIE_MARGINAL_LOSS:-0}"
+INPUT_FACE_TOKEN_NOISE_PROB="${INPUT_FACE_TOKEN_NOISE_PROB:-0.0}"
+INPUT_FACE_TOKEN_NOISE_MAX_OFFSET="${INPUT_FACE_TOKEN_NOISE_MAX_OFFSET:-1}"
+INPUT_FACE_NOISE_PREFIX_COUNT="${INPUT_FACE_NOISE_PREFIX_COUNT:-0}"
+TOPOLOGY_REUSE_WEIGHT="${TOPOLOGY_REUSE_WEIGHT:-0.0}"
+TOPOLOGY_EDGE_CLOSURE_WEIGHT="${TOPOLOGY_EDGE_CLOSURE_WEIGHT:-0.0}"
 
 if [ -z "${THUNDER_TOKEN:-}" ]; then
   echo "THUNDER_TOKEN is not set." >&2
@@ -242,6 +253,9 @@ export ENCODER_LAYERS=$(printf '%q' "$ENCODER_LAYERS")
 export DECODER_LAYERS=$(printf '%q' "$DECODER_LAYERS")
 export HEADS=$(printf '%q' "$HEADS")
 export PRECISION=$(printf '%q' "$PRECISION")
+export DISTRIBUTED=$(printf '%q' "$DISTRIBUTED")
+export DISTRIBUTED_BACKEND=$(printf '%q' "$DISTRIBUTED_BACKEND")
+export TORCHRUN_NPROC_PER_NODE=$(printf '%q' "$TORCHRUN_NPROC_PER_NODE")
 export LOG_EVERY=$(printf '%q' "$LOG_EVERY")
 export SELECTION_EVAL_EVERY=$(printf '%q' "$SELECTION_EVAL_EVERY")
 export SELECTION_EVAL_BATCH_SIZE=$(printf '%q' "$SELECTION_EVAL_BATCH_SIZE")
@@ -277,6 +291,14 @@ export FACE_EMBEDDING_VARIANT=$(printf '%q' "$FACE_EMBEDDING_VARIANT")
 export ALLOW_DEPRECATED_FACE_EMBEDDING=$(printf '%q' "$ALLOW_DEPRECATED_FACE_EMBEDDING")
 export STRICT_FACE_PAPER_GATE=$(printf '%q' "$STRICT_FACE_PAPER_GATE")
 export DECODE_HEAD=$(printf '%q' "$DECODE_HEAD")
+export FIRST_FACE_LOSS_WEIGHT=$(printf '%q' "$FIRST_FACE_LOSS_WEIGHT")
+export LOSS_FACE_PREFIX_COUNT=$(printf '%q' "$LOSS_FACE_PREFIX_COUNT")
+export FIRST_FACE_TIE_MARGINAL_LOSS=$(printf '%q' "$FIRST_FACE_TIE_MARGINAL_LOSS")
+export INPUT_FACE_TOKEN_NOISE_PROB=$(printf '%q' "$INPUT_FACE_TOKEN_NOISE_PROB")
+export INPUT_FACE_TOKEN_NOISE_MAX_OFFSET=$(printf '%q' "$INPUT_FACE_TOKEN_NOISE_MAX_OFFSET")
+export INPUT_FACE_NOISE_PREFIX_COUNT=$(printf '%q' "$INPUT_FACE_NOISE_PREFIX_COUNT")
+export TOPOLOGY_REUSE_WEIGHT=$(printf '%q' "$TOPOLOGY_REUSE_WEIGHT")
+export TOPOLOGY_EDGE_CLOSURE_WEIGHT=$(printf '%q' "$TOPOLOGY_EDGE_CLOSURE_WEIGHT")
 
 nohup bash scripts/thunder/face_paper_existing_split_gate.sh > "\$REMOTE_LOG" 2>&1 &
 echo \$! > "\$REMOTE_PID"
@@ -324,12 +346,23 @@ cat > "$DOWNLOAD_ROOT/run_info.json" <<JSON
   "vecset_tokens": $VECSET_TOKENS,
   "latent_dim": $LATENT_DIM,
   "precision": "$PRECISION",
+  "distributed": "$DISTRIBUTED",
+  "distributed_backend": "$DISTRIBUTED_BACKEND",
+  "torchrun_nproc_per_node": $TORCHRUN_NPROC_PER_NODE,
   "optimizer": "$OPTIMIZER",
   "causal_mlp_variant": "$CAUSAL_MLP_VARIANT",
   "face_embedding_variant": "$FACE_EMBEDDING_VARIANT",
   "allow_deprecated_face_embedding": $([ "$ALLOW_DEPRECATED_FACE_EMBEDDING" = "1" ] && echo true || echo false),
   "strict_face_paper_gate": $([ "$STRICT_FACE_PAPER_GATE" = "1" ] && echo true || echo false),
   "decode_head": "$DECODE_HEAD",
+  "first_face_loss_weight": $FIRST_FACE_LOSS_WEIGHT,
+  "loss_face_prefix_count": $LOSS_FACE_PREFIX_COUNT,
+  "first_face_tie_marginal_loss": $([ "$FIRST_FACE_TIE_MARGINAL_LOSS" = "1" ] && echo true || echo false),
+  "input_face_token_noise_prob": $INPUT_FACE_TOKEN_NOISE_PROB,
+  "input_face_token_noise_max_offset": $INPUT_FACE_TOKEN_NOISE_MAX_OFFSET,
+  "input_face_noise_prefix_count": $INPUT_FACE_NOISE_PREFIX_COUNT,
+  "topology_reuse_weight": $TOPOLOGY_REUSE_WEIGHT,
+  "topology_edge_closure_weight": $TOPOLOGY_EDGE_CLOSURE_WEIGHT,
   "selection_eval_every": $SELECTION_EVAL_EVERY,
   "skip_initial_selection_eval": $([ "$SKIP_INITIAL_SELECTION_EVAL" = "1" ] && echo true || echo false),
   "checkpoint_every": $CHECKPOINT_EVERY,

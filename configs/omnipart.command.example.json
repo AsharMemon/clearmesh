@@ -1,0 +1,9 @@
+{
+  "project_id": "trusted_omnipart_dev",
+  "part_mask_path": "/absolute/path/to/part_mask.exr",
+  "part_structure_command": "/home/ubuntu/clearmesh-venv/bin/python /home/ubuntu/clearmesh/scripts/product/run_omnipart_structure.py --image {input_path} --mask {part_mask_path} --output-dir {output_dir} --config-json /home/ubuntu/clearmesh/configs/omnipart.thunder.example.json",
+  "part_structure_cwd": "/home/ubuntu/clearmesh",
+  "part_structure_timeout_seconds": 7200,
+  "cleanup_enabled": true,
+  "cleanup_min_component_faces": 8
+}

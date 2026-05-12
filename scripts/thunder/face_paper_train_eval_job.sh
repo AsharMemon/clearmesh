@@ -41,6 +41,9 @@ EOS_LOSS_WEIGHT="${EOS_LOSS_WEIGHT:-0.05}"
 SEED="${SEED:-0}"
 DEVICE="${DEVICE:-auto}"
 PRECISION="${PRECISION:-fp32}"
+DISTRIBUTED="${DISTRIBUTED:-auto}"
+DISTRIBUTED_BACKEND="${DISTRIBUTED_BACKEND:-nccl}"
+TORCHRUN_NPROC_PER_NODE="${TORCHRUN_NPROC_PER_NODE:-0}"
 LOG_EVERY="${LOG_EVERY:-250}"
 SELECTION_EVAL_EVERY="${SELECTION_EVAL_EVERY:-500}"
 SELECTION_EVAL_BATCH_SIZE="${SELECTION_EVAL_BATCH_SIZE:-1}"
@@ -56,6 +59,14 @@ AUGMENT_SCALE_MAX="${AUGMENT_SCALE_MAX:-1.25}"
 AUGMENT_FLIP_PROB="${AUGMENT_FLIP_PROB:-0.5}"
 AUGMENT_DIAGNOSTICS="${AUGMENT_DIAGNOSTICS:-0}"
 DISABLE_EOS_HEAD="${DISABLE_EOS_HEAD:-0}"
+FIRST_FACE_LOSS_WEIGHT="${FIRST_FACE_LOSS_WEIGHT:-1.0}"
+LOSS_FACE_PREFIX_COUNT="${LOSS_FACE_PREFIX_COUNT:-0}"
+FIRST_FACE_TIE_MARGINAL_LOSS="${FIRST_FACE_TIE_MARGINAL_LOSS:-0}"
+INPUT_FACE_TOKEN_NOISE_PROB="${INPUT_FACE_TOKEN_NOISE_PROB:-0.0}"
+INPUT_FACE_TOKEN_NOISE_MAX_OFFSET="${INPUT_FACE_TOKEN_NOISE_MAX_OFFSET:-1}"
+INPUT_FACE_NOISE_PREFIX_COUNT="${INPUT_FACE_NOISE_PREFIX_COUNT:-0}"
+TOPOLOGY_REUSE_WEIGHT="${TOPOLOGY_REUSE_WEIGHT:-0.0}"
+TOPOLOGY_EDGE_CLOSURE_WEIGHT="${TOPOLOGY_EDGE_CLOSURE_WEIGHT:-0.0}"
 TRAIN_LIMIT="${TRAIN_LIMIT:-0}"
 INIT_CHECKPOINT="${INIT_CHECKPOINT:-}"
 SPLIT_INTEGRITY_IDENTITY_LIMIT="${SPLIT_INTEGRITY_IDENTITY_LIMIT:-64}"
@@ -119,6 +130,9 @@ fi
 if [ "$ALLOW_DEPRECATED_FACE_EMBEDDING" = "1" ]; then
   TRAIN_ARGS+=(--allow-deprecated-face-embedding)
 fi
+if [ "$FIRST_FACE_TIE_MARGINAL_LOSS" = "1" ]; then
+  TRAIN_ARGS+=(--first-face-tie-marginal-loss)
+fi
 
 echo "[clearmesh] FACE train/eval job"
 echo "  data_run=$DATA_RUN"
@@ -127,13 +141,18 @@ echo "  test_dir=$TEST_DIR"
 echo "  run_dir=$RUN_DIR"
 echo "  steps=$STEPS model_max_faces=$MODEL_MAX_FACES hidden=$HIDDEN_SIZE decoder_layers=$DECODER_LAYERS"
 
+TRAIN_CMD=(python)
+if [ "$TORCHRUN_NPROC_PER_NODE" -gt 1 ]; then
+  TRAIN_CMD=(python -m torch.distributed.run --nproc-per-node "$TORCHRUN_NPROC_PER_NODE")
+fi
+
 python scripts/research/check_face_token_leakage.py \
   --train-dir "$TRAIN_DIR" \
   --test-dir "$TEST_DIR" \
   --identity-limit "$SPLIT_INTEGRITY_IDENTITY_LIMIT" \
   --output "$RUN_DIR/split_integrity.json"
 
-python scripts/research/train_face_paper_faithful.py \
+"${TRAIN_CMD[@]}" scripts/research/train_face_paper_faithful.py \
   --dataset-dir "$TRAIN_DIR" \
   --output "$CHECKPOINT" \
   --steps "$STEPS" \
@@ -156,9 +175,18 @@ python scripts/research/train_face_paper_faithful.py \
   --lr "$LR" \
   --weight-decay "$WEIGHT_DECAY" \
   --eos-loss-weight "$EOS_LOSS_WEIGHT" \
+  --first-face-loss-weight "$FIRST_FACE_LOSS_WEIGHT" \
+  --loss-face-prefix-count "$LOSS_FACE_PREFIX_COUNT" \
+  --input-face-token-noise-prob "$INPUT_FACE_TOKEN_NOISE_PROB" \
+  --input-face-token-noise-max-offset "$INPUT_FACE_TOKEN_NOISE_MAX_OFFSET" \
+  --input-face-noise-prefix-count "$INPUT_FACE_NOISE_PREFIX_COUNT" \
+  --topology-reuse-weight "$TOPOLOGY_REUSE_WEIGHT" \
+  --topology-edge-closure-weight "$TOPOLOGY_EDGE_CLOSURE_WEIGHT" \
   --seed "$SEED" \
   --device "$DEVICE" \
   --precision "$PRECISION" \
+  --distributed "$DISTRIBUTED" \
+  --distributed-backend "$DISTRIBUTED_BACKEND" \
   --log-every "$LOG_EVERY" \
   --selection-eval-every "$SELECTION_EVAL_EVERY" \
   --selection-eval-batch-size "$SELECTION_EVAL_BATCH_SIZE" \
@@ -277,10 +305,21 @@ summary = {
         "weight_decay": float("$WEIGHT_DECAY"),
         "seed": int("$SEED"),
         "precision": "$PRECISION",
+        "distributed": "$DISTRIBUTED",
+        "distributed_backend": "$DISTRIBUTED_BACKEND",
+        "torchrun_nproc_per_node": int("$TORCHRUN_NPROC_PER_NODE"),
         "checkpoint_every": int("$CHECKPOINT_EVERY"),
         "prefetch_batches": int("$PREFETCH_BATCHES"),
         "cache_fps_indices": "$CACHE_FPS_INDICES" == "1",
         "disable_augment": "$DISABLE_AUGMENT" == "1",
+        "first_face_loss_weight": float("$FIRST_FACE_LOSS_WEIGHT"),
+        "loss_face_prefix_count": int("$LOSS_FACE_PREFIX_COUNT"),
+        "first_face_tie_marginal_loss": "$FIRST_FACE_TIE_MARGINAL_LOSS" == "1",
+        "input_face_token_noise_prob": float("$INPUT_FACE_TOKEN_NOISE_PROB"),
+        "input_face_token_noise_max_offset": int("$INPUT_FACE_TOKEN_NOISE_MAX_OFFSET"),
+        "input_face_noise_prefix_count": int("$INPUT_FACE_NOISE_PREFIX_COUNT"),
+        "topology_reuse_weight": float("$TOPOLOGY_REUSE_WEIGHT"),
+        "topology_edge_closure_weight": float("$TOPOLOGY_EDGE_CLOSURE_WEIGHT"),
         "augment_rotation": "$AUGMENT_ROTATION",
         "augment_scale_min": float("$AUGMENT_SCALE_MIN"),
         "augment_scale_max": float("$AUGMENT_SCALE_MAX"),

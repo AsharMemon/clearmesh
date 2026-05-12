@@ -533,6 +533,7 @@ def select_constrained_indexed_face(
     closure_target_scores: np.ndarray | None = None,
     closure_target_bonus: float = 0.0,
     enforce_vertex_link_manifold: bool = False,
+    target_face_count: int | None = None,
 ) -> np.ndarray:
     """Select the next face while respecting current edge-use state.
 
@@ -564,6 +565,7 @@ def select_constrained_indexed_face(
         closure_target_scores=closure_target_scores,
         closure_target_bonus=closure_target_bonus,
         enforce_vertex_link_manifold=enforce_vertex_link_manifold,
+        target_face_count=target_face_count,
         vertices=vertices,
         strict_manifold=True,
     )
@@ -583,6 +585,7 @@ def select_constrained_indexed_face(
         closure_target_scores=closure_target_scores,
         closure_target_bonus=closure_target_bonus,
         enforce_vertex_link_manifold=enforce_vertex_link_manifold,
+        target_face_count=target_face_count,
         vertices=vertices,
         strict_manifold=False,
     )
@@ -592,9 +595,15 @@ def select_constrained_indexed_face(
     # Last-ditch fallback: pick the best nondegenerate corner-wise proposal.
     for candidate in product(*top_by_corner):
         face = tuple(int(value) for value in candidate)
-        if len(set(face)) == 3 and (
-            not enforce_vertex_link_manifold or _candidate_preserves_vertex_links(state, face)
+        if len(set(face)) != 3:
+            continue
+        if target_face_count is not None and not _candidate_boundary_budget_allows(
+            state,
+            face,
+            target_face_count=target_face_count,
         ):
+            continue
+        if not enforce_vertex_link_manifold or _candidate_preserves_vertex_links(state, face):
             return np.asarray(candidate, dtype=np.int64)
     return np.asarray([0, 1, 2], dtype=np.int64)
 
@@ -617,6 +626,7 @@ def select_boundary_edge_action_face(
     closure_target_scores: np.ndarray | None = None,
     closure_target_bonus: float = 0.0,
     enforce_vertex_link_manifold: bool = False,
+    target_face_count: int | None = None,
 ) -> np.ndarray:
     """Select the next face as a boundary-edge completion action.
 
@@ -654,6 +664,7 @@ def select_boundary_edge_action_face(
             closure_target_scores=closure_target_scores,
             closure_target_bonus=closure_target_bonus,
             enforce_vertex_link_manifold=enforce_vertex_link_manifold,
+            target_face_count=target_face_count,
             vertices=vertices,
         )
 
@@ -694,6 +705,7 @@ def select_boundary_edge_action_face(
                     closure_target_scores=closure_target_scores,
                     closure_target_bonus=closure_target_bonus,
                     enforce_vertex_link_manifold=enforce_vertex_link_manifold,
+                    target_face_count=target_face_count,
                     vertices=vertices,
                     strict_manifold=True,
                 )
@@ -719,6 +731,7 @@ def select_boundary_edge_action_face(
         closure_target_scores=closure_target_scores,
         closure_target_bonus=closure_target_bonus,
         enforce_vertex_link_manifold=enforce_vertex_link_manifold,
+        target_face_count=target_face_count,
         vertices=vertices,
     )
 
@@ -737,6 +750,7 @@ def _best_indexed_candidate(
     closure_target_scores: np.ndarray | None,
     closure_target_bonus: float,
     enforce_vertex_link_manifold: bool,
+    target_face_count: int | None,
     vertices: np.ndarray | None,
     strict_manifold: bool,
 ) -> np.ndarray | None:
@@ -758,6 +772,7 @@ def _best_indexed_candidate(
             closure_target_scores=closure_target_scores,
             closure_target_bonus=closure_target_bonus,
             enforce_vertex_link_manifold=enforce_vertex_link_manifold,
+            target_face_count=target_face_count,
             vertices=vertices,
             strict_manifold=strict_manifold,
         )
@@ -785,6 +800,7 @@ def score_indexed_face_candidate(
     closure_target_scores: np.ndarray | None = None,
     closure_target_bonus: float = 0.0,
     enforce_vertex_link_manifold: bool = False,
+    target_face_count: int | None = None,
     vertices: np.ndarray | None = None,
     strict_manifold: bool = True,
 ) -> float | None:
@@ -803,6 +819,14 @@ def score_indexed_face_candidate(
     closures = sum(1 for count in edge_uses if count == 1)
     must_close = bool(require_boundary_closure_after and state.accepted_faces >= require_boundary_closure_after and state.boundary_edge_count)
     if must_close and closures == 0:
+        return None
+    if target_face_count is not None and not _boundary_budget_allows(
+        boundary_edge_count=state.boundary_edge_count,
+        closures=closures,
+        new_edges=sum(1 for count in edge_uses if count == 0),
+        accepted_faces=state.accepted_faces,
+        target_face_count=target_face_count,
+    ):
         return None
     nonmanifold_hits = sum(1 for count in edge_uses if count >= 2)
     new_edges = sum(1 for count in edge_uses if count == 0)
@@ -825,6 +849,48 @@ def score_indexed_face_candidate(
         + closure_target_term
         + geometry_term
     )
+
+
+def _candidate_boundary_budget_allows(
+    state: IndexedDecodeState,
+    face: tuple[int, int, int],
+    *,
+    target_face_count: int,
+) -> bool:
+    edges = _indexed_face_edges(face)
+    edge_uses = [state.edge_counts[edge] for edge in edges]
+    return _boundary_budget_allows(
+        boundary_edge_count=state.boundary_edge_count,
+        closures=sum(1 for count in edge_uses if count == 1),
+        new_edges=sum(1 for count in edge_uses if count == 0),
+        accepted_faces=state.accepted_faces,
+        target_face_count=target_face_count,
+    )
+
+
+def _boundary_budget_allows(
+    *,
+    boundary_edge_count: int,
+    closures: int,
+    new_edges: int,
+    accepted_faces: int,
+    target_face_count: int,
+) -> bool:
+    """Return whether a candidate can still close by the target face count.
+
+    Adding a triangle changes the open-boundary count by ``new_edges - closures``.
+    With ``r`` faces left, closure requires ``b <= 3r`` and parity
+    ``b == r (mod 2)`` because every future triangle changes boundary count by
+    an odd number.
+    """
+
+    remaining_after = int(target_face_count) - int(accepted_faces) - 1
+    if remaining_after < 0:
+        return False
+    next_boundary = int(boundary_edge_count) + int(new_edges) - int(closures)
+    if next_boundary > 3 * remaining_after:
+        return False
+    return (next_boundary - remaining_after) % 2 == 0
 
 
 def _candidate_preserves_vertex_links(state: IndexedDecodeState, face: tuple[int, int, int]) -> bool:

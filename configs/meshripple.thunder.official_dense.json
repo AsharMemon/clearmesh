@@ -1,0 +1,25 @@
+{
+  "repo_dir": "/home/ubuntu/mesh-heads/MeshRipple",
+  "python": "/home/ubuntu/meshripple-venv/bin/python",
+  "config_path": "config_loader/config_10k_full_dense_mesh.yaml",
+  "checkpoint_dir": "/home/ubuntu/mesh-heads/MeshRipple/ckpt",
+  "timeout_seconds": 10800,
+  "extra_args": [],
+  "config_overrides": {
+    "data_processing": {
+      "dec_to_facenum": 5000,
+      "max_len": 10000,
+      "min_len": 500,
+      "pc_num": 16384,
+      "total_pc_num": 40960
+    },
+    "generate": {
+      "batch_size": 1,
+      "top_k": 50,
+      "top_p": 0.95,
+      "temperature": 0.9,
+      "eos_aug": true,
+      "wr_fix": true
+    }
+  }
+}

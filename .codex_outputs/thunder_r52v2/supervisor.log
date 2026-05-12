@@ -1,4 +1,0 @@
-[supervisor] start pid=12457 2026-04-27T00:08:38Z
-[supervisor] attempt=1 launching watch 2026-04-27T00:08:38Z
-[supervisor] watch exited rc=0 2026-04-27T03:16:00Z
-[supervisor] clean exit; supervisor done

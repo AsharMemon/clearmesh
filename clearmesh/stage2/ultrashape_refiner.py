@@ -4,10 +4,9 @@
 Wraps UltraShape 1.0 (PKU-YuanGroup, arxiv:2512.21185) as a drop-in
 replacement for our custom-trained RefinementDiT. UltraShape takes a
 coarse mesh + reference image and produces a refined high-detail mesh
-using voxel-conditioned DiT refinement.
-
-Validated April 2026 on TRELLIS.2 coarse outputs: adds ~14% detail,
-~5 min on an L40, no custom training required.
+using voxel-conditioned DiT refinement. ClearMesh intentionally replaces
+UltraShape's Hunyuan3D-2.1 coarse-mesh stage with TRELLIS.2, while keeping the
+released UltraShape refinement settings aligned with the paper/repo defaults.
 
 Requirements:
   - UltraShape-1.0 repo cloned to `ultrashape_dir` (default: /workspace/UltraShape-1.0)
@@ -27,6 +26,8 @@ Usage:
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -35,6 +36,16 @@ from pathlib import Path
 import torch
 import trimesh
 from PIL import Image
+
+
+ULTRASHAPE_PAPER_NUM_STEPS = 50
+ULTRASHAPE_PAPER_OCTREE_RESOLUTION = 1024
+ULTRASHAPE_PAPER_NUM_LATENTS = 32768
+ULTRASHAPE_PAPER_CHUNK_SIZE = 8000
+ULTRASHAPE_PAPER_NORMALIZE_SCALE = 0.99
+ULTRASHAPE_PAPER_SEED = 42
+ULTRASHAPE_SURFACE_UNIFORM_POINTS = 204800
+ULTRASHAPE_SURFACE_SHARP_POINTS = 204800
 
 
 class UltraShapeRefiner:
@@ -52,14 +63,18 @@ class UltraShapeRefiner:
         config_path: str | None = None,
         device: str | None = None,
         low_vram: bool = False,
+        isolated_process: bool = True,
+        subprocess_timeout_seconds: int = 7200,
+        remove_background: bool = False,
     ):
         self.ultrashape_dir = ultrashape_dir
         self.checkpoint = checkpoint
-        self.config_path = config_path or os.path.join(
-            ultrashape_dir, "configs", "infer_dit_refine.yaml"
-        )
+        self.config_path = config_path
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.low_vram = low_vram
+        self.isolated_process = isolated_process
+        self.subprocess_timeout_seconds = subprocess_timeout_seconds
+        self.remove_background = remove_background
 
         # Lazy-loaded components
         self._pipeline = None
@@ -86,7 +101,11 @@ class UltraShapeRefiner:
         from omegaconf import OmegaConf
         from ultrashape.pipelines import UltraShapePipeline
         from ultrashape.surface_loaders import SharpEdgeSurfaceLoader
-        from ultrashape.utils.misc import instantiate_from_config
+
+        try:
+            from ultrashape.utils.misc import instantiate_from_config
+        except ImportError:
+            from ultrashape.utils import instantiate_from_config
 
         if not os.path.exists(self.checkpoint):
             raise FileNotFoundError(
@@ -94,9 +113,10 @@ class UltraShapeRefiner:
                 "Download with: hf download infinith/UltraShape ultrashape_v1.pt"
             )
 
-        print(f"Loading UltraShape from {self.config_path}...")
+        config_path = self._resolve_config_path()
+        print(f"Loading UltraShape from {config_path}...")
         t0 = time.time()
-        config = OmegaConf.load(self.config_path)
+        config = OmegaConf.load(config_path)
 
         vae = instantiate_from_config(config.model.params.vae_config)
         dit = instantiate_from_config(config.model.params.dit_cfg)
@@ -136,8 +156,8 @@ class UltraShapeRefiner:
         self._pipeline = pipeline
         self._config = config
         self._surface_loader = SharpEdgeSurfaceLoader(
-            num_sharp_points=204800,
-            num_uniform_points=204800,
+            num_sharp_points=ULTRASHAPE_SURFACE_SHARP_POINTS,
+            num_uniform_points=ULTRASHAPE_SURFACE_UNIFORM_POINTS,
         )
 
         print(f"UltraShape loaded in {time.time() - t0:.1f}s")
@@ -147,12 +167,12 @@ class UltraShapeRefiner:
         self,
         coarse_mesh: trimesh.Trimesh | str | Path,
         reference_image: Image.Image | str | Path,
-        num_steps: int = 50,
-        octree_resolution: int = 512,
-        num_latents: int = 32768,
-        chunk_size: int = 8000,
-        scale: float = 0.99,
-        seed: int = 42,
+        num_steps: int = ULTRASHAPE_PAPER_NUM_STEPS,
+        octree_resolution: int = ULTRASHAPE_PAPER_OCTREE_RESOLUTION,
+        num_latents: int = ULTRASHAPE_PAPER_NUM_LATENTS,
+        chunk_size: int = ULTRASHAPE_PAPER_CHUNK_SIZE,
+        scale: float = ULTRASHAPE_PAPER_NORMALIZE_SCALE,
+        seed: int = ULTRASHAPE_PAPER_SEED,
     ) -> trimesh.Trimesh:
         """Refine a coarse mesh using the reference image.
 
@@ -161,15 +181,31 @@ class UltraShapeRefiner:
             reference_image: Original reference image (PIL Image or path).
                 Should be RGBA with background removed.
             num_steps: Diffusion steps. 50 is quality, 25 is fast.
-            octree_resolution: Marching cubes resolution (512 or 1024).
-            num_latents: Number of latent tokens (32768 standard).
-            chunk_size: VAE decode chunk size.
-            scale: Mesh normalization scale.
+            octree_resolution: Marching cubes resolution; UltraShape's
+                released inference script defaults to 1024.
+            num_latents: Number of latent tokens; paper/repo inference uses
+                32768.
+            chunk_size: VAE decode chunk size; released inference default is
+                8000.
+            scale: Mesh normalization scale; released inference default is
+                0.99.
             seed: Random seed.
 
         Returns:
             Refined trimesh.Trimesh.
         """
+        if self.isolated_process:
+            return self._refine_in_subprocess(
+                coarse_mesh=coarse_mesh,
+                reference_image=reference_image,
+                num_steps=num_steps,
+                octree_resolution=octree_resolution,
+                num_latents=num_latents,
+                chunk_size=chunk_size,
+                scale=scale,
+                seed=seed,
+            )
+
         self._load()
 
         # Handle mesh input — UltraShape's SurfaceLoader needs a file path
@@ -188,12 +224,21 @@ class UltraShapeRefiner:
                 image = Image.open(str(reference_image))
             else:
                 image = reference_image
-            if image.mode != "RGBA":
+            # Match UltraShape's official inference script: non-RGBA images go
+            # through rembg instead of receiving an all-opaque alpha channel.
+            if self.remove_background or image.mode != "RGBA":
+                from ultrashape.rembg import BackgroundRemover
+
+                image = BackgroundRemover()(image)
+            else:
                 image = image.convert("RGBA")
 
             # Import voxelization at call time (UltraShape path must be set)
             from ultrashape.surface_loaders import SharpEdgeSurfaceLoader  # noqa: F401
-            from ultrashape.utils import voxelize_from_point
+            try:
+                from ultrashape.utils import voxelize_from_point
+            except ImportError:
+                from ultrashape.utils.voxelize import voxelize_from_point
 
             # Voxelize the coarse mesh for conditioning
             voxel_res = self._config.model.params.vae_config.params.voxel_query_res
@@ -239,3 +284,123 @@ class UltraShapeRefiner:
         self._surface_loader = None
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+    def _resolve_config_path(self) -> str:
+        if self.config_path and os.path.exists(self.config_path):
+            return self.config_path
+        candidates = [
+            os.path.join(self.ultrashape_dir, "configs", "infer_dit_refine.yaml"),
+            os.path.join(self.ultrashape_dir, "configs", "infer_dit2.yaml"),
+            os.path.join(self.ultrashape_dir, "configs", "infer_dit.yaml"),
+        ]
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                self.config_path = candidate
+                return candidate
+        raise FileNotFoundError(
+            "No UltraShape inference config found. Tried: "
+            + ", ".join(candidates)
+        )
+
+    def _refine_in_subprocess(
+        self,
+        coarse_mesh: trimesh.Trimesh | str | Path,
+        reference_image: Image.Image | str | Path,
+        *,
+        num_steps: int,
+        octree_resolution: int,
+        num_latents: int,
+        chunk_size: int,
+        scale: float,
+        seed: int,
+    ) -> trimesh.Trimesh:
+        """Run UltraShape in a fresh Python process.
+
+        TRELLIS.2 and UltraShape can both register a pybind11 ``cuBVH`` type.
+        Keeping UltraShape in a separate process avoids the double-registration
+        failure when the Python API runs TRELLIS first and refinement second.
+        """
+        import clearmesh
+
+        repo_root = Path(clearmesh.__file__).resolve().parent.parent
+        runner = repo_root / "scripts" / "product" / "run_ultrashape_refinement.py"
+        if not runner.exists():
+            raise FileNotFoundError(f"UltraShape runner not found: {runner}")
+
+        tmp_root = Path(tempfile.mkdtemp(prefix="clearmesh_ultrashape_"))
+        try:
+            coarse_path = tmp_root / "coarse.glb"
+            image_path = tmp_root / "reference.png"
+            output_dir = tmp_root / "out"
+            output_path = output_dir / "refined.glb"
+
+            if isinstance(coarse_mesh, (str, Path)):
+                shutil.copyfile(str(coarse_mesh), coarse_path)
+            else:
+                coarse_mesh.export(coarse_path)
+
+            if isinstance(reference_image, (str, Path)):
+                Image.open(str(reference_image)).save(image_path)
+            else:
+                reference_image.save(image_path)
+
+            command = [
+                sys.executable,
+                str(runner),
+                "--mesh",
+                str(coarse_path),
+                "--image",
+                str(image_path),
+                "--output-dir",
+                str(output_dir),
+                "--output-name",
+                output_path.name,
+                "--ultrashape-dir",
+                str(self.ultrashape_dir),
+                "--checkpoint",
+                str(self.checkpoint),
+                "--num-steps",
+                str(num_steps),
+                "--octree-resolution",
+                str(octree_resolution),
+                "--num-latents",
+                str(num_latents),
+                "--chunk-size",
+                str(chunk_size),
+                "--scale",
+                str(scale),
+                "--seed",
+                str(seed),
+                "--direct",
+            ]
+            if self.config_path:
+                command.extend(["--config-path", str(self.config_path)])
+            if self.low_vram:
+                command.append("--low-vram")
+            if self.remove_background:
+                command.append("--remove-bg")
+
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=self.subprocess_timeout_seconds,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"UltraShape subprocess failed with exit {result.returncode}.\n"
+                    f"stdout tail:\n{(result.stdout or '')[-2000:]}\n"
+                    f"stderr tail:\n{(result.stderr or '')[-2000:]}"
+                )
+            if not output_path.exists():
+                raise RuntimeError(
+                    "UltraShape subprocess completed but did not write "
+                    f"{output_path}. stdout tail:\n{(result.stdout or '')[-1000:]}"
+                )
+            mesh = trimesh.load(str(output_path), force="mesh")
+            if isinstance(mesh, trimesh.Scene):
+                mesh = trimesh.util.concatenate(tuple(mesh.geometry.values()))
+            return mesh
+        finally:
+            shutil.rmtree(tmp_root, ignore_errors=True)

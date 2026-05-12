@@ -1,0 +1,10 @@
+{
+  "project_id": "trusted_easy3e_dev",
+  "source_mesh_path": "/absolute/path/to/source_mesh.glb",
+  "edit_image_path": "/absolute/path/to/edit_image.png",
+  "easy3e_command": "/home/ubuntu/trellis2-venv/bin/python /home/ubuntu/clearmesh/scripts/product/run_easy3e_edit.py --source-mesh {source_mesh_path} --edit-image {edit_image_path} --output-dir {output_dir} --output-name edited_mesh.glb --trellis2-dir /home/ubuntu/TRELLIS.2 --model-dir microsoft/TRELLIS.2-4B",
+  "easy3e_cwd": "/home/ubuntu/clearmesh",
+  "easy3e_timeout_seconds": 7200,
+  "cleanup_enabled": true,
+  "cleanup_min_component_faces": 8
+}

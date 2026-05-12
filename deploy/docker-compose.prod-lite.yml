@@ -1,0 +1,106 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: clearmesh
+      POSTGRES_USER: clearmesh
+      POSTGRES_PASSWORD: clearmesh_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - clearmesh_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clearmesh -d clearmesh"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    volumes:
+      - clearmesh_redis:/data
+    command: ["redis-server", "--appendonly", "yes"]
+
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: miniopassword
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - clearmesh_minio:/data
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 minio miniopassword; do sleep 1; done;
+      mc mb --ignore-existing local/clearmesh-artifacts;
+      mc anonymous set none local/clearmesh-artifacts;
+      "
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/product.Dockerfile
+    environment:
+      CLEARMESH_STATE_ROOT: /data/state
+      CLEARMESH_ARTIFACT_ROOT: /data/artifacts
+      CLEARMESH_POSTGRES_DSN: postgresql://clearmesh:clearmesh_dev_password@postgres:5432/clearmesh
+      CLEARMESH_S3_BUCKET: clearmesh-artifacts
+      CLEARMESH_S3_PREFIX: prod-lite
+      AWS_ACCESS_KEY_ID: minio
+      AWS_SECRET_ACCESS_KEY: miniopassword
+      AWS_ENDPOINT_URL: http://minio:9000
+      CLEAR_MESH_API_KEYS: dev:key_user_dev:user_dev:team_dev
+      CLEARMESH_ADMIN_KEY: admin_dev
+      CLEARMESH_REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    volumes:
+      - clearmesh_api_data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      minio-init:
+        condition: service_completed_successfully
+
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/product.Dockerfile
+    command: ["python", "scripts/product/run_pipeline_worker.py", "--state-root", "/data/state", "--artifact-root", "/data/artifacts"]
+    environment:
+      CLEARMESH_STATE_ROOT: /data/state
+      CLEARMESH_ARTIFACT_ROOT: /data/artifacts
+      CLEARMESH_POSTGRES_DSN: postgresql://clearmesh:clearmesh_dev_password@postgres:5432/clearmesh
+      CLEARMESH_S3_BUCKET: clearmesh-artifacts
+      CLEARMESH_S3_PREFIX: prod-lite
+      AWS_ACCESS_KEY_ID: minio
+      AWS_SECRET_ACCESS_KEY: miniopassword
+      AWS_ENDPOINT_URL: http://minio:9000
+      CLEARMESH_REDIS_URL: redis://redis:6379/0
+    volumes:
+      - clearmesh_api_data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      minio-init:
+        condition: service_completed_successfully
+
+volumes:
+  clearmesh_postgres:
+  clearmesh_redis:
+  clearmesh_minio:
+  clearmesh_api_data:
