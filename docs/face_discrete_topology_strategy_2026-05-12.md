@@ -595,3 +595,27 @@ Next engineering targets:
 3. Add a FACE-Q scale gate alongside coordinate FACE, using the same curated corpus.
 4. Keep coordinate FACE scaling as paper-faithful evidence, but treat FACE-Q as the topology-native production lane.
 ```
+
+### Second-Sample Validation
+
+A second held smoke sample was decoded with the same validated boundary-budget path:
+
+```text
+sample: 0000001_0001_014e926cd0944429be350ca97f9022bb_strict.npz
+watertight: true
+boundary_edges: 0
+nonmanifold_edges: 0
+token_boundary_edge_count: 0
+token_nonmanifold_edge_count: 0
+token_edge_pairing_ratio: 1.0
+generated_faces: 436 / 512
+decode_elapsed_sec: 114.21
+chamfer_l2_normalized: 0.14504
+normal_consistency: 0.4452
+```
+
+Updated interpretation:
+
+```text
+The FACE-Q topology invariant now survives at least two separate 512-face free-run decodes from a tiny local checkpoint. This is not enough to claim visual quality, but it is enough to justify a bounded FACE-Q scale gate. The next question is no longer "can the decoder obey manifold edge algebra?" but "can scale and better geometry heads make the watertight manifold match the target shape?"
+```
