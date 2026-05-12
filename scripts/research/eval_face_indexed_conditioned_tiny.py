@@ -98,7 +98,7 @@ def _validate_or_fallback_face(
     vertex_count: int,
     target_face_count: int | None,
     enforce_vertex_link_manifold: bool,
-) -> np.ndarray | None:
+) -> tuple[np.ndarray | None, bool]:
     face_arr = np.asarray(face, dtype=np.int64).reshape(3)
     if np.any(face_arr < 0) or np.any(face_arr >= int(vertex_count)):
         score = None
@@ -112,13 +112,14 @@ def _validate_or_fallback_face(
             strict_manifold=target_face_count is not None,
         )
     if score is not None:
-        return face_arr
-    return select_topology_fallback_indexed_face(
+        return face_arr, False
+    fallback = select_topology_fallback_indexed_face(
         state,
         vertex_count=vertex_count,
         target_face_count=target_face_count,
         enforce_vertex_link_manifold=enforce_vertex_link_manifold,
     )
+    return fallback, fallback is not None
 
 
 def _generate_faces(
@@ -150,12 +151,17 @@ def _generate_faces(
     seed_faces: np.ndarray | None = None,
     beam_width: int = 1,
     beam_candidates: int = 4,
+    decode_stats: dict[str, Any] | None = None,
 ):  # type: ignore[no-untyped-def]
     import torch
 
     input_faces = torch.full((1, 1, 3), -1, dtype=torch.long, device=device)
     state = IndexedDecodeState.empty()
     generated = []
+    if decode_stats is not None:
+        decode_stats.setdefault("topology_fallbacks", 0)
+        decode_stats.setdefault("topology_stop_early", 0)
+        decode_stats.setdefault("topology_requested_faces", int(face_count))
     target_face_count = int(face_count) if boundary_budget_constraint else None
     vertex_table_np = vertex_table.detach().cpu().numpy()[0] if hasattr(vertex_table, "detach") else None
     if seed_faces is not None:
@@ -197,6 +203,7 @@ def _generate_faces(
             target_face_count=target_face_count,
             beam_width=beam_width,
             beam_candidates=beam_candidates,
+            decode_stats=decode_stats,
         )
     with torch.no_grad():
         for _ in range(max(0, face_count - len(generated))):
@@ -295,7 +302,7 @@ def _generate_faces(
                         repaired.append(chosen)
                         used.add(chosen)
                     next_face = torch.as_tensor(repaired, dtype=torch.long, device=device)
-            next_face_np = _validate_or_fallback_face(
+            next_face_np, used_fallback = _validate_or_fallback_face(
                 next_face.detach().cpu().numpy(),
                 state,
                 vertex_count=vertex_count,
@@ -303,10 +310,16 @@ def _generate_faces(
                 enforce_vertex_link_manifold=enforce_vertex_link_manifold,
             )
             if next_face_np is None:
+                if decode_stats is not None:
+                    decode_stats["topology_stop_early"] = int(decode_stats.get("topology_stop_early", 0)) + 1
                 break
+            if used_fallback and decode_stats is not None:
+                decode_stats["topology_fallbacks"] = int(decode_stats.get("topology_fallbacks", 0)) + 1
             state.add_face(next_face_np)
             generated.append(next_face_np)
             input_faces = _append_face_tensor(input_faces, next_face_np)
+    if decode_stats is not None:
+        decode_stats["topology_generated_faces"] = int(len(generated))
     return np.asarray(generated, dtype=np.int64)
 
 
@@ -340,6 +353,7 @@ def _generate_faces_beam(
     target_face_count: int | None,
     beam_width: int,
     beam_candidates: int,
+    decode_stats: dict[str, Any] | None = None,
 ):  # type: ignore[no-untyped-def]
     import torch
 
@@ -412,7 +426,7 @@ def _generate_faces_beam(
                     candidates = [(np.asarray(fallback, dtype=np.int64), 0.0)]
                 for face, face_score in candidates[:beam_candidates]:
                     face_arr = np.asarray(face, dtype=np.int64).reshape(3)
-                    face_arr = _validate_or_fallback_face(
+                    face_arr, used_fallback = _validate_or_fallback_face(
                         face_arr,
                         beam_state,
                         vertex_count=vertex_count,
@@ -420,7 +434,11 @@ def _generate_faces_beam(
                         enforce_vertex_link_manifold=enforce_vertex_link_manifold,
                     )
                     if face_arr is None:
+                        if decode_stats is not None:
+                            decode_stats["topology_stop_early"] = int(decode_stats.get("topology_stop_early", 0)) + 1
                         continue
+                    if used_fallback and decode_stats is not None:
+                        decode_stats["topology_fallbacks"] = int(decode_stats.get("topology_fallbacks", 0)) + 1
                     next_state = _clone_decode_state(beam_state)
                     next_state.add_face(face_arr)
                     next_generated = beam_generated + [face_arr.copy()]
@@ -433,6 +451,8 @@ def _generate_faces_beam(
     if not beams:
         return np.asarray(generated, dtype=np.int64)
     best = max(beams, key=lambda item: (len(item[2]), item[0], -item[1].boundary_edge_count))
+    if decode_stats is not None:
+        decode_stats["topology_generated_faces"] = int(len(best[2]))
     return np.asarray(best[2], dtype=np.int64)
 
 
@@ -1335,6 +1355,7 @@ def main() -> int:
             "token_accuracy": None,
             "face_exact_ratio": None,
         }
+        decode_stats: dict[str, Any] = {}
         if args.decode_strategy == "teacher_forced":
             generated_faces, teacher_forced_stats = _teacher_forced_faces(
                 model,
@@ -1374,6 +1395,7 @@ def main() -> int:
                 seed_faces=teacher_seq.faces[: max(0, int(args.teacher_seed_faces))] if args.teacher_seed_faces > 0 else None,
                 beam_width=args.beam_width,
                 beam_candidates=args.beam_candidates,
+                decode_stats=decode_stats,
             )
         decode_elapsed_sec = time.perf_counter() - decode_started
         generated_faces = generated_faces[np.all(generated_faces < vertex_count, axis=1)]
@@ -1451,6 +1473,7 @@ def main() -> int:
             "boundary_fill_report": boundary_fill_report,
             "corner_decode": "causal" if use_corner_causal else "parallel",
             "topology_decode": bool(use_topology_head and args.closure_target_bonus != 0.0),
+            "topology_decode_stats": decode_stats,
             "generated_faces": int(len(generated.faces)),
             "generated_vertices": int(len(generated.vertices)),
             "teacher_faces": int(len(teacher.faces)),

@@ -608,7 +608,7 @@ nonmanifold_edges: 0
 token_boundary_edge_count: 0
 token_nonmanifold_edge_count: 0
 token_edge_pairing_ratio: 1.0
-generated_faces: 436 / 512
+generated_faces: 436 / 436
 decode_elapsed_sec: 114.21
 chamfer_l2_normalized: 0.14504
 normal_consistency: 0.4452
@@ -641,4 +641,27 @@ Interpretation:
 
 ```text
 Canonical candidate orientation is a free win: it preserves the manifold invariant, improves token-order faithfulness, and reduces local decode time by roughly 29% on this smoke. The decoder is still too slow for production, but the next optimization should continue in this style: reduce candidate algebra while matching the representation's discrete contract.
+```
+
+### Topology Decode Diagnostics Update
+
+The eval script now records whether a watertight result came from learned candidate selection or from topology fallback repair. A diagnostic rerun on the canonical-orientation sample produced:
+
+```text
+sample: 0000001_0001_014e926cd0944429be350ca97f9022bb_strict.npz
+watertight: true
+boundary_edges: 0
+nonmanifold_edges: 0
+token_edge_pairing_ratio: 1.0
+selected_face_count: 436
+generated_faces: 434
+topology_fallbacks: 0
+topology_stop_early: 1
+decode_elapsed_sec: 72.59
+```
+
+Interpretation:
+
+```text
+This was not a repair-heavy success. The decoder did not need topology fallback faces; it stopped two faces early rather than violating edge capacity, and the resulting mesh was already closed and manifold. That is the right failure behavior for production: prefer a slightly shorter valid shell over forcing invalid late faces into the mesh.
 ```
