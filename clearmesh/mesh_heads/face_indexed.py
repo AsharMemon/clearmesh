@@ -98,6 +98,27 @@ IndexedEdge = tuple[int, int]
 IndexedFaceKey = tuple[int, int, int]
 
 
+def canonical_indexed_face_orientations(a: int, b: int, c: int) -> tuple[tuple[int, int, int], ...]:
+    """Return the two canonical min-vertex rotations for an indexed triangle.
+
+    Indexed FACE training rotates each face so the smallest vertex-table index
+    is first while preserving winding. Candidate decoding should search those
+    two possible windings, not all six permutations.
+    """
+
+    values = (int(a), int(b), int(c))
+    if len(set(values)) != 3:
+        return ()
+
+    def rotate_min(face: tuple[int, int, int]) -> tuple[int, int, int]:
+        min_pos = min(range(3), key=lambda idx: face[idx])
+        return tuple(face[(min_pos + offset) % 3] for offset in range(3))
+
+    forward = rotate_min(values)
+    backward = rotate_min((values[0], values[2], values[1]))
+    return (forward,) if forward == backward else (forward, backward)
+
+
 @dataclass
 class IndexedDecodeState:
     """Mutable edge state used by constrained indexed decoding."""
@@ -698,7 +719,7 @@ def select_boundary_edge_action_face(
             third = int(third)
             if third in edge_vertices:
                 continue
-            for face in permutations((int(edge[0]), int(edge[1]), third), 3):
+            for face in canonical_indexed_face_orientations(int(edge[0]), int(edge[1]), third):
                 model_score = float(scores[0, face[0]] + scores[1, face[1]] + scores[2, face[2]])
                 score = score_indexed_face_candidate(
                     face,
@@ -956,7 +977,7 @@ def select_topology_fallback_indexed_face(
                         continue
                     boundary_candidates.extend(
                         tuple(int(value) for value in face)
-                        for face in permutations((int(edge[0]), int(edge[1]), int(third)), 3)
+                        for face in canonical_indexed_face_orientations(int(edge[0]), int(edge[1]), int(third))
                     )
             best = best_from(boundary_candidates, require_budget=require_budget)
             if best is not None:

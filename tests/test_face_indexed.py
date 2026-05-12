@@ -6,6 +6,7 @@ import trimesh
 from clearmesh.mesh_heads.face_indexed import (
     FaceIndexedSequence,
     IndexedDecodeState,
+    canonical_indexed_face_orientations,
     coordinate_tokens_to_indexed,
     decode_indexed_face_tokens_to_mesh,
     drop_geometric_degenerate_indexed_faces,
@@ -44,6 +45,12 @@ def test_indexed_face_roundtrip_preserves_cube_watertightness():
     assert decoded.is_watertight
     assert report.watertight_edge_graph
     np.testing.assert_allclose(decoded.extents, mesh.extents, atol=0.04)
+
+
+def test_canonical_indexed_face_orientations_match_training_face_rotation():
+    orientations = canonical_indexed_face_orientations(7, 3, 5)
+
+    assert orientations == ((3, 5, 7), (3, 7, 5))
 
 
 def test_indexed_face_encoding_is_deterministic_under_vertex_permutation():

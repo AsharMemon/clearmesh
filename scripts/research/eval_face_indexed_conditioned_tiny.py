@@ -9,7 +9,6 @@ import sys
 import time
 from collections import Counter
 from dataclasses import asdict
-from itertools import permutations
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +24,7 @@ from clearmesh.mesh_heads.face_arae import build_tiny_point_conditioned_indexed_
 from clearmesh.mesh_heads.face_indexed import (
     FaceIndexedSequence,
     IndexedDecodeState,
+    canonical_indexed_face_orientations,
     coordinate_tokens_to_indexed,
     decode_indexed_face_tokens_to_mesh,
     drop_geometric_degenerate_indexed_faces,
@@ -954,7 +954,7 @@ def _select_corner_causal_boundary_face(
             third = int(third)
             if third in edge_vertices:
                 continue
-            for face in permutations((int(edge[0]), int(edge[1]), third), 3):
+            for face in canonical_indexed_face_orientations(int(edge[0]), int(edge[1]), third):
                 if face in seen:
                     continue
                 seen.add(face)
@@ -1125,7 +1125,7 @@ def _select_corner_causal_boundary_face_candidates(
             third = int(third)
             if third in edge_vertices:
                 continue
-            for face in permutations((int(edge[0]), int(edge[1]), third), 3):
+            for face in canonical_indexed_face_orientations(int(edge[0]), int(edge[1]), third):
                 if face in seen:
                     continue
                 seen.add(face)

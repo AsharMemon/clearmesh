@@ -619,3 +619,26 @@ Updated interpretation:
 ```text
 The FACE-Q topology invariant now survives at least two separate 512-face free-run decodes from a tiny local checkpoint. This is not enough to claim visual quality, but it is enough to justify a bounded FACE-Q scale gate. The next question is no longer "can the decoder obey manifold edge algebra?" but "can scale and better geometry heads make the watertight manifold match the target shape?"
 ```
+
+### Canonical Orientation Decode Speed Update
+
+FACE-Q indexed training rotates each triangle so the smallest vertex-table index appears first. The boundary decoder was previously scoring all six permutations of each candidate triangle, which was both slower and less faithful to the training token convention. Candidate generation now searches only the two canonical min-vertex orientations, preserving the two possible windings.
+
+A same-sample rerun after this change produced:
+
+```text
+sample: 0000001_0001_014e926cd0944429be350ca97f9022bb_strict.npz
+watertight: true
+boundary_edges: 0
+nonmanifold_edges: 0
+token_edge_pairing_ratio: 1.0
+decode_elapsed_sec: 81.29  # previous comparable run: 114.21
+chamfer_l2_normalized: 0.11016
+normal_consistency: 0.5536
+```
+
+Interpretation:
+
+```text
+Canonical candidate orientation is a free win: it preserves the manifold invariant, improves token-order faithfulness, and reduces local decode time by roughly 29% on this smoke. The decoder is still too slow for production, but the next optimization should continue in this style: reduce candidate algebra while matching the representation's discrete contract.
+```
