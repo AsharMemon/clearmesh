@@ -127,6 +127,7 @@ class IndexedDecodeState:
     seen_faces: set[IndexedFaceKey]
     accepted_faces: int = 0
     vertex_links: dict[int, list[tuple[int, int]]] = field(default_factory=dict)
+    vertex_link_candidate_cache: dict[tuple[int, int, int], bool] = field(default_factory=dict)
 
     @classmethod
     def empty(cls) -> "IndexedDecodeState":
@@ -151,6 +152,7 @@ class IndexedDecodeState:
         values = tuple(int(value) for value in face)
         if len(set(values)) != 3:
             return
+        self.vertex_link_candidate_cache.clear()
         self.seen_faces.add(_indexed_face_key(values))
         for edge in _indexed_face_edges(values):
             self.edge_counts[edge] += 1
@@ -1040,9 +1042,12 @@ def _candidate_preserves_vertex_links(state: IndexedDecodeState, face: tuple[int
         (int(face[2]), int(face[0]), int(face[1])),
     )
     for vertex, left, right in additions:
-        link_edges = list(state.vertex_links.get(vertex, ()))
-        link_edges.append((left, right))
-        if not _is_single_path_or_cycle_link(link_edges):
+        key = (int(vertex), min(int(left), int(right)), max(int(left), int(right)))
+        if key not in state.vertex_link_candidate_cache:
+            link_edges = list(state.vertex_links.get(vertex, ()))
+            link_edges.append((left, right))
+            state.vertex_link_candidate_cache[key] = _is_single_path_or_cycle_link(link_edges)
+        if not state.vertex_link_candidate_cache[key]:
             return False
     return True
 

@@ -699,3 +699,40 @@ Interpretation:
 ```text
 This is another safe speed win: the topology result and geometry metrics are unchanged, fallback rate remains 0, and decode time improves by ~36% over canonical orientation alone. We still need transformer/KV or batched decode work for production latency, but candidate-side algebra is no longer the dominant obvious waste.
 ```
+
+### Vertex-Link Candidate Cache Speed Update
+
+Profiling the prefiltered boundary decoder showed that a large share of remaining CPU time was spent repeatedly rebuilding local vertex-link graphs for candidate faces. The topology test itself is still necessary: for every vertex, the link must remain a single path or cycle during partial decode, otherwise the model can create bow-tie/pinched vertices even when all edges have capacity <= 2.
+
+The implementation now caches vertex-link candidate checks inside each mutable decode state and clears that cache whenever a face is accepted. This preserves the exact same invariant while avoiding duplicate graph work during one candidate-scoring step.
+
+Same-sample rerun, repeated twice:
+
+```text
+sample: 0000001_0001_014e926cd0944429be350ca97f9022bb_strict.npz
+watertight: true
+boundary_edges: 0
+nonmanifold_edges: 0
+token_edge_pairing_ratio: 1.0
+topology_fallbacks: 0
+topology_stop_early: 0
+generated_faces: 436 / 436
+decode_elapsed_sec: 14.29 and 14.33
+chamfer_l2_normalized: 0.01323
+normal_consistency: 0.5445
+```
+
+Updated latency progression on this sample:
+
+```text
+validated topology path:      114.21s
+canonical orientations:        81.29s
+edge-action prefilter:         51.93s
+vertex-link candidate cache:   14.3s
+```
+
+Interpretation:
+
+```text
+This is the largest safe decode-speed win so far. It does not relax topology constraints; it removes repeated proof work. The same mesh stays watertight and manifold, fallback rate remains 0, and the hard-valid topology path is now fast enough for broader local ablations. Production latency still needs batched/KV transformer decoding, but the discrete topology validator is no longer the obvious bottleneck.
+```

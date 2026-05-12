@@ -21,6 +21,7 @@ from clearmesh.mesh_heads.face_indexed import (
     select_constrained_indexed_face,
     select_topology_fallback_indexed_face,
     _boundary_loops,
+    _candidate_preserves_vertex_links,
 )
 from clearmesh.mesh_heads.face_arae import build_tiny_point_conditioned_indexed_face_decoder
 from clearmesh.mesh_heads.face_tokens import FaceTokenTransform, encode_mesh_to_face_tokens
@@ -319,6 +320,21 @@ def test_constrained_indexed_selector_rejects_pinched_vertex_link():
 
     assert set(selected.tolist()) != {0, 4, 5}
     assert {0, 3}.issubset(set(selected.tolist()))
+
+
+def test_vertex_link_candidate_cache_reuses_and_invalidates():
+    state = IndexedDecodeState.from_faces(np.asarray([[0, 1, 2]], dtype=np.int64))
+
+    assert _candidate_preserves_vertex_links(state, (0, 2, 3))
+    assert state.vertex_link_candidate_cache
+    cached = dict(state.vertex_link_candidate_cache)
+
+    assert _candidate_preserves_vertex_links(state, (0, 2, 3))
+    assert state.vertex_link_candidate_cache == cached
+
+    state.add_face((0, 2, 3))
+
+    assert state.vertex_link_candidate_cache == {}
 
 
 def test_constrained_selector_rejects_impossible_boundary_budget():
