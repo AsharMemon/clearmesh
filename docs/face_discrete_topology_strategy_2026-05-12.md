@@ -736,3 +736,38 @@ Interpretation:
 ```text
 This is the largest safe decode-speed win so far. It does not relax topology constraints; it removes repeated proof work. The same mesh stays watertight and manifold, fallback rate remains 0, and the hard-valid topology path is now fast enough for broader local ablations. Production latency still needs batched/KV transformer decoding, but the discrete topology validator is no longer the obvious bottleneck.
 ```
+
+### Four-Sample Hard Topology Smoke
+
+After the vertex-link cache change, a four-sample local free-run smoke produced:
+
+```text
+attempted: 4
+watertight: 4 / 4
+mean_boundary_edges: 0.0
+mean_nonmanifold_edges: 0.0
+mean_nonmanifold_vertices: 0.0
+mean_edge_pairing_ratio: 1.0
+mean_topology_fallbacks: 0.0
+topology_fallback_rate_per_generated_face: 0.0
+topology_stop_early_count: 2
+mean_topology_generated_face_ratio: 0.9951
+mean_chamfer_l2_normalized: 0.00534
+mean_hausdorff_l2_normalized: 0.1272
+decode_elapsed_sec: 13.8s to 20.0s per sample on CPU
+```
+
+One sample used centroid boundary fill after generating a manifold open shell:
+
+```text
+boundary_fill_input_boundary_edges: 106
+filled_faces: 106
+output_boundary_edges: 0
+output_nonmanifold_edges: 0
+```
+
+Interpretation:
+
+```text
+This is the first local smoke where every tested free-run sample ended watertight with zero non-manifold edges/vertices under the FACE-compatible indexed topology path. Two samples closed directly, two safely stopped early rather than violating topology, and no topology fallback faces were needed. The geometry is still from a tiny weak checkpoint, so this is not yet a quality result; it is a strong evidence point that explicit discrete topology constraints solve the edge-pairing failure mode we saw in coordinate-only FACE.
+```
