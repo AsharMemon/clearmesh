@@ -1211,6 +1211,14 @@ def _aggregate(items: list[dict[str, Any]]) -> dict[str, Any]:
         return {"attempted": 0}
     token_accuracies = [item["teacher_forced_token_accuracy"] for item in items if item.get("teacher_forced_token_accuracy") is not None]
     face_exact_ratios = [item["teacher_forced_face_exact_ratio"] for item in items if item.get("teacher_forced_face_exact_ratio") is not None]
+    topology_stats = [item.get("topology_decode_stats") or {} for item in items]
+    requested_faces = [int(stats.get("topology_requested_faces", item.get("selected_face_count", 0)) or 0) for item, stats in zip(items, topology_stats)]
+    generated_faces = [int(stats.get("topology_generated_faces", item.get("generated_faces", 0)) or 0) for item, stats in zip(items, topology_stats)]
+    fallback_counts = [int(stats.get("topology_fallbacks", 0) or 0) for stats in topology_stats]
+    stop_counts = [int(stats.get("topology_stop_early", 0) or 0) for stats in topology_stats]
+    requested_total = int(sum(requested_faces))
+    generated_total = int(sum(generated_faces))
+    fallback_total = int(sum(fallback_counts))
     return {
         "attempted": len(items),
         "watertight": int(sum(1 for item in items if item.get("watertight"))),
@@ -1223,6 +1231,10 @@ def _aggregate(items: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_edge_pairing_ratio": float(np.mean([item.get("token_edge_pairing_ratio", 0.0) for item in items])),
         "mean_teacher_forced_token_accuracy": float(np.mean(token_accuracies)) if token_accuracies else None,
         "mean_teacher_forced_face_exact_ratio": float(np.mean(face_exact_ratios)) if face_exact_ratios else None,
+        "mean_topology_fallbacks": float(np.mean(fallback_counts)) if fallback_counts else 0.0,
+        "topology_fallback_rate_per_generated_face": float(fallback_total / generated_total) if generated_total > 0 else None,
+        "topology_stop_early_count": int(sum(1 for count in stop_counts if count > 0)),
+        "mean_topology_generated_face_ratio": float(np.mean([generated / requested for generated, requested in zip(generated_faces, requested_faces) if requested > 0])) if any(requested > 0 for requested in requested_faces) else None,
     }
 
 
