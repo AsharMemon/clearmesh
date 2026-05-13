@@ -177,7 +177,10 @@ sync_face_shard() {
 + /corpus/raw/download_manifest.json
 + /corpus/curated_candidates.jsonl
 + /corpus/strict_targets/**
+- /corpus/tokens/manifest.jsonl
+- /corpus/tokens_pass/manifest.jsonl
 + /corpus/tokens/**
++ /corpus/tokens_pass/**
 + /corpus/split*/**
 + /pilot_summary*.json
 + /strict_gate*.json
@@ -188,6 +191,8 @@ EOF
   rclone copy "$LOCAL_ROOT" "$remote_base" \
     --filter-from "$filter_file" \
     --transfers 16 --checkers 32 --stats 30s || true
+  upload_changed_file "$LOCAL_ROOT/corpus/tokens/manifest.jsonl" "corpus/tokens/manifest.jsonl"
+  upload_changed_file "$LOCAL_ROOT/corpus/tokens_pass/manifest.jsonl" "corpus/tokens_pass/manifest.jsonl"
   upload_changed_file "$LOCAL_ROOT/lean_face_corpus.tar.gz" "lean_face_corpus.tar.gz"
   upload_changed_file "$LOCAL_ROOT/lean_face_corpus.tar.gz.json" "lean_face_corpus.tar.gz.json"
 }
