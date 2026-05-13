@@ -354,6 +354,18 @@ PY
 log_status split complete
 
 mkdir -p "\$LAB_ROOT/runs/faceq_partial_gate"
+python scripts/research/eval_face_indexed_conditioned_tiny.py \\
+  --dataset-dir "\$LAB_ROOT/split/test" \\
+  --output "\$LAB_ROOT/runs/faceq_partial_gate/eval_test_teacher_identity_pretrain.json" \\
+  --export-dir "\$LAB_ROOT/runs/faceq_partial_gate/meshes_test_teacher_identity_pretrain" \\
+  --limit "\$EVAL_LIMIT" \\
+  --face-count-mode gt \\
+  --pair-samples "\$PAIR_SAMPLES" \\
+  --boundary-fill none \\
+  --decode-strategy teacher_identity \\
+  --device cpu | tee "\$LAB_ROOT/runs/faceq_partial_gate/eval_test_teacher_identity_pretrain.log"
+log_status teacher_identity_pretrain complete
+
 python scripts/research/train_face_indexed_conditioned_tiny.py \\
   --dataset-dir "\$LAB_ROOT/split/train" \\
   --output "\$LAB_ROOT/runs/faceq_partial_gate/checkpoint.pt" \\
@@ -398,6 +410,20 @@ python scripts/research/eval_face_indexed_conditioned_tiny.py \\
   --output "\$LAB_ROOT/runs/faceq_partial_gate/eval_test_free.json" \\
   --export-dir "\$LAB_ROOT/runs/faceq_partial_gate/meshes_test_free" \\
   --decode-strategy free_run | tee "\$LAB_ROOT/runs/faceq_partial_gate/eval_test_free.log"
+
+python scripts/research/eval_face_indexed_conditioned_tiny.py \\
+  "\${COMMON_EVAL[@]}" \\
+  --dataset-dir "\$LAB_ROOT/split/test" \\
+  --output "\$LAB_ROOT/runs/faceq_partial_gate/eval_test_teacher_identity.json" \\
+  --export-dir "\$LAB_ROOT/runs/faceq_partial_gate/meshes_test_teacher_identity" \\
+  --decode-strategy teacher_identity | tee "\$LAB_ROOT/runs/faceq_partial_gate/eval_test_teacher_identity.log"
+
+python scripts/research/eval_face_indexed_conditioned_tiny.py \\
+  "\${COMMON_EVAL[@]}" \\
+  --dataset-dir "\$LAB_ROOT/split/train" \\
+  --output "\$LAB_ROOT/runs/faceq_partial_gate/eval_train_teacher.json" \\
+  --export-dir "\$LAB_ROOT/runs/faceq_partial_gate/meshes_train_teacher" \\
+  --decode-strategy teacher_forced | tee "\$LAB_ROOT/runs/faceq_partial_gate/eval_train_teacher.log"
 
 python scripts/research/eval_face_indexed_conditioned_tiny.py \\
   "\${COMMON_EVAL[@]}" \\

@@ -32,6 +32,7 @@ from scripts.research.train_face_indexed_conditioned_tiny import (
     _edge_choice_targets,
     _load_dataset,
 )
+from scripts.research.eval_face_indexed_conditioned_tiny import _teacher_identity_faces
 
 
 def test_indexed_face_roundtrip_preserves_cube_watertightness():
@@ -46,6 +47,16 @@ def test_indexed_face_roundtrip_preserves_cube_watertightness():
     assert decoded.is_watertight
     assert report.watertight_edge_graph
     np.testing.assert_allclose(decoded.extents, mesh.extents, atol=0.04)
+
+
+def test_teacher_identity_faces_are_exact_copied_targets():
+    teacher = np.asarray([[0, 1, 2], [0, 2, 3]], dtype=np.int64)
+
+    generated, stats = _teacher_identity_faces(teacher)
+    generated[0, 0] = 99
+
+    assert stats == {"token_accuracy": 1.0, "face_exact_ratio": 1.0}
+    assert teacher[0, 0] == 0
 
 
 def test_canonical_indexed_face_orientations_match_training_face_rotation():

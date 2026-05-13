@@ -504,6 +504,28 @@ def _teacher_forced_faces(
     }
 
 
+def _teacher_identity_faces(teacher_faces: np.ndarray) -> tuple[np.ndarray, dict[str, float | None]]:
+    """Return the target faces unchanged for an evaluator circuit test.
+
+    This mode is deliberately not a model-quality metric. It sends the exact
+    FACE-Q target sequence through the same post-processing, mesh decode, and
+    mesh-quality checks used by model outputs. If this path is not watertight,
+    a low teacher-forced watertight rate is caused by target/eval/tokenization
+    issues rather than by the network.
+    """
+
+    target = np.asarray(teacher_faces, dtype=np.int64).reshape(-1, 3)
+    if len(target) == 0:
+        return target.copy(), {
+            "token_accuracy": None,
+            "face_exact_ratio": None,
+        }
+    return target.copy(), {
+        "token_accuracy": 1.0,
+        "face_exact_ratio": 1.0,
+    }
+
+
 def _prefilter_boundary_edge_rows(
     boundary_edges: list[tuple[int, int]],
     logits0: np.ndarray,
@@ -1282,7 +1304,12 @@ def _aggregate(items: list[dict[str, Any]]) -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=None,
+        help="Model checkpoint. Optional only for --decode-strategy teacher_identity.",
+    )
     parser.add_argument("--dataset-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--export-dir", type=Path, default=None)
@@ -1298,7 +1325,15 @@ def main() -> int:
     parser.add_argument("--token-repair-mode", choices=["none", "dedupe", "manifold"], default="none")
     parser.add_argument("--boundary-fill", choices=["none", "fan", "centroid"], default="none")
     parser.add_argument("--boundary-fill-max-loop-edges", type=int, default=128)
-    parser.add_argument("--decode-strategy", choices=["free_run", "teacher_forced"], default="free_run")
+    parser.add_argument(
+        "--decode-strategy",
+        choices=["free_run", "teacher_forced", "teacher_identity"],
+        default="free_run",
+        help=(
+            "teacher_identity bypasses the model and evaluates exact target faces "
+            "through the same decode/quality path as model outputs."
+        ),
+    )
     parser.add_argument("--decode-mode", choices=["edge_constrained", "boundary_edge", "unconstrained"], default="edge_constrained")
     parser.add_argument("--corner-decode", choices=["auto", "causal", "parallel"], default="auto")
     parser.add_argument("--constraint-top-k", type=int, default=24)
@@ -1322,13 +1357,43 @@ def main() -> int:
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
     args = parser.parse_args()
 
+    paths = sorted(path for path in args.dataset_dir.glob("*.npz") if not path.name.startswith("._"))
+    if args.offset:
+        paths = paths[max(0, int(args.offset)) :]
+    if args.limit:
+        paths = paths[: args.limit]
+    if not paths:
+        raise SystemExit(f"no FACE-Q npz samples found in {args.dataset_dir}")
+
+    checkpoint = None
+    train_args: dict[str, Any] = {}
+    if args.checkpoint is not None:
+        checkpoint = _load_checkpoint(args.checkpoint)
+        train_args = checkpoint.get("args", {})
+        num_bins = int(checkpoint["num_bins"])
+        max_vertices = int(checkpoint["max_vertices"])
+        max_faces = int(checkpoint["max_faces"])
+    elif args.decode_strategy == "teacher_identity":
+        # Model-free target/evaluator sanity check. Infer the shape envelope from
+        # the selected samples so the rest of the evaluator uses the same path.
+        max_vertices = 0
+        max_faces = 0
+        num_bins = None
+        for path in paths:
+            data = np.load(path)
+            max_vertices = max(max_vertices, int(len(data["indexed_vertices"])))
+            max_faces = max(max_faces, int(len(data["indexed_faces"])))
+            sample_bins = int(np.asarray(data["num_bins"]).reshape(-1)[0])
+            num_bins = sample_bins if num_bins is None else num_bins
+            if sample_bins != num_bins:
+                raise SystemExit(f"mixed num_bins in teacher_identity eval: {path} has {sample_bins}, expected {num_bins}")
+        if max_vertices <= 0 or max_faces <= 0 or num_bins is None:
+            raise SystemExit("teacher_identity eval could not infer non-empty FACE-Q shapes")
+    else:
+        raise SystemExit("--checkpoint is required unless --decode-strategy teacher_identity")
+
     import torch
 
-    checkpoint = _load_checkpoint(args.checkpoint)
-    train_args = checkpoint.get("args", {})
-    num_bins = int(checkpoint["num_bins"])
-    max_vertices = int(checkpoint["max_vertices"])
-    max_faces = int(checkpoint["max_faces"])
     if args.device == "auto":
         if torch.cuda.is_available():
             device = torch.device("cuda")
@@ -1338,48 +1403,46 @@ def main() -> int:
             device = torch.device("cpu")
     else:
         device = torch.device(args.device)
-    model = build_tiny_point_conditioned_indexed_face_decoder(
-        num_bins=num_bins,
-        max_vertices=max_vertices,
-        max_faces=max_faces,
-        point_feature_dim=6,
-        hidden_size=int(train_args.get("hidden_size", 192)),
-        layers=int(train_args.get("layers", 4)),
-        heads=int(train_args.get("heads", 6)),
-        condition_tokens=int(train_args.get("condition_tokens", 8)),
-        edge_head_mode=str(train_args.get("edge_head_mode", "index")),
-    ).to(device)
-    load_result = model.load_state_dict(checkpoint["model_state"], strict=False)
-    if load_result.missing_keys or load_result.unexpected_keys:
-        print(
-            json.dumps(
-                {
-                    "checkpoint_load_note": "non-strict load for evolving FACE indexed research checkpoints",
-                    "missing_keys": sorted(load_result.missing_keys),
-                    "unexpected_keys": sorted(load_result.unexpected_keys),
-                },
-                sort_keys=True,
-            ),
-            file=sys.stderr,
-        )
-    model.eval()
+    model = None
+    if checkpoint is not None:
+        model = build_tiny_point_conditioned_indexed_face_decoder(
+            num_bins=num_bins,
+            max_vertices=max_vertices,
+            max_faces=max_faces,
+            point_feature_dim=6,
+            hidden_size=int(train_args.get("hidden_size", 192)),
+            layers=int(train_args.get("layers", 4)),
+            heads=int(train_args.get("heads", 6)),
+            condition_tokens=int(train_args.get("condition_tokens", 8)),
+            edge_head_mode=str(train_args.get("edge_head_mode", "index")),
+        ).to(device)
+        load_result = model.load_state_dict(checkpoint["model_state"], strict=False)
+        if load_result.missing_keys or load_result.unexpected_keys:
+            print(
+                json.dumps(
+                    {
+                        "checkpoint_load_note": "non-strict load for evolving FACE indexed research checkpoints",
+                        "missing_keys": sorted(load_result.missing_keys),
+                        "unexpected_keys": sorted(load_result.unexpected_keys),
+                    },
+                    sort_keys=True,
+                ),
+                file=sys.stderr,
+            )
+        model.eval()
     if args.corner_decode == "causal":
         use_corner_causal = True
     elif args.corner_decode == "parallel":
         use_corner_causal = False
     else:
-        use_corner_causal = bool(checkpoint.get("has_corner_causal_head"))
-    use_topology_head = bool(checkpoint.get("has_topology_head"))
-    use_edge_choice_head = bool(checkpoint.get("has_edge_choice_head"))
+        use_corner_causal = bool(checkpoint.get("has_corner_causal_head")) if checkpoint is not None else False
+    use_topology_head = bool(checkpoint.get("has_topology_head")) if checkpoint is not None else False
+    use_edge_choice_head = bool(checkpoint.get("has_edge_choice_head")) if checkpoint is not None else False
     edge_choice_bonus = float(args.edge_choice_bonus) if use_edge_choice_head else 0.0
-    use_seed_face_head = bool(checkpoint.get("has_seed_face_head"))
+    use_seed_face_head = bool(checkpoint.get("has_seed_face_head")) if checkpoint is not None else False
     seed_face_bonus = float(args.seed_face_bonus) if use_seed_face_head else 0.0
-
-    paths = sorted(path for path in args.dataset_dir.glob("*.npz") if not path.name.startswith("._"))
-    if args.offset:
-        paths = paths[max(0, int(args.offset)) :]
-    if args.limit:
-        paths = paths[: args.limit]
+    if args.decode_strategy == "teacher_identity" and args.face_count_mode == "predicted":
+        raise SystemExit("teacher_identity requires --face-count-mode gt or max; predicted count needs a model")
     if args.export_dir:
         args.export_dir.mkdir(parents=True, exist_ok=True)
     if args.cleanup_export_dir:
@@ -1392,8 +1455,11 @@ def main() -> int:
         vertex_count = min(len(teacher_seq.vertices), max_vertices)
         vertex_table_np = np.full((max_vertices, 3), -1, dtype=np.int64)
         vertex_table_np[:vertex_count] = teacher_seq.vertices[:vertex_count]
-        point_tensor = torch.as_tensor(point_features_np, dtype=torch.float32, device=device).unsqueeze(0)
-        vertex_tensor = torch.as_tensor(vertex_table_np, dtype=torch.long, device=device).unsqueeze(0)
+        point_tensor = None
+        vertex_tensor = None
+        if args.decode_strategy != "teacher_identity":
+            point_tensor = torch.as_tensor(point_features_np, dtype=torch.float32, device=device).unsqueeze(0)
+            vertex_tensor = torch.as_tensor(vertex_table_np, dtype=torch.long, device=device).unsqueeze(0)
         if args.face_count_mode == "gt":
             face_count = min(len(teacher_seq.faces), max_faces)
             predicted_count = None
@@ -1401,6 +1467,8 @@ def main() -> int:
             face_count = max_faces
             predicted_count = None
         else:
+            if model is None or point_tensor is None or vertex_tensor is None:
+                raise SystemExit("predicted face-count mode requires a checkpoint-backed model")
             with torch.no_grad():
                 predicted_count = int(model.predict_face_count_logits(point_tensor, vertex_tensor).argmax(dim=-1).item())
             face_count = max(1, min(max_faces, predicted_count))
@@ -1410,7 +1478,11 @@ def main() -> int:
             "face_exact_ratio": None,
         }
         decode_stats: dict[str, Any] = {}
-        if args.decode_strategy == "teacher_forced":
+        if args.decode_strategy == "teacher_identity":
+            generated_faces, teacher_forced_stats = _teacher_identity_faces(teacher_seq.faces[:face_count])
+        elif args.decode_strategy == "teacher_forced":
+            if model is None or point_tensor is None or vertex_tensor is None:
+                raise SystemExit("teacher_forced decode requires a checkpoint-backed model")
             generated_faces, teacher_forced_stats = _teacher_forced_faces(
                 model,
                 point_tensor,
@@ -1421,6 +1493,8 @@ def main() -> int:
                 use_corner_causal=use_corner_causal,
             )
         else:
+            if model is None or point_tensor is None or vertex_tensor is None:
+                raise SystemExit("free_run decode requires a checkpoint-backed model")
             generated_faces = _generate_faces(
                 model,
                 point_tensor,
