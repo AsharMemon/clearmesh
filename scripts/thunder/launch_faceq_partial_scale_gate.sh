@@ -146,8 +146,8 @@ THUNDER_INSTANCE_ID="$INSTANCE_ID" INSTALL_MESH_HEAD_REPOS=0 INSTALL_MESH_HEAD_E
 mkdir -p "$DOWNLOAD_ROOT"
 b2_env_file="$(mktemp "$DOWNLOAD_ROOT/b2_env.XXXXXX")"
 {
-  printf 'export B2_KEY_ID=%q\n' "${B2_KEY_ID:-}"
-  printf 'export B2_APP_KEY=%q\n' "${B2_APP_KEY:-${B2_APPLICATION_KEY:-}}"
+  printf 'export B2_KEY_ID=%q\n' "${B2_KEY_ID:-${B2_APPLICATION_KEY_ID:-${B2_KEYID:-${BACKBLAZE_B2_KEY_ID:-}}}}"
+  printf 'export B2_APP_KEY=%q\n' "${B2_APP_KEY:-${B2_APPLICATION_KEY:-${BACKBLAZE_B2_APPLICATION_KEY:-${BACKBLAZE_B2_APP_KEY:-}}}}"
   printf 'export B2_TOKEN=%q\n' "${B2_TOKEN:-}"
 } > "$b2_env_file"
 chmod 600 "$b2_env_file"
@@ -240,8 +240,25 @@ token = os.environ.get("B2_TOKEN", "").strip()
 key_id = app_key = ""
 if token.startswith("{"):
     payload = json.loads(token)
-    key_id = payload.get("keyId") or payload.get("key_id") or payload.get("accountId") or ""
-    app_key = payload.get("applicationKey") or payload.get("application_key") or payload.get("appKey") or ""
+    key_id = (
+        payload.get("keyId")
+        or payload.get("keyID")
+        or payload.get("applicationKeyId")
+        or payload.get("applicationKeyID")
+        or payload.get("key_id")
+        or payload.get("application_key_id")
+        or payload.get("accountId")
+        or payload.get("accountID")
+        or ""
+    )
+    app_key = (
+        payload.get("applicationKey")
+        or payload.get("application_key")
+        or payload.get("appKey")
+        or payload.get("app_key")
+        or payload.get("key")
+        or ""
+    )
 elif ":" in token:
     key_id, app_key = token.split(":", 1)
 if key_id and app_key:
@@ -252,6 +269,18 @@ PY
     export B2_KEY_ID="\${B2_KEY_ID:-\$(printf '%s\\n' "\$parsed_b2" | sed -n '1p')}"
     export B2_APP_KEY="\${B2_APP_KEY:-\$(printf '%s\\n' "\$parsed_b2" | sed -n '2p')}"
   fi
+fi
+if [[ -n "\${B2_KEY_ID:-}" && -z "\${B2_APP_KEY:-}" && -n "\${B2_TOKEN:-}" ]]; then
+  # Some environments expose the application key as B2_TOKEN and the key id
+  # separately. Treat opaque, non-JSON, non-pair tokens as the app key.
+  case "\$B2_TOKEN" in
+    \{*|*:*) ;;
+    *) export B2_APP_KEY="\$B2_TOKEN" ;;
+  esac
+fi
+if [[ -z "\${B2_KEY_ID:-}" || -z "\${B2_APP_KEY:-}" ]]; then
+  echo "B2 credentials are incomplete: set B2_KEY_ID plus B2_APP_KEY, or B2_TOKEN as JSON/key_id:application_key." >&2
+  exit 2
 fi
 export RCLONE_CONFIG_B2ENV_TYPE=b2
 export RCLONE_CONFIG_B2ENV_ACCOUNT="\$B2_KEY_ID"

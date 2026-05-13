@@ -26,8 +26,25 @@ key_id = app_key = ""
 if token:
     if token.startswith("{"):
         payload = json.loads(token)
-        key_id = payload.get("keyId") or payload.get("key_id") or payload.get("accountId") or ""
-        app_key = payload.get("applicationKey") or payload.get("application_key") or payload.get("appKey") or ""
+        key_id = (
+            payload.get("keyId")
+            or payload.get("keyID")
+            or payload.get("applicationKeyId")
+            or payload.get("applicationKeyID")
+            or payload.get("key_id")
+            or payload.get("application_key_id")
+            or payload.get("accountId")
+            or payload.get("accountID")
+            or ""
+        )
+        app_key = (
+            payload.get("applicationKey")
+            or payload.get("application_key")
+            or payload.get("appKey")
+            or payload.get("app_key")
+            or payload.get("key")
+            or ""
+        )
     elif ":" in token:
         key_id, app_key = token.split(":", 1)
 if key_id and app_key:
@@ -38,6 +55,12 @@ PY
     B2_KEY_ID="${B2_KEY_ID:-$(printf '%s\n' "$parsed_b2" | sed -n '1p')}"
     B2_APP_KEY="${B2_APP_KEY:-$(printf '%s\n' "$parsed_b2" | sed -n '2p')}"
   fi
+fi
+if [[ -n "${B2_KEY_ID:-}" && -z "${B2_APP_KEY:-}" && -n "${B2_TOKEN:-}" ]]; then
+  case "$B2_TOKEN" in
+    \{*|*:*) ;;
+    *) B2_APP_KEY="$B2_TOKEN" ;;
+  esac
 fi
 
 if [[ -n "${B2_KEY_ID:-}" && -n "${B2_APP_KEY:-}" ]]; then
