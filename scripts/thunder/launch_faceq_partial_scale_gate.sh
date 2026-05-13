@@ -321,8 +321,19 @@ python scripts/research/build_face_token_dataset.py \\
   --indexed-face-order "\$INDEXED_FACE_ORDER" | tee "\$LAB_ROOT/build_tokens.log"
 log_status tokenize complete
 
+python scripts/research/curate_face_indexed_dataset.py \\
+  --input-dir "\$LAB_ROOT/tokens" \\
+  --output-dir "\$LAB_ROOT/tokens_strict_watertight" \\
+  --copy-mode symlink \\
+  --max-faces "\$MAX_FACES" \\
+  --max-boundary-edges 0 \\
+  --max-nonmanifold-edges 0 \\
+  --min-edge-pairing-ratio 1.0 \\
+  --require-boundary-growth | tee "\$LAB_ROOT/curate_tokens_strict_watertight.log"
+log_status curate_tokens complete
+
 python scripts/research/split_face_token_dataset.py \\
-  --dataset-dir "\$LAB_ROOT/tokens" \\
+  --dataset-dir "\$LAB_ROOT/tokens_strict_watertight" \\
   --output-dir "\$LAB_ROOT/split" \\
   --test-ratio "\$TEST_RATIO" \\
   --seed 303 \\
@@ -339,7 +350,7 @@ import json
 from pathlib import Path
 
 root = Path("${REMOTE_LAB_ROOT}")
-rows = [json.loads(line) for line in (root / "tokens" / "manifest.jsonl").read_text().splitlines() if line.strip()]
+rows = [json.loads(line) for line in (root / "tokens_strict_watertight" / "manifest.jsonl").read_text().splitlines() if line.strip()]
 summary = {
     "written": len(rows),
     "failed": 0,
@@ -349,6 +360,7 @@ summary = {
     "zero_closure_after_first_sum": sum(int(row.get("indexed_zero_closure_after_first", 0) or 0) for row in rows),
 }
 (root / "tokens" / "curation_summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True))
+(root / "tokens_strict_watertight" / "curation_summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True))
 print(json.dumps(summary, indent=2, sort_keys=True))
 PY
 log_status split complete
