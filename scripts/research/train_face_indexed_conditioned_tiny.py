@@ -603,6 +603,7 @@ def main() -> int:
                     edge_choice_logits = model._edge_choice_logits_from_hidden(
                         hidden_for_aux,
                         target_edge_choice_candidates,
+                        vertex_table,
                     )
                 else:
                     edge_choice_logits = model.forward_edge_choice(
