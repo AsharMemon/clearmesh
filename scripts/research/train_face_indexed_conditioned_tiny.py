@@ -164,7 +164,7 @@ def _load_dataset_lazy(dataset_dir: Path, limit: int = 0, cache_size: int = 0) -
     num_bins: int | None = None
     max_vertices = 0
     max_faces = 0
-    for path in paths:
+    for path_index, path in enumerate(paths, start=1):
         try:
             sample_bins, vertex_count, face_count = _load_sample_metadata(path)
         except Exception as exc:
@@ -178,6 +178,18 @@ def _load_dataset_lazy(dataset_dir: Path, limit: int = 0, cache_size: int = 0) -
         valid_paths.append(path)
         max_vertices = max(max_vertices, vertex_count)
         max_faces = max(max_faces, face_count)
+        if len(valid_paths) % 1000 == 0:
+            print(
+                json.dumps(
+                    {
+                        "lazy_scan_valid": len(valid_paths),
+                        "lazy_scan_seen": path_index,
+                        "npz_files": len(paths),
+                    }
+                ),
+                file=sys.stderr,
+                flush=True,
+            )
     if not valid_paths or num_bins is None:
         details = "\n".join(f"  - {failure}" for failure in failures)
         suffix = f"\nFirst load failures:\n{details}" if details else ""
