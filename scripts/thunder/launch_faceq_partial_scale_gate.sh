@@ -45,6 +45,11 @@ HIDDEN_SIZE="${HIDDEN_SIZE:-384}"
 LAYERS="${LAYERS:-8}"
 HEADS="${HEADS:-8}"
 CONDITION_TOKENS="${CONDITION_TOKENS:-128}"
+CONDITION_BACKEND="${CONDITION_BACKEND:-pooled}"
+DECODER_BACKEND="${DECODER_BACKEND:-prefix}"
+ENCODER_LAYERS="${ENCODER_LAYERS:-4}"
+LATENT_DIM="${LATENT_DIM:-64}"
+FACE_OUTPUT_MODE="${FACE_OUTPUT_MODE:-linear}"
 LR="${LR:-6e-4}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-0.1}"
 OPTIMIZER="${OPTIMIZER:-muon}"
@@ -53,6 +58,13 @@ CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-5000}"
 LOG_EVERY="${LOG_EVERY:-500}"
 EVAL_LIMIT="${EVAL_LIMIT:-32}"
 PAIR_SAMPLES="${PAIR_SAMPLES:-2048}"
+COUNT_LOSS_WEIGHT="${COUNT_LOSS_WEIGHT:-0.05}"
+TOPOLOGY_LOSS_WEIGHT="${TOPOLOGY_LOSS_WEIGHT:-0.2}"
+EDGE_ACTION_LOSS_WEIGHT="${EDGE_ACTION_LOSS_WEIGHT:-1.0}"
+EDGE_CHOICE_LOSS_WEIGHT="${EDGE_CHOICE_LOSS_WEIGHT:-0.5}"
+SEED_FACE_LOSS_WEIGHT="${SEED_FACE_LOSS_WEIGHT:-1.0}"
+EARLY_FACE_COUNT="${EARLY_FACE_COUNT:-16}"
+EARLY_FACE_LOSS_WEIGHT="${EARLY_FACE_LOSS_WEIGHT:-4.0}"
 
 WAIT_INTERVAL_SEC="${WAIT_INTERVAL_SEC:-10}"
 WAIT_TIMEOUT_SEC="${WAIT_TIMEOUT_SEC:-1800}"
@@ -183,6 +195,11 @@ HIDDEN_SIZE=$(printf '%q' "$HIDDEN_SIZE")
 LAYERS=$(printf '%q' "$LAYERS")
 HEADS=$(printf '%q' "$HEADS")
 CONDITION_TOKENS=$(printf '%q' "$CONDITION_TOKENS")
+CONDITION_BACKEND=$(printf '%q' "$CONDITION_BACKEND")
+DECODER_BACKEND=$(printf '%q' "$DECODER_BACKEND")
+ENCODER_LAYERS=$(printf '%q' "$ENCODER_LAYERS")
+LATENT_DIM=$(printf '%q' "$LATENT_DIM")
+FACE_OUTPUT_MODE=$(printf '%q' "$FACE_OUTPUT_MODE")
 LR=$(printf '%q' "$LR")
 WEIGHT_DECAY=$(printf '%q' "$WEIGHT_DECAY")
 OPTIMIZER=$(printf '%q' "$OPTIMIZER")
@@ -191,6 +208,13 @@ CHECKPOINT_EVERY=$(printf '%q' "$CHECKPOINT_EVERY")
 LOG_EVERY=$(printf '%q' "$LOG_EVERY")
 EVAL_LIMIT=$(printf '%q' "$EVAL_LIMIT")
 PAIR_SAMPLES=$(printf '%q' "$PAIR_SAMPLES")
+COUNT_LOSS_WEIGHT=$(printf '%q' "$COUNT_LOSS_WEIGHT")
+TOPOLOGY_LOSS_WEIGHT=$(printf '%q' "$TOPOLOGY_LOSS_WEIGHT")
+EDGE_ACTION_LOSS_WEIGHT=$(printf '%q' "$EDGE_ACTION_LOSS_WEIGHT")
+EDGE_CHOICE_LOSS_WEIGHT=$(printf '%q' "$EDGE_CHOICE_LOSS_WEIGHT")
+SEED_FACE_LOSS_WEIGHT=$(printf '%q' "$SEED_FACE_LOSS_WEIGHT")
+EARLY_FACE_COUNT=$(printf '%q' "$EARLY_FACE_COUNT")
+EARLY_FACE_LOSS_WEIGHT=$(printf '%q' "$EARLY_FACE_LOSS_WEIGHT")
 
 mkdir -p "\$LAB_ROOT"
 status_jsonl="\$LAB_ROOT/status.jsonl"
@@ -389,14 +413,20 @@ python scripts/research/train_face_indexed_conditioned_tiny.py \\
   --layers "\$LAYERS" \\
   --heads "\$HEADS" \\
   --condition-tokens "\$CONDITION_TOKENS" \\
+  --condition-backend "\$CONDITION_BACKEND" \\
+  --decoder-backend "\$DECODER_BACKEND" \\
+  --encoder-layers "\$ENCODER_LAYERS" \\
+  --latent-dim "\$LATENT_DIM" \\
+  --face-output-mode "\$FACE_OUTPUT_MODE" \\
   --corner-head causal \\
-  --topology-loss-weight 0.2 \\
-  --edge-action-loss-weight 1.0 \\
-  --edge-choice-loss-weight 0.5 \\
+  --count-loss-weight "\$COUNT_LOSS_WEIGHT" \\
+  --topology-loss-weight "\$TOPOLOGY_LOSS_WEIGHT" \\
+  --edge-action-loss-weight "\$EDGE_ACTION_LOSS_WEIGHT" \\
+  --edge-choice-loss-weight "\$EDGE_CHOICE_LOSS_WEIGHT" \\
   --edge-choice-candidates 32 \\
-  --seed-face-loss-weight 1.0 \\
-  --early-face-count 16 \\
-  --early-face-loss-weight 4.0 \\
+  --seed-face-loss-weight "\$SEED_FACE_LOSS_WEIGHT" \\
+  --early-face-count "\$EARLY_FACE_COUNT" \\
+  --early-face-loss-weight "\$EARLY_FACE_LOSS_WEIGHT" \\
   --optimizer "\$OPTIMIZER" \\
   --precision "\$PRECISION" \\
   --lr "\$LR" \\
@@ -488,8 +518,20 @@ cat > "$DOWNLOAD_ROOT/run_info.json" <<JSON
   "layers": $LAYERS,
   "heads": $HEADS,
   "condition_tokens": $CONDITION_TOKENS,
+  "condition_backend": "$CONDITION_BACKEND",
+  "decoder_backend": "$DECODER_BACKEND",
+  "encoder_layers": $ENCODER_LAYERS,
+  "latent_dim": $LATENT_DIM,
+  "face_output_mode": "$FACE_OUTPUT_MODE",
   "train_point_samples": $TRAIN_POINT_SAMPLES,
-  "eval_limit": $EVAL_LIMIT
+  "eval_limit": $EVAL_LIMIT,
+  "count_loss_weight": $COUNT_LOSS_WEIGHT,
+  "topology_loss_weight": $TOPOLOGY_LOSS_WEIGHT,
+  "edge_action_loss_weight": $EDGE_ACTION_LOSS_WEIGHT,
+  "edge_choice_loss_weight": $EDGE_CHOICE_LOSS_WEIGHT,
+  "seed_face_loss_weight": $SEED_FACE_LOSS_WEIGHT,
+  "early_face_count": $EARLY_FACE_COUNT,
+  "early_face_loss_weight": $EARLY_FACE_LOSS_WEIGHT
 }
 JSON
 

@@ -1415,6 +1415,11 @@ def main() -> int:
             heads=int(train_args.get("heads", 6)),
             condition_tokens=int(train_args.get("condition_tokens", 8)),
             edge_head_mode=str(train_args.get("edge_head_mode", "index")),
+            condition_backend=str(train_args.get("condition_backend", "pooled")),
+            decoder_backend=str(train_args.get("decoder_backend", "prefix")),
+            encoder_layers=int(train_args.get("encoder_layers", 4)),
+            latent_dim=int(train_args.get("latent_dim", 64)),
+            face_output_mode=str(train_args.get("face_output_mode", "linear")),
         ).to(device)
         load_result = model.load_state_dict(checkpoint["model_state"], strict=False)
         if load_result.missing_keys or load_result.unexpected_keys:

@@ -372,6 +372,11 @@ def main() -> int:
     parser.add_argument("--heads", type=int, default=6)
     parser.add_argument("--condition-tokens", type=int, default=8)
     parser.add_argument("--edge-head-mode", choices=["index", "geometry"], default="geometry")
+    parser.add_argument("--condition-backend", choices=["pooled", "vecset"], default="pooled")
+    parser.add_argument("--decoder-backend", choices=["prefix", "cross_attn"], default="prefix")
+    parser.add_argument("--encoder-layers", type=int, default=4)
+    parser.add_argument("--latent-dim", type=int, default=64)
+    parser.add_argument("--face-output-mode", choices=["linear", "geometry"], default="linear")
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--optimizer", choices=["adamw", "muon"], default="adamw")
@@ -388,6 +393,7 @@ def main() -> int:
     parser.add_argument("--log-every", type=int, default=0)
     parser.add_argument("--grad-clip-norm", type=float, default=0.0)
     parser.add_argument("--corner-head", choices=["causal", "parallel"], default="parallel")
+    parser.add_argument("--count-loss-weight", type=float, default=0.05)
     parser.add_argument("--topology-loss-weight", type=float, default=0.0)
     parser.add_argument("--edge-action-loss-weight", type=float, default=0.0)
     parser.add_argument("--edge-choice-loss-weight", type=float, default=0.0)
@@ -420,6 +426,11 @@ def main() -> int:
         "vertex_coordinate_tokens_per_sample": int(max_vertices * 3),
         "point_samples": point_count,
         "edge_head_mode": args.edge_head_mode,
+        "condition_backend": args.condition_backend,
+        "decoder_backend": args.decoder_backend,
+        "encoder_layers": args.encoder_layers,
+        "latent_dim": args.latent_dim,
+        "face_output_mode": args.face_output_mode,
     }
     print(json.dumps(summary, indent=2, sort_keys=True))
     if args.dry_run:
@@ -451,6 +462,11 @@ def main() -> int:
         heads=args.heads,
         condition_tokens=args.condition_tokens,
         edge_head_mode=args.edge_head_mode,
+        condition_backend=args.condition_backend,
+        decoder_backend=args.decoder_backend,
+        encoder_layers=args.encoder_layers,
+        latent_dim=args.latent_dim,
+        face_output_mode=args.face_output_mode,
     ).to(device)
     if args.init_checkpoint is not None:
         if not args.init_checkpoint.exists():
@@ -547,8 +563,12 @@ def main() -> int:
                 (target_weights * valid.to(target_weights.dtype)).sum(),
                 min=1.0,
             )
-            count_loss = F.cross_entropy(model.predict_face_count_logits(point_features, vertex_table), face_counts)
-            loss = token_loss + 0.05 * count_loss
+            if args.count_loss_weight > 0:
+                count_loss = F.cross_entropy(model.predict_face_count_logits(point_features, vertex_table), face_counts)
+                loss = token_loss + float(args.count_loss_weight) * count_loss
+            else:
+                count_loss = token_loss.new_tensor(0.0)
+                loss = token_loss
             seed_face_loss_active = bool(
                 args.seed_face_loss_weight > 0
                 and hasattr(model, "seed_face_logits")
