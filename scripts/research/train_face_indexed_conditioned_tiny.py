@@ -531,9 +531,11 @@ def main() -> int:
         edge_action_loss = None
         edge_choice_loss = None
         seed_face_loss = None
+        hidden_for_aux = None
         with _autocast_context(torch, device, args.precision):
             if args.corner_head == "causal" and hasattr(model, "_corner_causal_logits_from_hidden"):
                 hidden = model._hidden(point_features, vertex_table, input_faces)
+                hidden_for_aux = hidden
                 prefix = target_faces.masked_fill(target_faces.lt(0), -1)
                 logits = model._corner_causal_logits_from_hidden(hidden, prefix)
                 if args.topology_loss_weight > 0 and hasattr(model, "topology_output"):
@@ -586,7 +588,10 @@ def main() -> int:
             if topology_loss is not None:
                 loss = loss + float(args.topology_loss_weight) * topology_loss
             if args.edge_action_loss_weight > 0 and hasattr(model, "forward_edge_action"):
-                edge_logits = model.forward_edge_action(point_features, vertex_table, input_faces, target_edge_actions)
+                if hidden_for_aux is not None and hasattr(model, "_edge_action_logits_from_hidden"):
+                    edge_logits = model._edge_action_logits_from_hidden(hidden_for_aux, target_edge_actions, vertex_table)
+                else:
+                    edge_logits = model.forward_edge_action(point_features, vertex_table, input_faces, target_edge_actions)
                 edge_action_loss = F.cross_entropy(
                     edge_logits.reshape(-1, max_vertices),
                     target_edge_thirds.reshape(-1),
@@ -594,12 +599,18 @@ def main() -> int:
                 )
                 loss = loss + float(args.edge_action_loss_weight) * edge_action_loss
             if args.edge_choice_loss_weight > 0 and hasattr(model, "forward_edge_choice"):
-                edge_choice_logits = model.forward_edge_choice(
-                    point_features,
-                    vertex_table,
-                    input_faces,
-                    target_edge_choice_candidates,
-                )
+                if hidden_for_aux is not None and hasattr(model, "_edge_choice_logits_from_hidden"):
+                    edge_choice_logits = model._edge_choice_logits_from_hidden(
+                        hidden_for_aux,
+                        target_edge_choice_candidates,
+                    )
+                else:
+                    edge_choice_logits = model.forward_edge_choice(
+                        point_features,
+                        vertex_table,
+                        input_faces,
+                        target_edge_choice_candidates,
+                    )
                 invalid_edges = target_edge_choice_candidates[..., 0].lt(0)
                 edge_choice_logits = edge_choice_logits.masked_fill(invalid_edges, -1e9)
                 edge_choice_loss = F.cross_entropy(
