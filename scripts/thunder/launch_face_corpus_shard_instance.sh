@@ -124,6 +124,31 @@ raise SystemExit(1)
 PY
 }
 
+redact_create_output() {
+  CREATE_OUTPUT="$1" python3 - <<'PY'
+import json
+import os
+import re
+import sys
+
+text = os.environ.get("CREATE_OUTPUT", "")
+decoder = json.JSONDecoder()
+for match in re.finditer(r"[\[{]", text):
+    try:
+        payload, _ = decoder.raw_decode(text[match.start():])
+    except json.JSONDecodeError:
+        continue
+    items = payload if isinstance(payload, list) else [payload]
+    for item in items:
+        if isinstance(item, dict) and "key" in item:
+            item["key"] = "[redacted]"
+    json.dump(payload, sys.stdout, indent=2, sort_keys=True)
+    sys.stdout.write("\n")
+    raise SystemExit(0)
+sys.stdout.write(text)
+PY
+}
+
 if [ "$CREATE_INSTANCE" = "1" ]; then
   create_args=(create --gpu "$GPU" --mode "$MODE" --num-gpus 1 --primary-disk "$PRIMARY_DISK" --template "$TEMPLATE")
   if [ "$MODE" = "prototyping" ]; then
@@ -134,7 +159,7 @@ if [ "$CREATE_INSTANCE" = "1" ]; then
     echo "Thunder create failed." >&2
     exit 3
   }
-  printf '%s\n' "$create_output" > "$DOWNLOAD_ROOT/create.json"
+  redact_create_output "$create_output" > "$DOWNLOAD_ROOT/create.json"
   CREATED_INSTANCE=1
   if [ -z "$INSTANCE_ID" ]; then
     INSTANCE_ID="$(parse_create_id "$create_output")" || INSTANCE_ID=""
