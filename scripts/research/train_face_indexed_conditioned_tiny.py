@@ -537,7 +537,7 @@ def main() -> int:
                 hidden = model._hidden(point_features, vertex_table, input_faces)
                 hidden_for_aux = hidden
                 prefix = target_faces.masked_fill(target_faces.lt(0), -1)
-                logits = model._corner_causal_logits_from_hidden(hidden, prefix)
+                logits = model._corner_causal_logits_from_hidden(hidden, prefix, vertex_table=vertex_table)
                 if args.topology_loss_weight > 0 and hasattr(model, "topology_output"):
                     topology_loss = F.cross_entropy(
                         model.topology_output(hidden).reshape(-1, 4),
