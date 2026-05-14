@@ -31,6 +31,7 @@ from scripts.research.train_face_indexed_conditioned_tiny import (
     _edge_action_targets,
     _edge_choice_targets,
     _load_dataset,
+    _load_dataset_lazy,
 )
 from scripts.research.eval_face_indexed_conditioned_tiny import _teacher_identity_faces
 
@@ -269,6 +270,31 @@ def test_indexed_dataset_loader_reads_builder_shards(tmp_path: Path):
     assert len(samples) == 1
     assert samples[0].vertices.shape == (8, 3)
     assert samples[0].faces.shape == (12, 3)
+
+
+def test_lazy_indexed_dataset_loader_defers_full_sample_reads(tmp_path: Path):
+    mesh = trimesh.creation.box()
+    sequence = encode_mesh_to_indexed_face_tokens(mesh, num_bins=128)
+    for index in range(2):
+        np.savez_compressed(
+            tmp_path / f"sample_{index}.npz",
+            indexed_vertices=sequence.vertices.astype(np.int16),
+            indexed_faces=sequence.faces.astype(np.int32),
+            center=np.asarray(sequence.transform.center, dtype=np.float32),
+            scale=np.asarray([sequence.transform.scale], dtype=np.float32),
+            num_bins=np.asarray([sequence.num_bins], dtype=np.int32),
+            surface_points=np.zeros((8 + index, 3), dtype=np.float32),
+            surface_normals=np.tile(np.asarray([[0.0, 0.0, 1.0]], dtype=np.float32), (8 + index, 1)),
+        )
+
+    samples, num_bins = _load_dataset_lazy(tmp_path, cache_size=1)
+
+    assert num_bins == 128
+    assert len(samples) == 2
+    assert samples.max_vertices == 8
+    assert samples.max_faces == 12
+    assert samples.point_count == 8
+    assert samples[1].point_features.shape == (9, 6)
 
 
 def test_constrained_indexed_selector_avoids_nonmanifold_edge():

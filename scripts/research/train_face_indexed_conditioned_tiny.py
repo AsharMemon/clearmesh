@@ -8,9 +8,11 @@ import copy
 import json
 import random
 import sys
+from collections import OrderedDict
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 
 import numpy as np
 
@@ -33,16 +35,16 @@ class FaceIndexedSample:
 
 
 def _load_sample(path: Path) -> tuple[FaceIndexedSample, int]:
-    data = np.load(path)
-    required = {"surface_points", "surface_normals", "indexed_vertices", "indexed_faces", "num_bins"}
-    missing = sorted(required.difference(data.files))
-    if missing:
-        raise ValueError(f"{path} is missing indexed FACE arrays: {missing}")
-    points = np.asarray(data["surface_points"], dtype=np.float32)
-    normals = np.asarray(data["surface_normals"], dtype=np.float32)
-    vertices = np.asarray(data["indexed_vertices"], dtype=np.int64)
-    faces = np.asarray(data["indexed_faces"], dtype=np.int64)
-    num_bins = int(np.asarray(data["num_bins"]).reshape(-1)[0])
+    with np.load(path) as data:
+        required = {"surface_points", "surface_normals", "indexed_vertices", "indexed_faces", "num_bins"}
+        missing = sorted(required.difference(data.files))
+        if missing:
+            raise ValueError(f"{path} is missing indexed FACE arrays: {missing}")
+        points = np.asarray(data["surface_points"], dtype=np.float32)
+        normals = np.asarray(data["surface_normals"], dtype=np.float32)
+        vertices = np.asarray(data["indexed_vertices"], dtype=np.int64)
+        faces = np.asarray(data["indexed_faces"], dtype=np.int64)
+        num_bins = int(np.asarray(data["num_bins"]).reshape(-1)[0])
     if vertices.ndim != 2 or vertices.shape[1] != 3:
         raise ValueError(f"{path} has invalid indexed_vertices shape {vertices.shape}")
     if faces.ndim != 2 or faces.shape[1] != 3:
@@ -58,6 +60,70 @@ def _load_sample(path: Path) -> tuple[FaceIndexedSample, int]:
         ),
         num_bins,
     )
+
+
+def _load_sample_metadata(path: Path) -> tuple[int, int, int]:
+    """Read only the arrays needed to size the model.
+
+    The full conditioning point cloud is intentionally not loaded here. At
+    production scale, eagerly storing every point cloud can burn minutes of
+    startup and tens of GB before the first training step.
+    """
+
+    with np.load(path) as data:
+        required = {"surface_points", "surface_normals", "indexed_vertices", "indexed_faces", "num_bins"}
+        missing = sorted(required.difference(data.files))
+        if missing:
+            raise ValueError(f"{path} is missing indexed FACE arrays: {missing}")
+        vertices = np.asarray(data["indexed_vertices"], dtype=np.int64)
+        faces = np.asarray(data["indexed_faces"], dtype=np.int64)
+        num_bins = int(np.asarray(data["num_bins"]).reshape(-1)[0])
+    if vertices.ndim != 2 or vertices.shape[1] != 3:
+        raise ValueError(f"{path} has invalid indexed_vertices shape {vertices.shape}")
+    if faces.ndim != 2 or faces.shape[1] != 3:
+        raise ValueError(f"{path} has invalid indexed_faces shape {faces.shape}")
+    return num_bins, int(len(vertices)), int(len(faces))
+
+
+class LazyFaceIndexedDataset(Sequence[FaceIndexedSample]):
+    def __init__(
+        self,
+        paths: Sequence[Path],
+        *,
+        num_bins: int,
+        max_vertices: int,
+        max_faces: int,
+        point_count: int,
+        cache_size: int = 0,
+    ) -> None:
+        self.paths = list(paths)
+        self.num_bins = int(num_bins)
+        self.max_vertices = int(max_vertices)
+        self.max_faces = int(max_faces)
+        self.point_count = int(point_count)
+        self.cache_size = max(0, int(cache_size))
+        self._cache: OrderedDict[int, FaceIndexedSample] = OrderedDict()
+
+    def __len__(self) -> int:
+        return len(self.paths)
+
+    def __getitem__(self, index: int) -> FaceIndexedSample:
+        if index < 0:
+            index += len(self.paths)
+        if index < 0 or index >= len(self.paths):
+            raise IndexError(index)
+        if self.cache_size > 0 and index in self._cache:
+            sample = self._cache.pop(index)
+            self._cache[index] = sample
+            return sample
+        sample, sample_bins = _load_sample(self.paths[index])
+        if sample_bins != self.num_bins:
+            raise ValueError(f"Mixed num_bins in lazy sample {sample.path}: {sample_bins} != {self.num_bins}")
+        if self.cache_size > 0:
+            self._cache[index] = sample
+            while len(self._cache) > self.cache_size:
+                self._cache.popitem(last=False)
+        return sample
 
 
 def _load_dataset(dataset_dir: Path, limit: int = 0) -> tuple[list[FaceIndexedSample], int]:
@@ -87,6 +153,50 @@ def _load_dataset(dataset_dir: Path, limit: int = 0) -> tuple[list[FaceIndexedSa
             f"(npz_files={len(paths)}, limit={limit}).{suffix}"
         )
     return samples, num_bins
+
+
+def _load_dataset_lazy(dataset_dir: Path, limit: int = 0, cache_size: int = 0) -> tuple[LazyFaceIndexedDataset, int]:
+    paths = sorted(path for path in dataset_dir.glob("*.npz") if not path.name.startswith("._"))
+    if limit:
+        paths = paths[:limit]
+    valid_paths: list[Path] = []
+    failures: list[str] = []
+    num_bins: int | None = None
+    max_vertices = 0
+    max_faces = 0
+    for path in paths:
+        try:
+            sample_bins, vertex_count, face_count = _load_sample_metadata(path)
+        except Exception as exc:
+            if len(failures) < 8:
+                failures.append(f"{path.name}: {type(exc).__name__}: {exc}")
+            continue
+        if num_bins is None:
+            num_bins = sample_bins
+        elif num_bins != sample_bins:
+            raise ValueError(f"Mixed num_bins in dataset: {num_bins} and {sample_bins}")
+        valid_paths.append(path)
+        max_vertices = max(max_vertices, vertex_count)
+        max_faces = max(max_faces, face_count)
+    if not valid_paths or num_bins is None:
+        details = "\n".join(f"  - {failure}" for failure in failures)
+        suffix = f"\nFirst load failures:\n{details}" if details else ""
+        raise SystemExit(
+            f"No indexed FACE shards found in {dataset_dir} "
+            f"(npz_files={len(paths)}, limit={limit}).{suffix}"
+        )
+    first_sample, _ = _load_sample(valid_paths[0])
+    return (
+        LazyFaceIndexedDataset(
+            valid_paths,
+            num_bins=num_bins,
+            max_vertices=max_vertices,
+            max_faces=max_faces,
+            point_count=int(first_sample.point_features.shape[0]),
+            cache_size=cache_size,
+        ),
+        num_bins,
+    )
 
 
 def _closure_count_targets(faces: np.ndarray) -> np.ndarray:
@@ -390,6 +500,14 @@ def main() -> int:
     )
     parser.add_argument("--checkpoint-every", type=int, default=0)
     parser.add_argument("--save-current-checkpoint", action="store_true")
+    parser.add_argument("--lazy-load", action="store_true", help="Load point clouds only when sampled for a batch.")
+    parser.add_argument("--sample-cache-size", type=int, default=0, help="Lazy sample LRU cache size.")
+    parser.add_argument(
+        "--track-best-in-memory",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Keep a CPU copy of the best model state. Disable for large production runs.",
+    )
     parser.add_argument("--log-every", type=int, default=0)
     parser.add_argument("--grad-clip-norm", type=float, default=0.0)
     parser.add_argument("--corner-head", choices=["causal", "parallel"], default="parallel")
@@ -413,10 +531,20 @@ def main() -> int:
 
     random.seed(args.seed)
     np.random.seed(args.seed)
-    samples, num_bins = _load_dataset(args.dataset_dir, limit=args.limit)
-    max_vertices = max(len(sample.vertices) for sample in samples)
-    max_faces = max(len(sample.faces) for sample in samples)
-    point_count = int(samples[0].point_features.shape[0] if args.point_samples <= 0 else args.point_samples)
+    if args.lazy_load:
+        samples, num_bins = _load_dataset_lazy(
+            args.dataset_dir,
+            limit=args.limit,
+            cache_size=args.sample_cache_size,
+        )
+        max_vertices = samples.max_vertices
+        max_faces = samples.max_faces
+        point_count = int(samples.point_count if args.point_samples <= 0 else args.point_samples)
+    else:
+        samples, num_bins = _load_dataset(args.dataset_dir, limit=args.limit)
+        max_vertices = max(len(sample.vertices) for sample in samples)
+        max_faces = max(len(sample.faces) for sample in samples)
+        point_count = int(samples[0].point_features.shape[0] if args.point_samples <= 0 else args.point_samples)
     summary = {
         "samples": len(samples),
         "num_bins": num_bins,
@@ -431,8 +559,11 @@ def main() -> int:
         "encoder_layers": args.encoder_layers,
         "latent_dim": args.latent_dim,
         "face_output_mode": args.face_output_mode,
+        "lazy_load": bool(args.lazy_load),
+        "sample_cache_size": int(args.sample_cache_size),
+        "track_best_in_memory": bool(args.track_best_in_memory),
     }
-    print(json.dumps(summary, indent=2, sort_keys=True))
+    print(json.dumps(summary, indent=2, sort_keys=True), flush=True)
     if args.dry_run:
         return 0
 
@@ -468,6 +599,12 @@ def main() -> int:
         latent_dim=args.latent_dim,
         face_output_mode=args.face_output_mode,
     ).to(device)
+    param_summary = {
+        "model_parameters": int(sum(param.numel() for param in model.parameters())),
+        "trainable_parameters": int(sum(param.numel() for param in model.parameters() if param.requires_grad)),
+        "device": str(device),
+    }
+    print(json.dumps(param_summary, sort_keys=True), flush=True)
     if args.init_checkpoint is not None:
         if not args.init_checkpoint.exists():
             raise SystemExit(f"--init-checkpoint not found: {args.init_checkpoint}")
@@ -499,7 +636,11 @@ def main() -> int:
         best_step = int(checkpoint.get("best_step", 0))
         start_step = int(checkpoint.get("step", len(losses))) + 1
 
-    best_state = copy.deepcopy({key: value.detach().cpu() for key, value in model.state_dict().items()})
+    best_state = (
+        copy.deepcopy({key: value.detach().cpu() for key, value in model.state_dict().items()})
+        if args.track_best_in_memory
+        else None
+    )
     if start_step > args.steps:
         raise SystemExit(f"resume checkpoint step {start_step - 1} is already >= requested --steps {args.steps}")
     log_every = int(args.log_every or max(1, args.steps // 5))
@@ -629,7 +770,8 @@ def main() -> int:
         if losses[-1] < best_loss:
             best_loss = losses[-1]
             best_step = step
-            best_state = copy.deepcopy({key: value.detach().cpu() for key, value in model.state_dict().items()})
+            if args.track_best_in_memory:
+                best_state = copy.deepcopy({key: value.detach().cpu() for key, value in model.state_dict().items()})
         if args.checkpoint_every and step % int(args.checkpoint_every) == 0:
             payload = _checkpoint_payload(
                 args=args,
@@ -663,14 +805,19 @@ def main() -> int:
             if seed_face_loss is not None:
                 log_item["seed_face_loss"] = float(seed_face_loss.detach().cpu())
                 log_item["seed_face_loss_active"] = bool(seed_face_loss_active)
-            print(json.dumps(log_item))
+            print(json.dumps(log_item), flush=True)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    final_state = (
+        best_state
+        if best_state is not None
+        else {key: value.detach().cpu() for key, value in model.state_dict().items()}
+    )
     _save_checkpoint(
         args.output,
         _checkpoint_payload(
             args=args,
-            model_state=best_state,
+            model_state=final_state,
             optimizer_state=optimizer.state_dict(),
             losses=losses,
             num_bins=num_bins,
@@ -682,7 +829,18 @@ def main() -> int:
         ),
         torch,
     )
-    print(json.dumps({"checkpoint": str(args.output), "final_loss": losses[-1], "best_loss": best_loss, "best_step": best_step, "device": str(device)}))
+    print(
+        json.dumps(
+            {
+                "checkpoint": str(args.output),
+                "final_loss": losses[-1],
+                "best_loss": best_loss,
+                "best_step": best_step,
+                "device": str(device),
+            }
+        ),
+        flush=True,
+    )
     return 0
 
 
