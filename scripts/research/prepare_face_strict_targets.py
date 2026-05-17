@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Convert proxy meshes into strict FACE training targets.
+"""Convert proxy meshes into FACE training targets.
 
 This is the target-side counterpart to `prepare_face_fixture_meshes.py`.
-Fragments can be useful conditioning diagnostics, but FACE supervision should be
-closed and topology-legal. This script runs the existing coarse/reference
-adapter, exports accepted target meshes, and writes a strict gate report.
+Fragments can be useful conditioning diagnostics, but FACE supervision usually
+needs a bounded, topology-aware target mesh. This script runs the existing
+coarse/reference adapter, exports accepted target meshes, and writes the target
+gate report. By default it preserves the historical strict/watertight policy;
+callers can opt into a paper-matching high-volume lane by relaxing the
+watertight/boundary/nonmanifold thresholds explicitly.
 """
 
 from __future__ import annotations
@@ -83,6 +86,30 @@ def main() -> int:
     parser.add_argument("--mesh-voxel-max-faces", type=int, default=75_000)
     parser.add_argument("--poisson-depth", type=int, default=8)
     parser.add_argument("--fallback", choices=["convex_hull", "cleanup", ""], default="convex_hull")
+    parser.add_argument(
+        "--max-output-components",
+        type=int,
+        default=1,
+        help="Reject adapted targets with more than this many connected components.",
+    )
+    parser.add_argument(
+        "--max-boundary-loops",
+        type=int,
+        default=0,
+        help="Reject adapted targets with more than this many boundary loops.",
+    )
+    parser.add_argument(
+        "--max-nonmanifold-edges",
+        type=int,
+        default=0,
+        help="Reject adapted targets with more than this many non-manifold edges.",
+    )
+    parser.add_argument(
+        "--require-watertight",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Require adapted targets to be watertight. Use --no-require-watertight for paper-matching high-volume lanes.",
+    )
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--progress-every", type=int, default=25, help="Print JSON progress every N candidates. Use 0 to disable.")
     args = parser.parse_args()
@@ -99,10 +126,10 @@ def main() -> int:
         target_faces=args.target_faces,
         max_target_face_ratio=args.max_target_face_ratio,
         sample_points=args.sample_points,
-        max_output_components=1,
-        max_boundary_loops=0,
-        max_nonmanifold_edges=0,
-        require_watertight=True,
+        max_output_components=args.max_output_components,
+        max_boundary_loops=args.max_boundary_loops,
+        max_nonmanifold_edges=args.max_nonmanifold_edges,
+        require_watertight=args.require_watertight,
         voxel_resolution=args.voxel_resolution,
         voxel_dilate=args.voxel_dilate,
         voxel_close=args.voxel_close,

@@ -43,11 +43,18 @@ VOXEL_RESOLUTION="${VOXEL_RESOLUTION:-64}"
 MESH_VOXEL_MAX_FACES="${MESH_VOXEL_MAX_FACES:-5000}"
 FALLBACK="${FALLBACK:-convex_hull}"
 STRICT_TARGET_PROGRESS_EVERY="${STRICT_TARGET_PROGRESS_EVERY:-25}"
+TARGET_MAX_OUTPUT_COMPONENTS="${TARGET_MAX_OUTPUT_COMPONENTS:-1}"
+TARGET_MAX_BOUNDARY_LOOPS="${TARGET_MAX_BOUNDARY_LOOPS:-0}"
+TARGET_MAX_NONMANIFOLD_EDGES="${TARGET_MAX_NONMANIFOLD_EDGES:-0}"
+TARGET_REQUIRE_WATERTIGHT="${TARGET_REQUIRE_WATERTIGHT:-1}"
 TOKEN_MAX_FACES="${TOKEN_MAX_FACES:-1024}"
 POINT_SAMPLES="${POINT_SAMPLES:-8192}"
 NUM_BINS="${NUM_BINS:-512}"
 PAPER_WITHIN_FACE_ORDER="${PAPER_WITHIN_FACE_ORDER:-rotate_min_zyx}"
 GATE_PROFILE="${GATE_PROFILE:-strict}"
+GATE_MAX_BOUNDARY_EDGES="${GATE_MAX_BOUNDARY_EDGES:-}"
+GATE_MAX_NONMANIFOLD_EDGES="${GATE_MAX_NONMANIFOLD_EDGES:-}"
+GATE_MIN_EDGE_PAIRING_RATIO="${GATE_MIN_EDGE_PAIRING_RATIO:-}"
 TOKEN_FAMILY="${TOKEN_FAMILY:-paper}"
 FAIL_ON_GATE="${FAIL_ON_GATE:-0}"
 PROMOTE_PASSING="${PROMOTE_PASSING:-1}"
@@ -134,6 +141,17 @@ python scripts/data/build_face_training_corpus.py \
   --progress-every 10 \
   "${CURATION_ARGS[@]}"
 
+TARGET_ARGS=(
+  --max-output-components "$TARGET_MAX_OUTPUT_COMPONENTS"
+  --max-boundary-loops "$TARGET_MAX_BOUNDARY_LOOPS"
+  --max-nonmanifold-edges "$TARGET_MAX_NONMANIFOLD_EDGES"
+)
+if [ "$TARGET_REQUIRE_WATERTIGHT" = "1" ]; then
+  TARGET_ARGS+=(--require-watertight)
+else
+  TARGET_ARGS+=(--no-require-watertight)
+fi
+
 python scripts/research/prepare_face_strict_targets.py \
   --manifest "$RUN_DIR/curated_candidates.jsonl" \
   --output-dir "$RUN_DIR/strict_targets" \
@@ -144,7 +162,8 @@ python scripts/research/prepare_face_strict_targets.py \
   --voxel-resolution "$VOXEL_RESOLUTION" \
   --mesh-voxel-max-faces "$MESH_VOXEL_MAX_FACES" \
   --fallback "$FALLBACK" \
-  --progress-every "$STRICT_TARGET_PROGRESS_EVERY"
+  --progress-every "$STRICT_TARGET_PROGRESS_EVERY" \
+  "${TARGET_ARGS[@]}"
 
 python scripts/research/build_face_token_dataset.py \
   --manifest "$RUN_DIR/strict_targets/strict_target_manifest.json" \
@@ -158,12 +177,23 @@ GATE_ARGS=()
 if [ "$FAIL_ON_GATE" = "1" ]; then
   GATE_ARGS+=(--fail-on-violations)
 fi
+GATE_THRESHOLD_ARGS=()
+if [ -n "$GATE_MAX_BOUNDARY_EDGES" ]; then
+  GATE_THRESHOLD_ARGS+=(--max-boundary-edges "$GATE_MAX_BOUNDARY_EDGES")
+fi
+if [ -n "$GATE_MAX_NONMANIFOLD_EDGES" ]; then
+  GATE_THRESHOLD_ARGS+=(--max-nonmanifold-edges "$GATE_MAX_NONMANIFOLD_EDGES")
+fi
+if [ -n "$GATE_MIN_EDGE_PAIRING_RATIO" ]; then
+  GATE_THRESHOLD_ARGS+=(--min-edge-pairing-ratio "$GATE_MIN_EDGE_PAIRING_RATIO")
+fi
 
 python scripts/research/check_face_dataset_targets.py \
   --manifest "$RUN_DIR/tokens/manifest.jsonl" \
   --profile "$GATE_PROFILE" \
   --token-family "$TOKEN_FAMILY" \
   --output "$RUN_DIR/strict_gate.json" \
+  "${GATE_THRESHOLD_ARGS[@]}" \
   "${GATE_ARGS[@]}"
 
 if [ "$PROMOTE_PASSING" = "1" ]; then
@@ -189,6 +219,7 @@ if [ "$SPLIT_PASSING" = "1" ] && [ -f "$RUN_DIR/tokens_pass/manifest.jsonl" ]; t
       --profile "$GATE_PROFILE" \
       --token-family "$TOKEN_FAMILY" \
       --output "$RUN_DIR/train_strict_gate.json" \
+      "${GATE_THRESHOLD_ARGS[@]}" \
       --fail-on-violations
 
     python scripts/research/check_face_dataset_targets.py \
@@ -196,6 +227,7 @@ if [ "$SPLIT_PASSING" = "1" ] && [ -f "$RUN_DIR/tokens_pass/manifest.jsonl" ]; t
       --profile "$GATE_PROFILE" \
       --token-family "$TOKEN_FAMILY" \
       --output "$RUN_DIR/test_strict_gate.json" \
+      "${GATE_THRESHOLD_ARGS[@]}" \
       --fail-on-violations
   else
     echo "Skipping local train/test split: passing_count=$passing_count < 2. Valid tokens_pass will still be packaged for global merge."
@@ -242,6 +274,14 @@ summary = {
         "fallback": "$FALLBACK",
         "voxel_resolution": int("$VOXEL_RESOLUTION"),
         "mesh_voxel_max_faces": int("$MESH_VOXEL_MAX_FACES"),
+        "target_max_output_components": int("$TARGET_MAX_OUTPUT_COMPONENTS"),
+        "target_max_boundary_loops": int("$TARGET_MAX_BOUNDARY_LOOPS"),
+        "target_max_nonmanifold_edges": int("$TARGET_MAX_NONMANIFOLD_EDGES"),
+        "target_require_watertight": "$TARGET_REQUIRE_WATERTIGHT" == "1",
+        "gate_profile": "$GATE_PROFILE",
+        "gate_max_boundary_edges": int("$GATE_MAX_BOUNDARY_EDGES") if "$GATE_MAX_BOUNDARY_EDGES" else None,
+        "gate_max_nonmanifold_edges": int("$GATE_MAX_NONMANIFOLD_EDGES") if "$GATE_MAX_NONMANIFOLD_EDGES" else None,
+        "gate_min_edge_pairing_ratio": float("$GATE_MIN_EDGE_PAIRING_RATIO") if "$GATE_MIN_EDGE_PAIRING_RATIO" else None,
         "max_file_mb": int("$MAX_FILE_MB"),
         "max_components": int("$MAX_COMPONENTS"),
         "num_bins": int("$NUM_BINS"),

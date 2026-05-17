@@ -278,6 +278,8 @@ if [[ "$SYNC_QUEUE_FILES" = "1" ]]; then
   "$TNR_BIN" scp "$REPO_ROOT/scripts/thunder/face_objaversepp_corpus_pilot.sh" "$INSTANCE_ID:$REMOTE_REPO/scripts/thunder/face_objaversepp_corpus_pilot.sh"
   "$TNR_BIN" scp "$REPO_ROOT/scripts/thunder/b2_continuous_upload.sh" "$INSTANCE_ID:$REMOTE_REPO/scripts/thunder/b2_continuous_upload.sh"
   "$TNR_BIN" scp "$REPO_ROOT/scripts/data/download_texverse_face_candidates.py" "$INSTANCE_ID:$REMOTE_REPO/scripts/data/download_texverse_face_candidates.py"
+  "$TNR_BIN" scp "$REPO_ROOT/scripts/research/prepare_face_strict_targets.py" "$INSTANCE_ID:$REMOTE_REPO/scripts/research/prepare_face_strict_targets.py"
+  "$TNR_BIN" scp "$REPO_ROOT/scripts/research/check_face_dataset_targets.py" "$INSTANCE_ID:$REMOTE_REPO/scripts/research/check_face_dataset_targets.py"
 fi
 
 printf 'mkdir -p %q %q\nexit\n' "$REMOTE_QUEUE_SOURCE_DIR" "$REMOTE_QUEUE_LOG_ROOT" | "$TNR_BIN" connect "$INSTANCE_ID"
@@ -367,6 +369,14 @@ nohup env \\
   VOXEL_RESOLUTION=$(printf '%q' "${VOXEL_RESOLUTION:-64}") \\
   MESH_VOXEL_MAX_FACES=$(printf '%q' "${MESH_VOXEL_MAX_FACES:-5000}") \\
   STRICT_TARGET_PROGRESS_EVERY=$(printf '%q' "${STRICT_TARGET_PROGRESS_EVERY:-100}") \\
+  TARGET_MAX_OUTPUT_COMPONENTS=$(printf '%q' "${TARGET_MAX_OUTPUT_COMPONENTS:-1}") \\
+  TARGET_MAX_BOUNDARY_LOOPS=$(printf '%q' "${TARGET_MAX_BOUNDARY_LOOPS:-0}") \\
+  TARGET_MAX_NONMANIFOLD_EDGES=$(printf '%q' "${TARGET_MAX_NONMANIFOLD_EDGES:-0}") \\
+  TARGET_REQUIRE_WATERTIGHT=$(printf '%q' "${TARGET_REQUIRE_WATERTIGHT:-1}") \\
+  GATE_PROFILE=$(printf '%q' "${GATE_PROFILE:-strict}") \\
+  GATE_MAX_BOUNDARY_EDGES=$(printf '%q' "${GATE_MAX_BOUNDARY_EDGES:-}") \\
+  GATE_MAX_NONMANIFOLD_EDGES=$(printf '%q' "${GATE_MAX_NONMANIFOLD_EDGES:-}") \\
+  GATE_MIN_EDGE_PAIRING_RATIO=$(printf '%q' "${GATE_MIN_EDGE_PAIRING_RATIO:-}") \\
   TEST_RATIO=$(printf '%q' "${TEST_RATIO:-0.02}") \\
   bash scripts/thunder/face_corpus_shard_queue_worker.sh > $(printf '%q' "$REMOTE_QUEUE_LOG") 2>&1 &
 echo \$! > $(printf '%q' "$REMOTE_QUEUE_PID")
@@ -404,7 +414,15 @@ cat > "$setup_dir/queue_info.json" <<JSON
   "max_file_mb": ${MAX_FILE_MB:-256},
   "max_components": ${MAX_COMPONENTS:-48},
   "target_faces": ${TARGET_FACES:-512},
-  "token_max_faces": ${TOKEN_MAX_FACES:-512}
+  "token_max_faces": ${TOKEN_MAX_FACES:-512},
+  "target_max_output_components": ${TARGET_MAX_OUTPUT_COMPONENTS:-1},
+  "target_max_boundary_loops": ${TARGET_MAX_BOUNDARY_LOOPS:-0},
+  "target_max_nonmanifold_edges": ${TARGET_MAX_NONMANIFOLD_EDGES:-0},
+  "target_require_watertight": "${TARGET_REQUIRE_WATERTIGHT:-1}",
+  "gate_profile": "${GATE_PROFILE:-strict}",
+  "gate_max_boundary_edges": "${GATE_MAX_BOUNDARY_EDGES:-}",
+  "gate_max_nonmanifold_edges": "${GATE_MAX_NONMANIFOLD_EDGES:-}",
+  "gate_min_edge_pairing_ratio": "${GATE_MIN_EDGE_PAIRING_RATIO:-}"
 }
 JSON
 
