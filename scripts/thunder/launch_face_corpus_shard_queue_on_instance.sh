@@ -130,6 +130,40 @@ sys.stdout.write(text)
 PY
 }
 
+run_remote_script_with_marker() {
+  local instance_id="$1"
+  local script_file="$2"
+  local log_file="$3"
+  local marker="$4"
+  local timeout_sec="${5:-1800}"
+  local payload remote_cmd pid deadline
+  payload="$(base64 < "$script_file" | tr -d '\n')"
+  remote_cmd="printf %s '$payload' | base64 -d >/tmp/clearmesh_queue_payload.sh && bash /tmp/clearmesh_queue_payload.sh"
+  (
+    printf 'bash -lc %q\nexit\n' "$remote_cmd" | "$TNR_BIN" connect "$instance_id" > "$log_file" 2>&1
+  ) &
+  pid=$!
+  deadline=$(( $(date +%s) + timeout_sec ))
+  while [[ "$(date +%s)" -lt "$deadline" ]]; do
+    if grep -q "$marker" "$log_file" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      return 0
+    fi
+    if ! kill -0 "$pid" 2>/dev/null; then
+      break
+    fi
+    sleep 2
+  done
+  kill "$pid" 2>/dev/null || true
+  sleep 1
+  kill -9 "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  echo "Remote script did not report marker '$marker' within ${timeout_sec}s." >&2
+  tail -80 "$log_file" >&2 || true
+  return 23
+}
+
 if [[ "$CREATE_INSTANCE" = "1" ]]; then
   create_args=(create --gpu "$GPU" --mode "$MODE" --num-gpus 1 --primary-disk "$PRIMARY_DISK" --template "$TEMPLATE")
   if [[ "$EPHEMERAL_DISK" != "0" ]]; then
@@ -202,7 +236,8 @@ if [[ "$BOOTSTRAP_REMOTE" = "1" ]]; then
     fi
   fi
   bootstrap_log="$setup_dir/bootstrap_remote.log"
-  cat <<REMOTE_BOOTSTRAP | "$TNR_BIN" connect "$INSTANCE_ID" 2>&1 | tee "$bootstrap_log"
+  bootstrap_script="$setup_dir/bootstrap_remote.sh"
+  cat > "$bootstrap_script" <<REMOTE_BOOTSTRAP
 set -euo pipefail
 cd $(printf '%q' "$REMOTE_REPO")
 if [ ! -x $(printf '%q' "$REMOTE_VENV/bin/python") ]; then
@@ -225,8 +260,9 @@ import trimesh  # noqa: F401
 print('face_corpus_queue_python_deps_ok')
 PY
 rclone version | head -n 1
-exit
+echo __FACE_CORPUS_QUEUE_BOOTSTRAP_DONE__
 REMOTE_BOOTSTRAP
+  run_remote_script_with_marker "$INSTANCE_ID" "$bootstrap_script" "$bootstrap_log" "__FACE_CORPUS_QUEUE_BOOTSTRAP_DONE__" "${BOOTSTRAP_TIMEOUT_SEC:-1800}"
 fi
 
 if [[ "$SYNC_QUEUE_FILES" = "1" ]]; then
@@ -276,6 +312,7 @@ nohup env \\
   QUEUE_SOURCE_DIR=$(printf '%q' "$REMOTE_QUEUE_SOURCE_DIR") \\
   QUEUE_LOG_ROOT=$(printf '%q' "$REMOTE_QUEUE_LOG_ROOT") \\
   REMOTE_VENV=$(printf '%q' "$REMOTE_VENV") \\
+  HF_ENV_FILE=$(printf '%q' "${HF_ENV_FILE:-/home/ubuntu/.clearmesh_hf.env}") \\
   RUN_STAMP_PREFIX=$(printf '%q' "$RUN_STAMP_PREFIX") \\
   SOURCE_KIND=$(printf '%q' "$SOURCE_KIND") \\
   LAB_ROOT_PREFIX=$(printf '%q' "$LAB_ROOT_PREFIX") \\

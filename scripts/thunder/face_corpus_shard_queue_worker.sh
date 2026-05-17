@@ -16,6 +16,7 @@ QUEUE_STATUS="${QUEUE_STATUS:-$QUEUE_LOG_ROOT/status.jsonl}"
 CONTINUE_ON_FAILURE="${CONTINUE_ON_FAILURE:-0}"
 CLEANUP_FAILED_ROOT_ON_FAILURE="${CLEANUP_FAILED_ROOT_ON_FAILURE:-0}"
 REMOTE_VENV="${REMOTE_VENV:-/home/ubuntu/clearmesh-data-venv}"
+HF_ENV_FILE="${HF_ENV_FILE:-/home/ubuntu/.clearmesh_hf.env}"
 
 WAIT_FOR_PID_FILE="${WAIT_FOR_PID_FILE:-}"
 WAIT_POLL_SECONDS="${WAIT_POLL_SECONDS:-60}"
@@ -68,6 +69,12 @@ if [[ -x "$REMOTE_VENV/bin/python" ]]; then
 else
   echo "Missing FACE corpus venv at $REMOTE_VENV" >&2
   exit 12
+fi
+if [[ -f "$HF_ENV_FILE" ]]; then
+  # Hugging Face Pro limits only help if the long-lived queue worker exports
+  # the token before spawning shard download jobs.
+  # shellcheck disable=SC1090
+  source "$HF_ENV_FILE"
 fi
 
 log_event() {
