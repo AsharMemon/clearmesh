@@ -80,8 +80,9 @@ def main() -> int:
     split = data_run / "split_pass"
     train_manifest = split / "train" / "manifest.jsonl"
     test_manifest = split / "test" / "manifest.jsonl"
-    if not train_manifest.exists() or not test_manifest.exists():
-        raise SystemExit(f"expected split manifests under {split}")
+    tokens_pass_manifest = data_run / "tokens_pass" / "manifest.jsonl"
+    if not tokens_pass_manifest.exists():
+        raise SystemExit(f"expected strict passing token manifest at {tokens_pass_manifest}")
 
     archive_root = args.archive_root or data_run.name
     include_paths = list(DEFAULT_INCLUDE_PATHS)
@@ -105,6 +106,8 @@ def main() -> int:
         "include_raw": bool(args.include_raw),
         "train_count": _count_jsonl(train_manifest),
         "test_count": _count_jsonl(test_manifest),
+        "tokens_pass_count": _count_jsonl(tokens_pass_manifest),
+        "has_split_pass": train_manifest.exists() and test_manifest.exists(),
         "strict_gate": {
             "sample_count": gate.get("sample_count"),
             "passing": gate.get("passing"),

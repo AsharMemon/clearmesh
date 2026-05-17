@@ -328,6 +328,8 @@ nohup env \\
   PREQUEUE_B2_UPLOAD_PID_FILE=$(printf '%q' "$PREQUEUE_B2_UPLOAD_PID_FILE") \\
   CONTINUE_ON_FAILURE=$(printf '%q' "$CONTINUE_ON_FAILURE") \\
   CLEANUP_FAILED_ROOT_ON_FAILURE=$(printf '%q' "${CLEANUP_FAILED_ROOT_ON_FAILURE:-0}") \\
+  DATA_LANE=$(printf '%q' "${DATA_LANE:-unspecified}") \\
+  SOURCE_POOL_NAME=$(printf '%q' "${SOURCE_POOL_NAME:-}") \\
   SELECT_TARGET=$(printf '%q' "${SELECT_TARGET:-auto}") \\
   CURATION_TARGET=$(printf '%q' "${CURATION_TARGET:-auto}") \\
   SCAN_LIMIT=$(printf '%q' "${SCAN_LIMIT:-0}") \\
@@ -344,6 +346,9 @@ nohup env \\
   TEXVERSE_CLEANUP_CACHE_EACH=$(printf '%q' "${TEXVERSE_CLEANUP_CACHE_EACH:-0}") \\
   SOURCE_MIN_FACES=$(printf '%q' "${SOURCE_MIN_FACES:-64}") \\
   SOURCE_MAX_FACES=$(printf '%q' "${SOURCE_MAX_FACES:-250000}") \\
+  MAX_FILE_MB=$(printf '%q' "${MAX_FILE_MB:-256}") \\
+  MAX_COMPONENTS=$(printf '%q' "${MAX_COMPONENTS:-48}") \\
+  MIN_LARGEST_COMPONENT_AREA_RATIO=$(printf '%q' "${MIN_LARGEST_COMPONENT_AREA_RATIO:-0.60}") \\
   TARGET_FACES=$(printf '%q' "${TARGET_FACES:-512}") \\
   TOKEN_MAX_FACES=$(printf '%q' "${TOKEN_MAX_FACES:-512}") \\
   POINT_SAMPLES=$(printf '%q' "${POINT_SAMPLES:-8192}") \\
@@ -372,6 +377,8 @@ cat > "$setup_dir/queue_info.json" <<JSON
   "remote_queue_pid": "$REMOTE_QUEUE_PID",
   "remote_venv": "$REMOTE_VENV",
   "run_stamp_prefix": "$RUN_STAMP_PREFIX",
+  "data_lane": "${DATA_LANE:-unspecified}",
+  "source_pool_name": "${SOURCE_POOL_NAME:-}",
   "source_kind": "$SOURCE_KIND",
   "lab_root_prefix": "$LAB_ROOT_PREFIX",
   "start_b2_upload": "$START_B2_UPLOAD",
@@ -386,6 +393,8 @@ cat > "$setup_dir/queue_info.json" <<JSON
   "texverse_cleanup_cache_each": "${TEXVERSE_CLEANUP_CACHE_EACH:-0}",
   "source_min_faces": ${SOURCE_MIN_FACES:-64},
   "source_max_faces": ${SOURCE_MAX_FACES:-250000},
+  "max_file_mb": ${MAX_FILE_MB:-256},
+  "max_components": ${MAX_COMPONENTS:-48},
   "target_faces": ${TARGET_FACES:-512},
   "token_max_faces": ${TOKEN_MAX_FACES:-512}
 }

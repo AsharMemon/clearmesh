@@ -12,6 +12,9 @@ SCAN_LIMIT="${SCAN_LIMIT:-10000}"
 MIN_QUALITY="${MIN_QUALITY:-2}"
 OVERSAMPLE_FACTOR="${OVERSAMPLE_FACTOR:-4}"
 SEED="${SEED:-23}"
+DATA_LANE="${DATA_LANE:-unspecified}"
+SOURCE_POOL_NAME="${SOURCE_POOL_NAME:-}"
+SOURCE_SHARD_ID="${SOURCE_SHARD_ID:-}"
 SHUFFLE="${SHUFFLE:-1}"
 DOWNLOAD_PROCESSES="${DOWNLOAD_PROCESSES:-8}"
 DOWNLOAD_FALLBACK_PROCESSES="${DOWNLOAD_FALLBACK_PROCESSES:-1}"
@@ -171,27 +174,32 @@ if [ "$PROMOTE_PASSING" = "1" ]; then
 fi
 
 if [ "$SPLIT_PASSING" = "1" ] && [ -f "$RUN_DIR/tokens_pass/manifest.jsonl" ]; then
-  python scripts/research/split_face_token_dataset.py \
-    --dataset-dir "$RUN_DIR/tokens_pass" \
-    --output-dir "$RUN_DIR/split_pass" \
-    --test-ratio "$TEST_RATIO" \
-    --test-count "$TEST_COUNT" \
-    --seed "$SEED" \
-    --shuffle
+  passing_count="$(grep -cve '^[[:space:]]*$' "$RUN_DIR/tokens_pass/manifest.jsonl" || true)"
+  if [ "$passing_count" -ge 2 ]; then
+    python scripts/research/split_face_token_dataset.py \
+      --dataset-dir "$RUN_DIR/tokens_pass" \
+      --output-dir "$RUN_DIR/split_pass" \
+      --test-ratio "$TEST_RATIO" \
+      --test-count "$TEST_COUNT" \
+      --seed "$SEED" \
+      --shuffle
 
-  python scripts/research/check_face_dataset_targets.py \
-    --manifest "$RUN_DIR/split_pass/train/manifest.jsonl" \
-    --profile "$GATE_PROFILE" \
-    --token-family "$TOKEN_FAMILY" \
-    --output "$RUN_DIR/train_strict_gate.json" \
-    --fail-on-violations
+    python scripts/research/check_face_dataset_targets.py \
+      --manifest "$RUN_DIR/split_pass/train/manifest.jsonl" \
+      --profile "$GATE_PROFILE" \
+      --token-family "$TOKEN_FAMILY" \
+      --output "$RUN_DIR/train_strict_gate.json" \
+      --fail-on-violations
 
-  python scripts/research/check_face_dataset_targets.py \
-    --manifest "$RUN_DIR/split_pass/test/manifest.jsonl" \
-    --profile "$GATE_PROFILE" \
-    --token-family "$TOKEN_FAMILY" \
-    --output "$RUN_DIR/test_strict_gate.json" \
-    --fail-on-violations
+    python scripts/research/check_face_dataset_targets.py \
+      --manifest "$RUN_DIR/split_pass/test/manifest.jsonl" \
+      --profile "$GATE_PROFILE" \
+      --token-family "$TOKEN_FAMILY" \
+      --output "$RUN_DIR/test_strict_gate.json" \
+      --fail-on-violations
+  else
+    echo "Skipping local train/test split: passing_count=$passing_count < 2. Valid tokens_pass will still be packaged for global merge."
+  fi
 fi
 
 python - <<PY
@@ -220,10 +228,22 @@ summary = {
     "train_gate": read_json(run / "train_strict_gate.json"),
     "test_gate": read_json(run / "test_strict_gate.json"),
     "settings": {
+        "data_lane": "$DATA_LANE",
+        "source_pool_name": "$SOURCE_POOL_NAME",
+        "source_shard_id": "$SOURCE_SHARD_ID",
         "source_kind": "$SOURCE_KIND",
         "select_target": int("$SELECT_TARGET"),
         "scan_limit": int("$SCAN_LIMIT"),
+        "source_min_faces": int("$SOURCE_MIN_FACES"),
+        "source_max_faces": int("$SOURCE_MAX_FACES"),
         "target_faces": int("$TARGET_FACES"),
+        "token_max_faces": int("$TOKEN_MAX_FACES"),
+        "strict_engine": "$STRICT_ENGINE",
+        "fallback": "$FALLBACK",
+        "voxel_resolution": int("$VOXEL_RESOLUTION"),
+        "mesh_voxel_max_faces": int("$MESH_VOXEL_MAX_FACES"),
+        "max_file_mb": int("$MAX_FILE_MB"),
+        "max_components": int("$MAX_COMPONENTS"),
         "num_bins": int("$NUM_BINS"),
         "point_samples": int("$POINT_SAMPLES"),
         "paper_within_face_order": "$PAPER_WITHIN_FACE_ORDER",
