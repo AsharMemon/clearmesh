@@ -28,6 +28,8 @@ SKIP_MESH_REPORT="${SKIP_MESH_REPORT:-1}"
 MAX_FILE_MB="${MAX_FILE_MB:-256}"
 MAX_COMPONENTS="${MAX_COMPONENTS:-48}"
 MIN_LARGEST_COMPONENT_AREA_RATIO="${MIN_LARGEST_COMPONENT_AREA_RATIO:-0.60}"
+SOURCE_MIN_FACES="${SOURCE_MIN_FACES:-64}"
+SOURCE_MAX_FACES="${SOURCE_MAX_FACES:-250000}"
 STRICT_ENGINE="${STRICT_ENGINE:-voxel_shell}"
 TARGET_FACES="${TARGET_FACES:-512}"
 MAX_TARGET_FACE_RATIO="${MAX_TARGET_FACE_RATIO:-1.25}"
@@ -111,6 +113,8 @@ python scripts/data/build_face_training_corpus.py \
   --rejects-output "$RUN_DIR/curated_rejects.json" \
   --target "$CURATION_TARGET" \
   --min-quality "$MIN_QUALITY" \
+  --min-faces "$SOURCE_MIN_FACES" \
+  --max-faces "$SOURCE_MAX_FACES" \
   --max-components "$MAX_COMPONENTS" \
   --min-largest-component-area-ratio "$MIN_LARGEST_COMPONENT_AREA_RATIO" \
   --max-file-mb "$MAX_FILE_MB" \

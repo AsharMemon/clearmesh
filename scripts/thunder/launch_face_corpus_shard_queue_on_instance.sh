@@ -340,6 +340,8 @@ nohup env \\
   DOWNLOAD_RETRY_SLEEP_SECONDS=$(printf '%q' "${DOWNLOAD_RETRY_SLEEP_SECONDS:-15}") \\
   DOWNLOAD_RATE_LIMIT_SLEEP_SECONDS=$(printf '%q' "${DOWNLOAD_RATE_LIMIT_SLEEP_SECONDS:-600}") \\
   TEXVERSE_DOWNLOAD_WORKERS=$(printf '%q' "${TEXVERSE_DOWNLOAD_WORKERS:-${DOWNLOAD_PROCESSES:-16}}") \\
+  SOURCE_MIN_FACES=$(printf '%q' "${SOURCE_MIN_FACES:-64}") \\
+  SOURCE_MAX_FACES=$(printf '%q' "${SOURCE_MAX_FACES:-250000}") \\
   TARGET_FACES=$(printf '%q' "${TARGET_FACES:-512}") \\
   TOKEN_MAX_FACES=$(printf '%q' "${TOKEN_MAX_FACES:-512}") \\
   POINT_SAMPLES=$(printf '%q' "${POINT_SAMPLES:-8192}") \\
@@ -377,6 +379,8 @@ cat > "$setup_dir/queue_info.json" <<JSON
   "wait_for_pid_file": "$WAIT_FOR_PID_FILE",
   "prequeue_completed_root": "$PREQUEUE_COMPLETED_ROOT",
   "prequeue_b2_prefix": "$PREQUEUE_B2_PREFIX",
+  "source_min_faces": ${SOURCE_MIN_FACES:-64},
+  "source_max_faces": ${SOURCE_MAX_FACES:-250000},
   "target_faces": ${TARGET_FACES:-512},
   "token_max_faces": ${TOKEN_MAX_FACES:-512}
 }
