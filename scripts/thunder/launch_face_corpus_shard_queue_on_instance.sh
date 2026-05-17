@@ -18,6 +18,7 @@ EPHEMERAL_DISK="${EPHEMERAL_DISK:-0}"
 TEMPLATE="${TEMPLATE:-base}"
 WAIT_INTERVAL_SEC="${WAIT_INTERVAL_SEC:-10}"
 WAIT_TIMEOUT_SEC="${WAIT_TIMEOUT_SEC:-1800}"
+WAIT_FOR_RUNNING="${WAIT_FOR_RUNNING:-$CREATE_INSTANCE}"
 BOOTSTRAP_REMOTE="${BOOTSTRAP_REMOTE:-0}"
 SYNC_HF_TOKEN="${SYNC_HF_TOKEN:-1}"
 QUEUE_SHARD_IDS="${QUEUE_SHARD_IDS:?QUEUE_SHARD_IDS is required, e.g. '0033 0038 0043'}"
@@ -81,7 +82,14 @@ cleanup_instance() {
     "$TNR_BIN" delete "$INSTANCE_ID" --yes || true
   fi
 }
-trap cleanup_instance EXIT INT TERM HUP
+# Detached queue launchers are often started under nohup/setsid and may need to
+# survive the local Codex shell closing while a Thunder instance is still queued.
+# Do not trap SIGHUP by default, or nohup cannot do its job.
+if [[ "${TRAP_HUP:-0}" = "1" ]]; then
+  trap cleanup_instance EXIT INT TERM HUP
+else
+  trap cleanup_instance EXIT INT TERM
+fi
 
 parse_create_id() {
   CREATE_OUTPUT="$1" python3 - <<'PY'
@@ -192,7 +200,7 @@ fi
 setup_dir="$REPO_ROOT/.codex_outputs/face_corpus_queue_setup/instance_${INSTANCE_ID}_${RUN_STAMP_PREFIX}"
 mkdir -p "$setup_dir"
 
-if [[ "$CREATE_INSTANCE" = "1" ]]; then
+if [[ "$WAIT_FOR_RUNNING" = "1" ]]; then
   echo "Waiting for Thunder instance $INSTANCE_ID to RUNNING..."
   running_seen=0
   wait_deadline=$(( $(date +%s) + WAIT_TIMEOUT_SEC ))
