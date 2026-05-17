@@ -73,6 +73,7 @@ B2_UPLOAD_INTERVAL_SECONDS="${B2_UPLOAD_INTERVAL_SECONDS:-600}"
 B2_UPLOAD_PID="${B2_UPLOAD_PID:-$REMOTE_LAB_ROOT/b2_upload.pid}"
 B2_UPLOAD_LOG="${B2_UPLOAD_LOG:-$REMOTE_LAB_ROOT/b2_upload.log}"
 REMOTE_B2_ENV="${REMOTE_B2_ENV:-$REMOTE_LAB_ROOT/.clearmesh_b2.env}"
+UPLOAD_B2_ENV="${UPLOAD_B2_ENV:-1}"
 
 if [ -z "${THUNDER_TOKEN:-}" ]; then
   echo "THUNDER_TOKEN is not set." >&2
@@ -216,16 +217,18 @@ fi
 printf 'mkdir -p %q\nexit\n' "$REMOTE_LAB_ROOT" | "$TNR_BIN" connect "$INSTANCE_ID"
 "$TNR_BIN" scp "$LOCAL_ANNOTATIONS_FILE" "$INSTANCE_ID:$REMOTE_ANNOTATIONS"
 
-if [ "$START_B2_UPLOAD" = "1" ]; then
+if [ "$START_B2_UPLOAD" = "1" ] && [ "$UPLOAD_B2_ENV" = "1" ]; then
   b2_env_file="$(mktemp "$DOWNLOAD_ROOT/b2_env.XXXXXX")"
   {
-    printf 'export B2_KEY_ID=%q\n' "${B2_KEY_ID:-${B2_APPLICATION_KEY_ID:-${B2_KEYID:-${BACKBLAZE_B2_KEY_ID:-}}}}"
-    printf 'export B2_APP_KEY=%q\n' "${B2_APP_KEY:-${B2_APPLICATION_KEY:-${BACKBLAZE_B2_APPLICATION_KEY:-${BACKBLAZE_B2_APP_KEY:-}}}}"
+    printf 'export B2_KEY_ID=%q\n' "${B2_KEY_ID:-${B2_KEYID:-${B2_APPLICATION_KEY_ID:-${BACKBLAZE_B2_KEY_ID:-}}}}"
+    printf 'export B2_APP_KEY=%q\n' "${B2_APP_KEY:-${B2_APPKEY:-${B2_APPLICATION_KEY:-${BACKBLAZE_B2_APPLICATION_KEY:-${BACKBLAZE_B2_APP_KEY:-}}}}}"
     printf 'export B2_TOKEN=%q\n' "${B2_TOKEN:-}"
   } > "$b2_env_file"
   chmod 600 "$b2_env_file"
   "$TNR_BIN" scp "$b2_env_file" "$INSTANCE_ID:$REMOTE_B2_ENV"
   rm -f "$b2_env_file"
+elif [ "$START_B2_UPLOAD" = "1" ]; then
+  echo "UPLOAD_B2_ENV=0; using existing remote B2 env at $REMOTE_B2_ENV."
 fi
 
 remote_setup_log="$DOWNLOAD_ROOT/remote_setup_and_launch.log"
@@ -368,6 +371,7 @@ cat > "$DOWNLOAD_ROOT/run_info.json" <<JSON
   "b2_prefix": "$B2_PREFIX",
   "b2_upload_log": "$B2_UPLOAD_LOG",
   "remote_b2_env": "$REMOTE_B2_ENV",
+  "upload_b2_env": "$UPLOAD_B2_ENV",
   "select_target": $SELECT_TARGET,
   "curation_target": $CURATION_TARGET,
   "min_quality": $MIN_QUALITY,

@@ -288,8 +288,8 @@ if [ "$START_B2_UPLOAD" = "1" ]; then
   printf 'mkdir -p %q\nexit\n' "$REMOTE_LAB_ROOT" | "$TNR_BIN" connect "$INSTANCE_ID"
   b2_env_file="$(mktemp "$DOWNLOAD_ROOT/b2_env.XXXXXX")"
   {
-    printf 'export B2_KEY_ID=%q\n' "${B2_KEY_ID:-${B2_APPLICATION_KEY_ID:-${B2_KEYID:-${BACKBLAZE_B2_KEY_ID:-}}}}"
-    printf 'export B2_APP_KEY=%q\n' "${B2_APP_KEY:-${B2_APPLICATION_KEY:-${BACKBLAZE_B2_APPLICATION_KEY:-${BACKBLAZE_B2_APP_KEY:-}}}}"
+    printf 'export B2_KEY_ID=%q\n' "${B2_KEY_ID:-${B2_KEYID:-${B2_APPLICATION_KEY_ID:-${BACKBLAZE_B2_KEY_ID:-}}}}"
+    printf 'export B2_APP_KEY=%q\n' "${B2_APP_KEY:-${B2_APPKEY:-${B2_APPLICATION_KEY:-${BACKBLAZE_B2_APPLICATION_KEY:-${BACKBLAZE_B2_APP_KEY:-}}}}}"
     printf 'export B2_TOKEN=%q\n' "${B2_TOKEN:-}"
   } > "$b2_env_file"
   chmod 600 "$b2_env_file"

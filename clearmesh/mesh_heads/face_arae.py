@@ -537,20 +537,65 @@ def build_tiny_point_conditioned_indexed_face_decoder(
             logits = torch.einsum("bfch,bvh->bfcv", queries, keys) / float(self.hidden_size ** 0.5)
             return logits.masked_fill(~self._valid_vertex_mask(vertex_table).unsqueeze(1).unsqueeze(1), -1e9)
 
-        def forward(self, point_features, vertex_table, input_faces):  # type: ignore[no-untyped-def]
+        def forward(
+            self,
+            point_features,
+            vertex_table,
+            input_faces,
+            *,
+            target_faces=None,
+            return_topology: bool = False,
+            edge_action_indices=None,
+            edge_choice_candidates=None,
+            return_count: bool = False,
+            return_seed: bool = False,
+            return_hidden: bool = False,
+        ):  # type: ignore[no-untyped-def]
             hidden = self._hidden(point_features, vertex_table, input_faces)
-            return self._face_logits_from_hidden(hidden, vertex_table)
+            if target_faces is None:
+                face_logits = self._face_logits_from_hidden(hidden, vertex_table)
+            else:
+                prefix = target_faces.masked_fill(target_faces.lt(0), -1)
+                face_logits = self._corner_causal_logits_from_hidden(hidden, prefix, vertex_table=vertex_table)
+
+            if not (
+                return_topology
+                or edge_action_indices is not None
+                or edge_choice_candidates is not None
+                or return_count
+                or return_seed
+                or return_hidden
+            ):
+                return face_logits
+
+            outputs = {"face_logits": face_logits}
+            if return_count:
+                outputs["count_logits"] = self.predict_face_count_logits(point_features, vertex_table)
+            if return_seed:
+                outputs["seed_logits"] = self.seed_face_logits(point_features, vertex_table)
+            if return_topology:
+                outputs["closure_logits"] = self.topology_output(hidden)
+            if edge_action_indices is not None:
+                outputs["edge_action_logits"] = self._edge_action_logits_from_hidden(
+                    hidden,
+                    edge_action_indices,
+                    vertex_table=vertex_table,
+                )
+            if edge_choice_candidates is not None:
+                outputs["edge_choice_logits"] = self._edge_choice_logits_from_hidden(
+                    hidden,
+                    edge_choice_candidates,
+                    vertex_table=vertex_table,
+                )
+            if return_hidden:
+                outputs["hidden"] = hidden
+            return outputs
 
         def forward_with_topology(self, point_features, vertex_table, input_faces):  # type: ignore[no-untyped-def]
-            hidden = self._hidden(point_features, vertex_table, input_faces)
-            face_logits = self._face_logits_from_hidden(hidden, vertex_table)
-            closure_logits = self.topology_output(hidden)
-            return {"face_logits": face_logits, "closure_logits": closure_logits}
+            return self.forward(point_features, vertex_table, input_faces, return_topology=True)
 
         def forward_corner_causal(self, point_features, vertex_table, input_faces, target_faces):  # type: ignore[no-untyped-def]
-            hidden = self._hidden(point_features, vertex_table, input_faces)
-            prefix = target_faces.masked_fill(target_faces.lt(0), -1)
-            return self._corner_causal_logits_from_hidden(hidden, prefix, vertex_table=vertex_table)
+            return self.forward(point_features, vertex_table, input_faces, target_faces=target_faces)
 
         def corner_causal_next_logits(self, point_features, vertex_table, input_faces, prefix_faces):  # type: ignore[no-untyped-def]
             hidden = self._hidden(point_features, vertex_table, input_faces)[:, -1:, :]
@@ -558,12 +603,20 @@ def build_tiny_point_conditioned_indexed_face_decoder(
             return self._corner_causal_logits_from_hidden(hidden, prefix, vertex_table=vertex_table)[:, 0, :, :]
 
         def forward_edge_action(self, point_features, vertex_table, input_faces, edge_indices):  # type: ignore[no-untyped-def]
-            hidden = self._hidden(point_features, vertex_table, input_faces)
-            return self._edge_action_logits_from_hidden(hidden, edge_indices, vertex_table=vertex_table)
+            return self.forward(
+                point_features,
+                vertex_table,
+                input_faces,
+                edge_action_indices=edge_indices,
+            )["edge_action_logits"]
 
         def forward_edge_choice(self, point_features, vertex_table, input_faces, candidate_edges):  # type: ignore[no-untyped-def]
-            hidden = self._hidden(point_features, vertex_table, input_faces)
-            return self._edge_choice_logits_from_hidden(hidden, candidate_edges, vertex_table=vertex_table)
+            return self.forward(
+                point_features,
+                vertex_table,
+                input_faces,
+                edge_choice_candidates=candidate_edges,
+            )["edge_choice_logits"]
 
         def edge_action_next_logits(self, point_features, vertex_table, input_faces, edge_indices):  # type: ignore[no-untyped-def]
             hidden = self._hidden(point_features, vertex_table, input_faces)[:, -1:, :]

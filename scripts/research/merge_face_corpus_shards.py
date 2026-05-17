@@ -35,9 +35,20 @@ def _safe_stem(text: str) -> str:
 
 def _source_path(row: dict[str, object], manifest_path: Path) -> Path:
     raw = Path(str(row["path"]))
-    if raw.is_absolute() or raw.exists():
+    if raw.is_absolute() and raw.exists():
         return raw
-    return manifest_path.parent / raw
+    if raw.exists():
+        return raw
+    manifest_relative = manifest_path.parent / raw
+    if manifest_relative.exists():
+        return manifest_relative
+    # Lean corpus archives are often extracted on a different machine than the
+    # original shard worker, so manifests may preserve stale absolute paths.
+    # The NPZ files are still co-located with the extracted manifest.
+    basename_relative = manifest_path.parent / raw.name
+    if basename_relative.exists():
+        return basename_relative
+    return manifest_relative
 
 
 def _find_manifest(input_path: Path, source: str) -> Path:

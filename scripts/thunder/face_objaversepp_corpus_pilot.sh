@@ -4,6 +4,7 @@
 set -euo pipefail
 
 RUN_DIR="${RUN_DIR:-/tmp/clearmesh_face_objpp_corpus_pilot}"
+SOURCE_KIND="${SOURCE_KIND:-objaversepp}"
 ANNOTATIONS="${ANNOTATIONS:-cindyxl/ObjaversePlusPlus}"
 SPLIT="${SPLIT:-train}"
 SELECT_TARGET="${SELECT_TARGET:-50}"
@@ -19,6 +20,7 @@ DOWNLOAD_BATCH_TIMEOUT_SECONDS="${DOWNLOAD_BATCH_TIMEOUT_SECONDS:-0}"
 DOWNLOAD_BATCH_RETRIES="${DOWNLOAD_BATCH_RETRIES:-2}"
 DOWNLOAD_RETRY_SLEEP_SECONDS="${DOWNLOAD_RETRY_SLEEP_SECONDS:-15}"
 DOWNLOAD_RATE_LIMIT_SLEEP_SECONDS="${DOWNLOAD_RATE_LIMIT_SLEEP_SECONDS:-300}"
+TEXVERSE_DOWNLOAD_WORKERS="${TEXVERSE_DOWNLOAD_WORKERS:-$DOWNLOAD_PROCESSES}"
 CURATION_TARGET="${CURATION_TARGET:-$SELECT_TARGET}"
 MESH_TIMEOUT_SECONDS="${MESH_TIMEOUT_SECONDS:-30}"
 MESH_MEMORY_LIMIT_GB="${MESH_MEMORY_LIMIT_GB:-12}"
@@ -57,24 +59,45 @@ if [ "$SHUFFLE" = "1" ]; then
   DOWNLOAD_ARGS+=(--shuffle)
 fi
 
-python scripts/data/download_objaversepp_face_candidates.py \
-  --annotations "$ANNOTATIONS" \
-  --split "$SPLIT" \
-  --output-dir "$RUN_DIR/raw" \
-  --target "$SELECT_TARGET" \
-  --scan-limit "$SCAN_LIMIT" \
-  --min-quality "$MIN_QUALITY" \
-  --oversample-factor "$OVERSAMPLE_FACTOR" \
-  --seed "$SEED" \
-  --download \
-  --processes "$DOWNLOAD_PROCESSES" \
-  --fallback-processes "$DOWNLOAD_FALLBACK_PROCESSES" \
-  --batch-size "$DOWNLOAD_BATCH_SIZE" \
-  --batch-timeout-seconds "$DOWNLOAD_BATCH_TIMEOUT_SECONDS" \
-  --batch-retries "$DOWNLOAD_BATCH_RETRIES" \
-  --retry-sleep-seconds "$DOWNLOAD_RETRY_SLEEP_SECONDS" \
-  --rate-limit-sleep-seconds "$DOWNLOAD_RATE_LIMIT_SLEEP_SECONDS" \
-  "${DOWNLOAD_ARGS[@]}"
+case "$SOURCE_KIND" in
+  objaversepp)
+    python scripts/data/download_objaversepp_face_candidates.py \
+      --annotations "$ANNOTATIONS" \
+      --split "$SPLIT" \
+      --output-dir "$RUN_DIR/raw" \
+      --target "$SELECT_TARGET" \
+      --scan-limit "$SCAN_LIMIT" \
+      --min-quality "$MIN_QUALITY" \
+      --oversample-factor "$OVERSAMPLE_FACTOR" \
+      --seed "$SEED" \
+      --download \
+      --processes "$DOWNLOAD_PROCESSES" \
+      --fallback-processes "$DOWNLOAD_FALLBACK_PROCESSES" \
+      --batch-size "$DOWNLOAD_BATCH_SIZE" \
+      --batch-timeout-seconds "$DOWNLOAD_BATCH_TIMEOUT_SECONDS" \
+      --batch-retries "$DOWNLOAD_BATCH_RETRIES" \
+      --retry-sleep-seconds "$DOWNLOAD_RETRY_SLEEP_SECONDS" \
+      --rate-limit-sleep-seconds "$DOWNLOAD_RATE_LIMIT_SLEEP_SECONDS" \
+      "${DOWNLOAD_ARGS[@]}"
+    ;;
+  texverse)
+    python scripts/data/download_texverse_face_candidates.py \
+      --source-manifest "$ANNOTATIONS" \
+      --output-dir "$RUN_DIR/raw" \
+      --target "$SELECT_TARGET" \
+      --scan-limit "$SCAN_LIMIT" \
+      --min-quality "$MIN_QUALITY" \
+      --seed "$SEED" \
+      --workers "$TEXVERSE_DOWNLOAD_WORKERS" \
+      --retries "$DOWNLOAD_BATCH_RETRIES" \
+      --retry-sleep-seconds "$DOWNLOAD_RETRY_SLEEP_SECONDS" \
+      "${DOWNLOAD_ARGS[@]}"
+    ;;
+  *)
+    echo "Unsupported SOURCE_KIND=$SOURCE_KIND; expected objaversepp or texverse." >&2
+    exit 2
+    ;;
+esac
 
 CURATION_ARGS=()
 if [ "$SKIP_MESH_REPORT" = "1" ]; then
@@ -185,6 +208,7 @@ summary = {
     "train_gate": read_json(run / "train_strict_gate.json"),
     "test_gate": read_json(run / "test_strict_gate.json"),
     "settings": {
+        "source_kind": "$SOURCE_KIND",
         "select_target": int("$SELECT_TARGET"),
         "scan_limit": int("$SCAN_LIMIT"),
         "target_faces": int("$TARGET_FACES"),

@@ -11,8 +11,12 @@ INTERVAL_SECONDS="${INTERVAL_SECONDS:-600}"
 STABILITY_SECONDS="${STABILITY_SECONDS:-120}"
 STATE_DIR="${STATE_DIR:-/tmp/clearmesh_b2_upload_state}"
 RCLONE_REMOTE="${RCLONE_REMOTE:-b2env}"
+RUN_ONCE="${RUN_ONCE:-0}"
 LOG_TIME() { date -u +'%Y-%m-%dT%H:%M:%SZ'; }
 mkdir -p "$STATE_DIR"
+
+B2_KEY_ID="${B2_KEY_ID:-${B2_KEYID:-}}"
+B2_APP_KEY="${B2_APP_KEY:-${B2_APPKEY:-}}"
 
 if [[ -z "${B2_KEY_ID:-}" || -z "${B2_APP_KEY:-}" ]] && [[ -n "${B2_TOKEN:-}" ]]; then
   parsed_b2="$(
@@ -69,9 +73,12 @@ if [[ -n "${B2_KEY_ID:-}" && -n "${B2_APP_KEY:-}" ]]; then
   export RCLONE_CONFIG_${RCLONE_REMOTE^^}_KEY="$B2_APP_KEY"
 fi
 
-# Also support pre-populated RCLONE_CONFIG_B2ENV_* env vars.
-if ! rclone lsd "${RCLONE_REMOTE}:" >/dev/null 2>&1; then
-  echo "[$(LOG_TIME)] ERROR: cannot access rclone remote ${RCLONE_REMOTE}:" >&2
+# Also support pre-populated RCLONE_CONFIG_B2ENV_* env vars. Probe the target
+# bucket, not the account root, because app keys may be bucket-scoped. Use
+# `lsf` rather than `lsd`: B2 keys can allow object listing/upload while `lsd`
+# returns a non-zero status for some bucket-scoped/listing configurations.
+if ! rclone lsf "${RCLONE_REMOTE}:${B2_BUCKET}" --max-depth 1 >/dev/null 2>&1; then
+  echo "[$(LOG_TIME)] ERROR: cannot access rclone target ${RCLONE_REMOTE}:${B2_BUCKET}" >&2
   exit 2
 fi
 
@@ -112,7 +119,11 @@ upload_manifest() {
     echo "local_root=$LOCAL_ROOT"
     echo "remote_base=$remote_base"
     echo "time=$(LOG_TIME)"
-    find "$LOCAL_ROOT" -maxdepth 5 -type f -printf '%P\t%s\t%TY-%Tm-%TdT%TH:%TM:%TSZ\n' 2>/dev/null | sort | head -n 20000
+    # Avoid `head` here: with `set -o pipefail`, early pipe closure can make a
+    # successful large manifest look like an uploader failure.
+    find "$LOCAL_ROOT" -maxdepth 5 -type f -printf '%P\t%s\t%TY-%Tm-%TdT%TH:%TM:%TSZ\n' 2>/dev/null \
+      | sort \
+      | awk 'NR <= 20000 { print }'
   } > "$manifest"
   rclone copyto "$manifest" "$remote_base/upload_manifests/$(basename "$manifest")" --stats 30s >/dev/null 2>&1 || true
   rm -f "$manifest"
@@ -212,6 +223,10 @@ run_once() {
 }
 
 echo "[$(LOG_TIME)] starting clearmesh B2 continuous uploader mode=$MODE root=$LOCAL_ROOT remote=$remote_base interval=${INTERVAL_SECONDS}s"
+if [[ "$RUN_ONCE" = "1" ]]; then
+  run_once
+  exit $?
+fi
 while true; do
   run_once || true
   sleep "$INTERVAL_SECONDS"

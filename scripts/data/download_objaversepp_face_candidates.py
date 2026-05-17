@@ -224,10 +224,9 @@ def _download(
     os.environ["HF_HOME"] = str(hf_cache)
     home_cache = Path.home() / ".objaverse"
     if home_cache.is_symlink():
-        # A previous Thunder run may have left ~/.objaverse pointing at a
-        # deleted per-run cache. pathlib.exists() is false for broken
-        # symlinks, but symlink_to() would still raise FileExistsError.
-        if not home_cache.resolve(strict=False).exists():
+        # A previous Thunder run may have left ~/.objaverse pointing at another
+        # shard's cache. Keep each shard self-contained, not just non-broken.
+        if home_cache.resolve(strict=False) != cache_dir.resolve(strict=False):
             home_cache.unlink()
             home_cache.symlink_to(cache_dir)
     elif not home_cache.exists():

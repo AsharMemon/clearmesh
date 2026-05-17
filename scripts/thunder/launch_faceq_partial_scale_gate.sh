@@ -58,6 +58,12 @@ CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-5000}"
 LOG_EVERY="${LOG_EVERY:-500}"
 EVAL_LIMIT="${EVAL_LIMIT:-32}"
 PAIR_SAMPLES="${PAIR_SAMPLES:-2048}"
+TORCHRUN_NPROC_PER_NODE="${TORCHRUN_NPROC_PER_NODE:-0}"
+DISTRIBUTED="${DISTRIBUTED:-auto}"
+DISTRIBUTED_BACKEND="${DISTRIBUTED_BACKEND:-auto}"
+LAZY_LOAD="${LAZY_LOAD:-0}"
+SAMPLE_CACHE_SIZE="${SAMPLE_CACHE_SIZE:-0}"
+TRACK_BEST_IN_MEMORY="${TRACK_BEST_IN_MEMORY:-1}"
 COUNT_LOSS_WEIGHT="${COUNT_LOSS_WEIGHT:-0.05}"
 TOPOLOGY_LOSS_WEIGHT="${TOPOLOGY_LOSS_WEIGHT:-0.2}"
 EDGE_ACTION_LOSS_WEIGHT="${EDGE_ACTION_LOSS_WEIGHT:-1.0}"
@@ -158,8 +164,8 @@ THUNDER_INSTANCE_ID="$INSTANCE_ID" INSTALL_MESH_HEAD_REPOS=0 INSTALL_MESH_HEAD_E
 mkdir -p "$DOWNLOAD_ROOT"
 b2_env_file="$(mktemp "$DOWNLOAD_ROOT/b2_env.XXXXXX")"
 {
-  printf 'export B2_KEY_ID=%q\n' "${B2_KEY_ID:-${B2_APPLICATION_KEY_ID:-${B2_KEYID:-${BACKBLAZE_B2_KEY_ID:-}}}}"
-  printf 'export B2_APP_KEY=%q\n' "${B2_APP_KEY:-${B2_APPLICATION_KEY:-${BACKBLAZE_B2_APPLICATION_KEY:-${BACKBLAZE_B2_APP_KEY:-}}}}"
+  printf 'export B2_KEY_ID=%q\n' "${B2_KEY_ID:-${B2_KEYID:-${B2_APPLICATION_KEY_ID:-${BACKBLAZE_B2_KEY_ID:-}}}}"
+  printf 'export B2_APP_KEY=%q\n' "${B2_APP_KEY:-${B2_APPKEY:-${B2_APPLICATION_KEY:-${BACKBLAZE_B2_APPLICATION_KEY:-${BACKBLAZE_B2_APP_KEY:-}}}}}"
   printf 'export B2_TOKEN=%q\n' "${B2_TOKEN:-}"
 } > "$b2_env_file"
 chmod 600 "$b2_env_file"
@@ -208,6 +214,12 @@ CHECKPOINT_EVERY=$(printf '%q' "$CHECKPOINT_EVERY")
 LOG_EVERY=$(printf '%q' "$LOG_EVERY")
 EVAL_LIMIT=$(printf '%q' "$EVAL_LIMIT")
 PAIR_SAMPLES=$(printf '%q' "$PAIR_SAMPLES")
+TORCHRUN_NPROC_PER_NODE=$(printf '%q' "$TORCHRUN_NPROC_PER_NODE")
+DISTRIBUTED=$(printf '%q' "$DISTRIBUTED")
+DISTRIBUTED_BACKEND=$(printf '%q' "$DISTRIBUTED_BACKEND")
+LAZY_LOAD=$(printf '%q' "$LAZY_LOAD")
+SAMPLE_CACHE_SIZE=$(printf '%q' "$SAMPLE_CACHE_SIZE")
+TRACK_BEST_IN_MEMORY=$(printf '%q' "$TRACK_BEST_IN_MEMORY")
 COUNT_LOSS_WEIGHT=$(printf '%q' "$COUNT_LOSS_WEIGHT")
 TOPOLOGY_LOSS_WEIGHT=$(printf '%q' "$TOPOLOGY_LOSS_WEIGHT")
 EDGE_ACTION_LOSS_WEIGHT=$(printf '%q' "$EDGE_ACTION_LOSS_WEIGHT")
@@ -390,6 +402,20 @@ PY
 log_status split complete
 
 mkdir -p "\$LAB_ROOT/runs/faceq_partial_gate"
+TRAIN_CMD=(python)
+if [ "\$TORCHRUN_NPROC_PER_NODE" -gt 1 ]; then
+  TRAIN_CMD=(python -m torch.distributed.run --nproc-per-node "\$TORCHRUN_NPROC_PER_NODE")
+fi
+TRAIN_EXTRA_ARGS=()
+if [ "\$LAZY_LOAD" = "1" ]; then
+  TRAIN_EXTRA_ARGS+=(--lazy-load)
+fi
+if [ "\$SAMPLE_CACHE_SIZE" -gt 0 ]; then
+  TRAIN_EXTRA_ARGS+=(--sample-cache-size "\$SAMPLE_CACHE_SIZE")
+fi
+if [ "\$TRACK_BEST_IN_MEMORY" = "0" ]; then
+  TRAIN_EXTRA_ARGS+=(--no-track-best-in-memory)
+fi
 python scripts/research/eval_face_indexed_conditioned_tiny.py \\
   --dataset-dir "\$LAB_ROOT/split/test" \\
   --output "\$LAB_ROOT/runs/faceq_partial_gate/eval_test_teacher_identity_pretrain.json" \\
@@ -402,7 +428,7 @@ python scripts/research/eval_face_indexed_conditioned_tiny.py \\
   --device cpu | tee "\$LAB_ROOT/runs/faceq_partial_gate/eval_test_teacher_identity_pretrain.log"
 log_status teacher_identity_pretrain complete
 
-python scripts/research/train_face_indexed_conditioned_tiny.py \\
+"\${TRAIN_CMD[@]}" scripts/research/train_face_indexed_conditioned_tiny.py \\
   --dataset-dir "\$LAB_ROOT/split/train" \\
   --output "\$LAB_ROOT/runs/faceq_partial_gate/checkpoint.pt" \\
   --steps "\$STEPS" \\
@@ -434,6 +460,9 @@ python scripts/research/train_face_indexed_conditioned_tiny.py \\
   --checkpoint-every "\$CHECKPOINT_EVERY" \\
   --save-current-checkpoint \\
   --log-every "\$LOG_EVERY" \\
+  --distributed "\$DISTRIBUTED" \\
+  --distributed-backend "\$DISTRIBUTED_BACKEND" \\
+  "\${TRAIN_EXTRA_ARGS[@]}" \\
   --device cuda | tee "\$LAB_ROOT/runs/faceq_partial_gate/train.log"
 log_status train complete
 
@@ -525,6 +554,12 @@ cat > "$DOWNLOAD_ROOT/run_info.json" <<JSON
   "face_output_mode": "$FACE_OUTPUT_MODE",
   "train_point_samples": $TRAIN_POINT_SAMPLES,
   "eval_limit": $EVAL_LIMIT,
+  "torchrun_nproc_per_node": $TORCHRUN_NPROC_PER_NODE,
+  "distributed": "$DISTRIBUTED",
+  "distributed_backend": "$DISTRIBUTED_BACKEND",
+  "lazy_load": "$LAZY_LOAD",
+  "sample_cache_size": $SAMPLE_CACHE_SIZE,
+  "track_best_in_memory": "$TRACK_BEST_IN_MEMORY",
   "count_loss_weight": $COUNT_LOSS_WEIGHT,
   "topology_loss_weight": $TOPOLOGY_LOSS_WEIGHT,
   "edge_action_loss_weight": $EDGE_ACTION_LOSS_WEIGHT,

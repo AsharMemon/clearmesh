@@ -114,11 +114,17 @@ def _eval_metrics(eval_report: dict[str, Any] | None) -> dict[str, Any]:
     nonmanifold_vertices = _numbers(results, "nonmanifold_vertices")
     if not nonmanifold_vertices:
         nonmanifold_vertices = _numbers(results, "nonmanifold_vertex_count")
+    raw_boundary_edges = _numbers(results, "raw_boundary_edges")
+    raw_nonmanifold_edges = _numbers(results, "raw_nonmanifold_edges")
+    raw_nonmanifold_vertices = _numbers(results, "raw_nonmanifold_vertices")
     edge_pairing = _numbers(results, "token_edge_pairing_ratio")
+    raw_edge_pairing = _numbers(results, "raw_token_edge_pairing_ratio")
     chamfer = _numbers(results, "chamfer_l2_normalized")
     if not chamfer:
         chamfer = _numbers(results, "chamfer_l2")
+    raw_chamfer = _numbers(results, "raw_chamfer_l2_normalized")
     normal = _numbers(results, "normal_consistency")
+    raw_normal = _numbers(results, "raw_normal_consistency")
     decode_sec = _numbers(results, "decode_elapsed_sec")
     fill_input_boundary_edges = _fill_numbers(results, "input_boundary_edges")
     fill_filled_faces = _fill_numbers(results, "filled_faces")
@@ -139,14 +145,35 @@ def _eval_metrics(eval_report: dict[str, Any] | None) -> dict[str, Any]:
         if summary.get("mean_nonmanifold_vertices") is not None
         else (statistics.fmean(nonmanifold_vertices) if nonmanifold_vertices else None),
         "max_nonmanifold_vertices": max(nonmanifold_vertices) if nonmanifold_vertices else None,
+        "raw_watertight": summary.get("raw_watertight"),
+        "raw_watertight_rate": _as_rate(summary.get("raw_watertight"), attempted)
+        if summary.get("raw_watertight") is not None
+        else None,
+        "raw_mean_boundary_edges": summary.get("raw_mean_boundary_edges")
+        if summary.get("raw_mean_boundary_edges") is not None
+        else (statistics.fmean(raw_boundary_edges) if raw_boundary_edges else None),
+        "raw_max_boundary_edges": max(raw_boundary_edges) if raw_boundary_edges else None,
+        "raw_mean_nonmanifold_edges": summary.get("raw_mean_nonmanifold_edges")
+        if summary.get("raw_mean_nonmanifold_edges") is not None
+        else (statistics.fmean(raw_nonmanifold_edges) if raw_nonmanifold_edges else None),
+        "raw_max_nonmanifold_edges": max(raw_nonmanifold_edges) if raw_nonmanifold_edges else None,
+        "raw_mean_nonmanifold_vertices": summary.get("raw_mean_nonmanifold_vertices")
+        if summary.get("raw_mean_nonmanifold_vertices") is not None
+        else (statistics.fmean(raw_nonmanifold_vertices) if raw_nonmanifold_vertices else None),
+        "raw_max_nonmanifold_vertices": max(raw_nonmanifold_vertices) if raw_nonmanifold_vertices else None,
         "mean_edge_pairing_ratio": summary.get("mean_edge_pairing_ratio")
         if summary.get("mean_edge_pairing_ratio") is not None
         else (statistics.fmean(edge_pairing) if edge_pairing else None),
+        "raw_mean_edge_pairing_ratio": summary.get("raw_mean_edge_pairing_ratio")
+        if summary.get("raw_mean_edge_pairing_ratio") is not None
+        else (statistics.fmean(raw_edge_pairing) if raw_edge_pairing else None),
         "teacher_forced_token_accuracy": summary.get("mean_teacher_forced_token_accuracy"),
         "teacher_forced_face_exact_ratio": summary.get("mean_teacher_forced_face_exact_ratio"),
         "chamfer_l2_normalized": _quantiles(chamfer),
+        "raw_chamfer_l2_normalized": _quantiles(raw_chamfer),
         "chamfer_l2_normalized_available": any(item.get("chamfer_l2_normalized") is not None for item in results),
         "normal_consistency": _quantiles(normal),
+        "raw_normal_consistency": _quantiles(raw_normal),
         "decode_elapsed_sec": _quantiles(decode_sec),
         "boundary_fill_input_boundary_edges": _quantiles(fill_input_boundary_edges),
         "boundary_fill_filled_faces": _quantiles(fill_filled_faces),

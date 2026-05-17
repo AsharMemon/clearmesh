@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import copy
+import functools
 import json
+import os
 import random
 import sys
 from collections import OrderedDict
@@ -481,6 +483,125 @@ def _save_checkpoint(path: Path, payload: dict, torch) -> None:  # type: ignore[
     tmp_path.replace(path)
 
 
+def _setup_distributed(torch, args):  # type: ignore[no-untyped-def]
+    world_size_env = int(os.environ.get("WORLD_SIZE", "1") or "1")
+    distributed = args.distributed == "on" or (args.distributed == "auto" and world_size_env > 1)
+    if not distributed:
+        return {
+            "enabled": False,
+            "rank": 0,
+            "local_rank": 0,
+            "world_size": 1,
+            "backend": None,
+            "dist": None,
+        }
+
+    import torch.distributed as dist
+
+    if not dist.is_available():
+        raise SystemExit("torch.distributed is not available")
+
+    backend = args.distributed_backend
+    if backend == "auto":
+        wants_cuda = args.device in {"auto", "cuda"} and torch.cuda.is_available()
+        backend = "nccl" if wants_cuda else "gloo"
+    dist.init_process_group(backend=backend)
+    rank = int(os.environ.get("RANK", "0") or "0")
+    local_rank = int(os.environ.get("LOCAL_RANK", str(rank)) or "0")
+    world_size = int(os.environ.get("WORLD_SIZE", str(world_size_env)) or "1")
+    return {
+        "enabled": True,
+        "rank": rank,
+        "local_rank": local_rank,
+        "world_size": world_size,
+        "backend": backend,
+        "dist": dist,
+    }
+
+
+def _wrap_distributed_model(torch, model, device, local_rank: int, args):  # type: ignore[no-untyped-def]
+    """Wrap the model for multi-GPU training.
+
+    DDP improves throughput but still replicates the full model on every GPU.
+    FSDP shards parameters/gradients/optimizer state, which is the path needed
+    for the 1B+ FACE-Q scale smoke.
+    """
+
+    strategy = str(args.distributed_strategy)
+    if strategy == "ddp":
+        from torch.nn.parallel import DistributedDataParallel as DDP
+
+        if device.type == "cuda":
+            return DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
+        return DDP(model, find_unused_parameters=True)
+
+    if strategy != "fsdp":
+        raise ValueError(f"unknown distributed strategy: {strategy}")
+
+    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+    from torch.distributed.fsdp import MixedPrecision
+    from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
+
+    mixed_precision = None
+    if args.precision in {"bf16", "fp16"} and device.type == "cuda":
+        dtype = torch.bfloat16 if args.precision == "bf16" else torch.float16
+        mixed_precision = MixedPrecision(param_dtype=dtype, reduce_dtype=dtype, buffer_dtype=dtype)
+    auto_wrap_policy = functools.partial(
+        size_based_auto_wrap_policy,
+        min_num_params=int(args.fsdp_min_num_params),
+    )
+    kwargs = {
+        "auto_wrap_policy": auto_wrap_policy,
+        "mixed_precision": mixed_precision,
+        "use_orig_params": True,
+    }
+    if device.type == "cuda":
+        kwargs["device_id"] = torch.device("cuda", local_rank)
+    wrapped = FSDP(model, **kwargs)
+    setattr(wrapped, "_clearmesh_fsdp", True)
+    return wrapped
+
+
+def _cleanup_distributed(dist_info: dict) -> None:
+    dist = dist_info.get("dist")
+    if dist is not None and dist.is_initialized():
+        dist.destroy_process_group()
+
+
+def _rank0_print(dist_info: dict, *args, **kwargs) -> None:
+    if int(dist_info.get("rank", 0)) == 0:
+        print(*args, **kwargs)
+
+
+def _unwrap_model(model):  # type: ignore[no-untyped-def]
+    return model.module if hasattr(model, "module") else model
+
+
+def _cpu_model_state(model) -> dict:  # type: ignore[no-untyped-def]
+    if bool(getattr(model, "_clearmesh_fsdp", False)):
+        import torch
+        from torch.distributed.fsdp import FullStateDictConfig, FullyShardedDataParallel as FSDP, StateDictType
+
+        with FSDP.state_dict_type(
+            model,
+            StateDictType.FULL_STATE_DICT,
+            FullStateDictConfig(offload_to_cpu=True, rank0_only=True),
+        ):
+            return {key: value.detach().cpu() for key, value in model.state_dict().items()}
+    raw_model = _unwrap_model(model)
+    return {key: value.detach().cpu() for key, value in raw_model.state_dict().items()}
+
+
+def _load_model_state(model, state: dict) -> None:  # type: ignore[type-arg]
+    try:
+        model.load_state_dict(state)
+        return
+    except RuntimeError:
+        if not state or not all(isinstance(key, str) and key.startswith("module.") for key in state):
+            raise
+    model.load_state_dict({key.removeprefix("module."): value for key, value in state.items()})
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset-dir", type=Path, required=True)
@@ -512,6 +633,11 @@ def main() -> int:
     )
     parser.add_argument("--checkpoint-every", type=int, default=0)
     parser.add_argument("--save-current-checkpoint", action="store_true")
+    parser.add_argument(
+        "--skip-final-checkpoint",
+        action="store_true",
+        help="Skip final model-state gather/save. Useful for large FSDP fit/throughput smokes.",
+    )
     parser.add_argument("--lazy-load", action="store_true", help="Load point clouds only when sampled for a batch.")
     parser.add_argument("--sample-cache-size", type=int, default=0, help="Lazy sample LRU cache size.")
     parser.add_argument(
@@ -532,6 +658,30 @@ def main() -> int:
     parser.add_argument("--seed-face-loss-stop-step", type=int, default=0)
     parser.add_argument("--early-face-count", type=int, default=0)
     parser.add_argument("--early-face-loss-weight", type=float, default=1.0)
+    parser.add_argument(
+        "--distributed",
+        choices=["auto", "off", "on"],
+        default="auto",
+        help="Enable torch.distributed DDP under torchrun. 'auto' activates when WORLD_SIZE > 1.",
+    )
+    parser.add_argument(
+        "--distributed-backend",
+        choices=["auto", "nccl", "gloo"],
+        default="auto",
+        help="Distributed backend. 'auto' uses nccl on CUDA and gloo otherwise.",
+    )
+    parser.add_argument(
+        "--distributed-strategy",
+        choices=["ddp", "fsdp"],
+        default="ddp",
+        help="Multi-GPU wrapper. DDP replicates the model; FSDP shards 1B+ scale models.",
+    )
+    parser.add_argument(
+        "--fsdp-min-num-params",
+        type=int,
+        default=20_000_000,
+        help="Minimum module size for FSDP auto-wrapping when --distributed-strategy=fsdp.",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument("--dry-run", action="store_true")
@@ -582,17 +732,33 @@ def main() -> int:
     import torch
     import torch.nn.functional as F
 
+    dist_info = _setup_distributed(torch, args)
+    rank = int(dist_info["rank"])
+    local_rank = int(dist_info["local_rank"])
+    world_size = int(dist_info["world_size"])
+
     if args.device == "auto":
         if torch.cuda.is_available():
-            device = torch.device("cuda")
+            if dist_info["enabled"]:
+                torch.cuda.set_device(local_rank)
+                device = torch.device("cuda", local_rank)
+            else:
+                device = torch.device("cuda")
         elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
             device = torch.device("mps")
         else:
             device = torch.device("cpu")
     else:
-        device = torch.device(args.device)
+        if args.device == "cuda" and dist_info["enabled"]:
+            torch.cuda.set_device(local_rank)
+            device = torch.device("cuda", local_rank)
+        else:
+            device = torch.device(args.device)
 
-    torch.manual_seed(args.seed)
+    rank_seed = int(args.seed) + 1009 * rank
+    random.seed(rank_seed)
+    np.random.seed(rank_seed)
+    torch.manual_seed(rank_seed)
     if args.precision == "bf16" and device.type == "cuda" and not torch.cuda.is_bf16_supported():
         raise SystemExit("bf16 requested but CUDA device does not report bf16 support")
     model = build_tiny_point_conditioned_indexed_face_decoder(
@@ -611,12 +777,9 @@ def main() -> int:
         latent_dim=args.latent_dim,
         face_output_mode=args.face_output_mode,
     ).to(device)
-    param_summary = {
-        "model_parameters": int(sum(param.numel() for param in model.parameters())),
-        "trainable_parameters": int(sum(param.numel() for param in model.parameters() if param.requires_grad)),
-        "device": str(device),
-    }
-    print(json.dumps(param_summary, sort_keys=True), flush=True)
+    pre_wrap_model_parameters = int(sum(param.numel() for param in model.parameters()))
+    pre_wrap_trainable_parameters = int(sum(param.numel() for param in model.parameters() if param.requires_grad))
+    resume_checkpoint = None
     if args.init_checkpoint is not None:
         if not args.init_checkpoint.exists():
             raise SystemExit(f"--init-checkpoint not found: {args.init_checkpoint}")
@@ -624,7 +787,32 @@ def main() -> int:
         state = checkpoint.get("model_state")
         if not isinstance(state, dict):
             raise SystemExit(f"--init-checkpoint has no model_state dict: {args.init_checkpoint}")
-        model.load_state_dict(state)
+        _load_model_state(model, state)
+    if args.resume_checkpoint is not None:
+        if not args.resume_checkpoint.exists():
+            raise SystemExit(f"--resume-checkpoint not found: {args.resume_checkpoint}")
+        resume_checkpoint = torch.load(args.resume_checkpoint, map_location="cpu", weights_only=False)
+        state = resume_checkpoint.get("model_state")
+        if not isinstance(state, dict):
+            raise SystemExit(f"--resume-checkpoint has no model_state dict: {args.resume_checkpoint}")
+        _load_model_state(model, state)
+    if dist_info["enabled"]:
+        model = _wrap_distributed_model(torch, model, device, local_rank, args)
+    param_summary = {
+        "model_parameters": pre_wrap_model_parameters,
+        "trainable_parameters": pre_wrap_trainable_parameters,
+        "rank_local_parameters_after_wrap": int(sum(param.numel() for param in _unwrap_model(model).parameters())),
+        "rank_local_trainable_parameters_after_wrap": int(
+            sum(param.numel() for param in _unwrap_model(model).parameters() if param.requires_grad)
+        ),
+        "device": str(device),
+        "distributed": bool(dist_info["enabled"]),
+        "distributed_strategy": str(args.distributed_strategy if dist_info["enabled"] else "none"),
+        "distributed_backend": dist_info["backend"],
+        "rank": rank,
+        "world_size": world_size,
+    }
+    _rank0_print(dist_info, json.dumps(param_summary, sort_keys=True), flush=True)
 
     optimizer = _build_optimizer(torch, model, args)
     losses: list[float] = []
@@ -632,25 +820,18 @@ def main() -> int:
     best_step = 0
     start_step = 1
 
-    if args.resume_checkpoint is not None:
-        if not args.resume_checkpoint.exists():
-            raise SystemExit(f"--resume-checkpoint not found: {args.resume_checkpoint}")
-        checkpoint = torch.load(args.resume_checkpoint, map_location="cpu", weights_only=False)
-        state = checkpoint.get("model_state")
-        if not isinstance(state, dict):
-            raise SystemExit(f"--resume-checkpoint has no model_state dict: {args.resume_checkpoint}")
-        model.load_state_dict(state)
-        optimizer_state = checkpoint.get("optimizer_state")
+    if resume_checkpoint is not None:
+        optimizer_state = resume_checkpoint.get("optimizer_state")
         if optimizer_state is not None:
             optimizer.load_state_dict(optimizer_state)
-        losses = [float(value) for value in checkpoint.get("losses", [])]
-        best_loss = float(checkpoint.get("best_loss", best_loss))
-        best_step = int(checkpoint.get("best_step", 0))
-        start_step = int(checkpoint.get("step", len(losses))) + 1
+        losses = [float(value) for value in resume_checkpoint.get("losses", [])]
+        best_loss = float(resume_checkpoint.get("best_loss", best_loss))
+        best_step = int(resume_checkpoint.get("best_step", 0))
+        start_step = int(resume_checkpoint.get("step", len(losses))) + 1
 
     best_state = (
-        copy.deepcopy({key: value.detach().cpu() for key, value in model.state_dict().items()})
-        if args.track_best_in_memory
+        copy.deepcopy(_cpu_model_state(model))
+        if args.track_best_in_memory and rank == 0
         else None
     )
     if start_step > args.steps:
@@ -684,29 +865,77 @@ def main() -> int:
         edge_action_loss = None
         edge_choice_loss = None
         seed_face_loss = None
-        hidden_for_aux = None
+        edge_action_logits = None
+        edge_choice_logits = None
         with _autocast_context(torch, device, args.precision):
-            if args.corner_head == "causal" and hasattr(model, "_corner_causal_logits_from_hidden"):
-                hidden = model._hidden(point_features, vertex_table, input_faces)
-                hidden_for_aux = hidden
-                prefix = target_faces.masked_fill(target_faces.lt(0), -1)
-                logits = model._corner_causal_logits_from_hidden(hidden, prefix, vertex_table=vertex_table)
-                if args.topology_loss_weight > 0 and hasattr(model, "topology_output"):
+            raw_model = _unwrap_model(model)
+            want_topology = bool(args.topology_loss_weight > 0 and hasattr(raw_model, "topology_output"))
+            want_edge_action = bool(args.edge_action_loss_weight > 0 and hasattr(raw_model, "forward_edge_action"))
+            want_edge_choice = bool(args.edge_choice_loss_weight > 0 and hasattr(raw_model, "forward_edge_choice"))
+            want_count = bool(args.count_loss_weight > 0 and hasattr(raw_model, "predict_face_count_logits"))
+            seed_face_loss_active = bool(
+                args.seed_face_loss_weight > 0
+                and hasattr(raw_model, "seed_face_logits")
+                and (args.seed_face_loss_stop_step <= 0 or step <= int(args.seed_face_loss_stop_step))
+            )
+            if args.corner_head == "causal" and hasattr(raw_model, "_corner_causal_logits_from_hidden"):
+                outputs = model(
+                    point_features,
+                    vertex_table,
+                    input_faces,
+                    target_faces=target_faces,
+                    return_topology=want_topology,
+                    edge_action_indices=target_edge_actions if want_edge_action else None,
+                    edge_choice_candidates=target_edge_choice_candidates if want_edge_choice else None,
+                    return_count=want_count,
+                    return_seed=seed_face_loss_active,
+                )
+                if isinstance(outputs, dict):
+                    logits = outputs["face_logits"]
+                    if want_topology:
+                        topology_loss = F.cross_entropy(
+                            outputs["closure_logits"].reshape(-1, 4),
+                            target_closure_counts.reshape(-1),
+                            ignore_index=-100,
+                        )
+                    edge_action_logits = outputs.get("edge_action_logits")
+                    edge_choice_logits = outputs.get("edge_choice_logits")
+                else:
+                    logits = outputs
+            elif want_topology or want_edge_action or want_edge_choice or want_count or seed_face_loss_active:
+                outputs = model(
+                    point_features,
+                    vertex_table,
+                    input_faces,
+                    return_topology=want_topology,
+                    edge_action_indices=target_edge_actions if want_edge_action else None,
+                    edge_choice_candidates=target_edge_choice_candidates if want_edge_choice else None,
+                    return_count=want_count,
+                    return_seed=seed_face_loss_active,
+                )
+                if isinstance(outputs, dict):
+                    logits = outputs["face_logits"]
+                    if want_topology:
+                        topology_loss = F.cross_entropy(
+                            outputs["closure_logits"].reshape(-1, 4),
+                            target_closure_counts.reshape(-1),
+                            ignore_index=-100,
+                        )
+                    edge_action_logits = outputs.get("edge_action_logits")
+                    edge_choice_logits = outputs.get("edge_choice_logits")
+                else:
+                    logits = outputs
+            else:
+                logits = model(point_features, vertex_table, input_faces)
+            if topology_loss is None and args.topology_loss_weight > 0 and hasattr(_unwrap_model(model), "topology_output"):
+                if hasattr(model, "forward_with_topology") and not dist_info["enabled"]:
+                    outputs = model.forward_with_topology(point_features, vertex_table, input_faces)
+                    logits = outputs["face_logits"]
                     topology_loss = F.cross_entropy(
-                        model.topology_output(hidden).reshape(-1, 4),
+                        outputs["closure_logits"].reshape(-1, 4),
                         target_closure_counts.reshape(-1),
                         ignore_index=-100,
                     )
-            elif args.topology_loss_weight > 0 and hasattr(model, "forward_with_topology"):
-                outputs = model.forward_with_topology(point_features, vertex_table, input_faces)
-                logits = outputs["face_logits"]
-                topology_loss = F.cross_entropy(
-                    outputs["closure_logits"].reshape(-1, 4),
-                    target_closure_counts.reshape(-1),
-                    ignore_index=-100,
-                )
-            else:
-                logits = model(point_features, vertex_table, input_faces)
             token_losses = F.cross_entropy(
                 logits.reshape(-1, max_vertices),
                 target_faces.reshape(-1),
@@ -719,18 +948,22 @@ def main() -> int:
                 min=1.0,
             )
             if args.count_loss_weight > 0:
-                count_loss = F.cross_entropy(model.predict_face_count_logits(point_features, vertex_table), face_counts)
+                count_logits = outputs.get("count_logits") if isinstance(outputs, dict) else None
+                if count_logits is None and not dist_info["enabled"]:
+                    count_logits = model.predict_face_count_logits(point_features, vertex_table)
+                if count_logits is None:
+                    raise RuntimeError("count logits were not produced by the DDP forward path")
+                count_loss = F.cross_entropy(count_logits, face_counts)
                 loss = token_loss + float(args.count_loss_weight) * count_loss
             else:
                 count_loss = token_loss.new_tensor(0.0)
                 loss = token_loss
-            seed_face_loss_active = bool(
-                args.seed_face_loss_weight > 0
-                and hasattr(model, "seed_face_logits")
-                and (args.seed_face_loss_stop_step <= 0 or step <= int(args.seed_face_loss_stop_step))
-            )
             if seed_face_loss_active:
-                seed_logits = model.seed_face_logits(point_features, vertex_table)
+                seed_logits = outputs.get("seed_logits") if isinstance(outputs, dict) else None
+                if seed_logits is None and not dist_info["enabled"]:
+                    seed_logits = model.seed_face_logits(point_features, vertex_table)
+                if seed_logits is None:
+                    raise RuntimeError("seed logits were not produced by the DDP forward path")
                 seed_targets = target_faces[:, 0, :]
                 seed_face_loss = F.cross_entropy(
                     seed_logits.reshape(-1, max_vertices),
@@ -740,10 +973,9 @@ def main() -> int:
                 loss = loss + float(args.seed_face_loss_weight) * seed_face_loss
             if topology_loss is not None:
                 loss = loss + float(args.topology_loss_weight) * topology_loss
-            if args.edge_action_loss_weight > 0 and hasattr(model, "forward_edge_action"):
-                if hidden_for_aux is not None and hasattr(model, "_edge_action_logits_from_hidden"):
-                    edge_logits = model._edge_action_logits_from_hidden(hidden_for_aux, target_edge_actions, vertex_table)
-                else:
+            if args.edge_action_loss_weight > 0 and hasattr(_unwrap_model(model), "forward_edge_action"):
+                edge_logits = edge_action_logits
+                if edge_logits is None and not dist_info["enabled"]:
                     edge_logits = model.forward_edge_action(point_features, vertex_table, input_faces, target_edge_actions)
                 edge_action_loss = F.cross_entropy(
                     edge_logits.reshape(-1, max_vertices),
@@ -751,14 +983,8 @@ def main() -> int:
                     ignore_index=-100,
                 )
                 loss = loss + float(args.edge_action_loss_weight) * edge_action_loss
-            if args.edge_choice_loss_weight > 0 and hasattr(model, "forward_edge_choice"):
-                if hidden_for_aux is not None and hasattr(model, "_edge_choice_logits_from_hidden"):
-                    edge_choice_logits = model._edge_choice_logits_from_hidden(
-                        hidden_for_aux,
-                        target_edge_choice_candidates,
-                        vertex_table,
-                    )
-                else:
+            if args.edge_choice_loss_weight > 0 and hasattr(_unwrap_model(model), "forward_edge_choice"):
+                if edge_choice_logits is None and not dist_info["enabled"]:
                     edge_choice_logits = model.forward_edge_choice(
                         point_features,
                         vertex_table,
@@ -782,12 +1008,12 @@ def main() -> int:
         if losses[-1] < best_loss:
             best_loss = losses[-1]
             best_step = step
-            if args.track_best_in_memory:
-                best_state = copy.deepcopy({key: value.detach().cpu() for key, value in model.state_dict().items()})
-        if args.checkpoint_every and step % int(args.checkpoint_every) == 0:
+            if args.track_best_in_memory and rank == 0:
+                best_state = copy.deepcopy(_cpu_model_state(model))
+        if rank == 0 and args.checkpoint_every and step % int(args.checkpoint_every) == 0:
             payload = _checkpoint_payload(
                 args=args,
-                model_state={key: value.detach().cpu() for key, value in model.state_dict().items()},
+                model_state=_cpu_model_state(model),
                 optimizer_state=optimizer.state_dict(),
                 losses=losses,
                 num_bins=num_bins,
@@ -801,7 +1027,7 @@ def main() -> int:
             if args.save_current_checkpoint:
                 _save_checkpoint(args.output.parent / "checkpoint.current.pt", payload, torch)
 
-        if step == 1 or step == args.steps or step % log_every == 0:
+        if rank == 0 and (step == 1 or step == args.steps or step % log_every == 0):
             log_item = {
                 "step": step,
                 "loss": losses[-1],
@@ -819,32 +1045,42 @@ def main() -> int:
                 log_item["seed_face_loss_active"] = bool(seed_face_loss_active)
             print(json.dumps(log_item), flush=True)
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    final_state = (
-        best_state
-        if best_state is not None
-        else {key: value.detach().cpu() for key, value in model.state_dict().items()}
-    )
-    _save_checkpoint(
-        args.output,
-        _checkpoint_payload(
-            args=args,
-            model_state=final_state,
-            optimizer_state=optimizer.state_dict(),
-            losses=losses,
-            num_bins=num_bins,
-            max_vertices=max_vertices,
-            max_faces=max_faces,
-            best_loss=best_loss,
-            best_step=best_step,
-            step=args.steps,
-        ),
-        torch,
-    )
+    if dist_info["enabled"]:
+        dist_info["dist"].barrier()
+    if rank != 0:
+        _cleanup_distributed(dist_info)
+        return 0
+
+    checkpoint_path = None
+    if not args.skip_final_checkpoint:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        final_state = (
+            best_state
+            if best_state is not None
+            else _cpu_model_state(model)
+        )
+        _save_checkpoint(
+            args.output,
+            _checkpoint_payload(
+                args=args,
+                model_state=final_state,
+                optimizer_state=optimizer.state_dict(),
+                losses=losses,
+                num_bins=num_bins,
+                max_vertices=max_vertices,
+                max_faces=max_faces,
+                best_loss=best_loss,
+                best_step=best_step,
+                step=args.steps,
+            ),
+            torch,
+        )
+        checkpoint_path = str(args.output)
     print(
         json.dumps(
             {
-                "checkpoint": str(args.output),
+                "checkpoint": checkpoint_path,
+                "checkpoint_skipped": bool(args.skip_final_checkpoint),
                 "final_loss": losses[-1],
                 "best_loss": best_loss,
                 "best_step": best_step,
@@ -853,6 +1089,7 @@ def main() -> int:
         ),
         flush=True,
     )
+    _cleanup_distributed(dist_info)
     return 0
 
 

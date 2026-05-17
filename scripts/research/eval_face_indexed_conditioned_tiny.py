@@ -600,7 +600,9 @@ def _select_corner_causal_face(
     if use_topology_head and closure_target_bonus != 0.0 and hasattr(model, "topology_output"):
         closure_target_scores = torch.log_softmax(model.topology_output(hidden)[0, -1], dim=0).detach().cpu().numpy()
     prefix0 = torch.full((1, 1, 3), -1, dtype=torch.long, device=device)
-    logits0 = model._corner_causal_logits_from_hidden(hidden, prefix0)[0, 0, 0, :vertex_count].detach().cpu().numpy()
+    logits0 = model._corner_causal_logits_from_hidden(hidden, prefix0, vertex_table=vertex_table)[
+        0, 0, 0, :vertex_count
+    ].detach().cpu().numpy()
     seed_logits: np.ndarray | None = None
     if state.accepted_faces == 0 and seed_face_bonus != 0.0 and hasattr(model, "seed_face_logits"):
         seed_logits = model.seed_face_logits(point_features, vertex_table)[0, :, :vertex_count].detach().cpu().numpy()
@@ -642,6 +644,7 @@ def _select_corner_causal_face(
     logits1 = model._corner_causal_logits_from_hidden(
         hidden.expand(len(top0), -1, -1),
         torch.as_tensor(prefix1, dtype=torch.long, device=device),
+        vertex_table=vertex_table,
     )[:, 0, 1, :vertex_count].detach().cpu().numpy()
     if seed_logits is not None:
         logits1 = logits1 + float(seed_face_bonus) * seed_logits[1].reshape(1, -1)
@@ -668,6 +671,7 @@ def _select_corner_causal_face(
     logits2 = model._corner_causal_logits_from_hidden(
         hidden.expand(len(pairs), -1, -1),
         torch.as_tensor(prefix2, dtype=torch.long, device=device),
+        vertex_table=vertex_table,
     )[:, 0, 2, :vertex_count].detach().cpu().numpy()
     if seed_logits is not None:
         logits2 = logits2 + float(seed_face_bonus) * seed_logits[2].reshape(1, -1)
@@ -784,7 +788,9 @@ def _select_corner_causal_face_candidates(
     if use_topology_head and closure_target_bonus != 0.0 and hasattr(model, "topology_output"):
         closure_target_scores = torch.log_softmax(model.topology_output(hidden)[0, -1], dim=0).detach().cpu().numpy()
     prefix0 = torch.full((1, 1, 3), -1, dtype=torch.long, device=device)
-    logits0 = model._corner_causal_logits_from_hidden(hidden, prefix0)[0, 0, 0, :vertex_count].detach().cpu().numpy()
+    logits0 = model._corner_causal_logits_from_hidden(hidden, prefix0, vertex_table=vertex_table)[
+        0, 0, 0, :vertex_count
+    ].detach().cpu().numpy()
     seed_logits: np.ndarray | None = None
     if state.accepted_faces == 0 and seed_face_bonus != 0.0 and hasattr(model, "seed_face_logits"):
         seed_logits = model.seed_face_logits(point_features, vertex_table)[0, :, :vertex_count].detach().cpu().numpy()
@@ -827,6 +833,7 @@ def _select_corner_causal_face_candidates(
     logits1 = model._corner_causal_logits_from_hidden(
         hidden.expand(len(top0), -1, -1),
         torch.as_tensor(prefix1, dtype=torch.long, device=device),
+        vertex_table=vertex_table,
     )[:, 0, 1, :vertex_count].detach().cpu().numpy()
     if seed_logits is not None:
         logits1 = logits1 + float(seed_face_bonus) * seed_logits[1].reshape(1, -1)
@@ -853,6 +860,7 @@ def _select_corner_causal_face_candidates(
     logits2 = model._corner_causal_logits_from_hidden(
         hidden.expand(len(pairs), -1, -1),
         torch.as_tensor(prefix2, dtype=torch.long, device=device),
+        vertex_table=vertex_table,
     )[:, 0, 2, :vertex_count].detach().cpu().numpy()
     if seed_logits is not None:
         logits2 = logits2 + float(seed_face_bonus) * seed_logits[2].reshape(1, -1)
@@ -1053,6 +1061,7 @@ def _select_corner_causal_boundary_face(
     logits1_unique = model._corner_causal_logits_from_hidden(
         hidden.expand(len(unique_first), -1, -1),
         torch.as_tensor(prefix1, dtype=torch.long, device=device),
+        vertex_table=vertex_table,
     )[:, 0, 1, :vertex_count].detach().cpu().numpy()
 
     unique_pairs, pair_inverse = np.unique(candidate_arr[:, :2], axis=0, return_inverse=True)
@@ -1062,6 +1071,7 @@ def _select_corner_causal_boundary_face(
     logits2_unique = model._corner_causal_logits_from_hidden(
         hidden.expand(len(unique_pairs), -1, -1),
         torch.as_tensor(prefix2, dtype=torch.long, device=device),
+        vertex_table=vertex_table,
     )[:, 0, 2, :vertex_count].detach().cpu().numpy()
     best_face: tuple[int, int, int] | None = None
     best_score = float("-inf")
@@ -1224,6 +1234,7 @@ def _select_corner_causal_boundary_face_candidates(
     logits1_unique = model._corner_causal_logits_from_hidden(
         hidden.expand(len(unique_first), -1, -1),
         torch.as_tensor(prefix1, dtype=torch.long, device=device),
+        vertex_table=vertex_table,
     )[:, 0, 1, :vertex_count].detach().cpu().numpy()
 
     unique_pairs, pair_inverse = np.unique(candidate_arr[:, :2], axis=0, return_inverse=True)
@@ -1233,6 +1244,7 @@ def _select_corner_causal_boundary_face_candidates(
     logits2_unique = model._corner_causal_logits_from_hidden(
         hidden.expand(len(unique_pairs), -1, -1),
         torch.as_tensor(prefix2, dtype=torch.long, device=device),
+        vertex_table=vertex_table,
     )[:, 0, 2, :vertex_count].detach().cpu().numpy()
 
     scored: list[tuple[tuple[int, int, int], float]] = []
@@ -1275,6 +1287,9 @@ def _aggregate(items: list[dict[str, Any]]) -> dict[str, Any]:
         return {"attempted": 0}
     token_accuracies = [item["teacher_forced_token_accuracy"] for item in items if item.get("teacher_forced_token_accuracy") is not None]
     face_exact_ratios = [item["teacher_forced_face_exact_ratio"] for item in items if item.get("teacher_forced_face_exact_ratio") is not None]
+    raw_items = [item for item in items if item.get("raw_watertight") is not None]
+    raw_chamfer = [item["raw_chamfer_l2_normalized"] for item in items if item.get("raw_chamfer_l2_normalized") is not None]
+    raw_normal = [item["raw_normal_consistency"] for item in items if item.get("raw_normal_consistency") is not None]
     topology_stats = [item.get("topology_decode_stats") or {} for item in items]
     requested_faces = [int(stats.get("topology_requested_faces", item.get("selected_face_count", 0)) or 0) for item, stats in zip(items, topology_stats)]
     generated_faces = [int(stats.get("topology_generated_faces", item.get("generated_faces", 0)) or 0) for item, stats in zip(items, topology_stats)]
@@ -1289,10 +1304,17 @@ def _aggregate(items: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_boundary_edges": float(np.mean([item.get("boundary_edges", 0) for item in items])),
         "mean_nonmanifold_edges": float(np.mean([item.get("nonmanifold_edges", 0) for item in items])),
         "mean_nonmanifold_vertices": float(np.mean([item.get("nonmanifold_vertices", 0) for item in items])),
+        "raw_watertight": int(sum(1 for item in raw_items if item.get("raw_watertight"))),
+        "raw_mean_boundary_edges": float(np.mean([item.get("raw_boundary_edges", 0) for item in raw_items])) if raw_items else None,
+        "raw_mean_nonmanifold_edges": float(np.mean([item.get("raw_nonmanifold_edges", 0) for item in raw_items])) if raw_items else None,
+        "raw_mean_nonmanifold_vertices": float(np.mean([item.get("raw_nonmanifold_vertices", 0) for item in raw_items])) if raw_items else None,
+        "raw_mean_chamfer_l2_normalized": float(np.mean(raw_chamfer)) if raw_chamfer else None,
+        "raw_mean_normal_consistency": float(np.mean(raw_normal)) if raw_normal else None,
         "mean_chamfer_l2": float(np.mean([item["chamfer_l2"] for item in items if item.get("chamfer_l2") is not None])) if any(item.get("chamfer_l2") is not None for item in items) else None,
         "mean_chamfer_l2_normalized": float(np.mean([item["chamfer_l2_normalized"] for item in items if item.get("chamfer_l2_normalized") is not None])) if any(item.get("chamfer_l2_normalized") is not None for item in items) else None,
         "mean_hausdorff_l2_normalized": float(np.mean([item["hausdorff_l2_normalized"] for item in items if item.get("hausdorff_l2_normalized") is not None])) if any(item.get("hausdorff_l2_normalized") is not None for item in items) else None,
         "mean_edge_pairing_ratio": float(np.mean([item.get("token_edge_pairing_ratio", 0.0) for item in items])),
+        "raw_mean_edge_pairing_ratio": float(np.mean([item.get("raw_token_edge_pairing_ratio", 0.0) for item in raw_items])) if raw_items else None,
         "mean_teacher_forced_token_accuracy": float(np.mean(token_accuracies)) if token_accuracies else None,
         "mean_teacher_forced_face_exact_ratio": float(np.mean(face_exact_ratios)) if face_exact_ratios else None,
         "mean_topology_fallbacks": float(np.mean(fallback_counts)) if fallback_counts else 0.0,
@@ -1325,6 +1347,11 @@ def main() -> int:
     parser.add_argument("--token-repair-mode", choices=["none", "dedupe", "manifold"], default="none")
     parser.add_argument("--boundary-fill", choices=["none", "fan", "centroid"], default="none")
     parser.add_argument("--boundary-fill-max-loop-edges", type=int, default=128)
+    parser.add_argument(
+        "--raw-pair-metrics",
+        action="store_true",
+        help="Also compute generated-vs-reference geometry metrics before boundary fill/repair. Useful for short repair probes.",
+    )
     parser.add_argument(
         "--decode-strategy",
         choices=["free_run", "teacher_forced", "teacher_identity"],
@@ -1556,6 +1583,9 @@ def main() -> int:
         generated_seq, dropped_degenerate_faces = drop_geometric_degenerate_indexed_faces(generated_seq)
         if dropped_degenerate_faces:
             degenerate_drop_report = {"dropped_faces": int(dropped_degenerate_faces)}
+        raw_generated_seq = generated_seq
+        raw_generated = decode_indexed_face_tokens_to_mesh(raw_generated_seq)
+        raw_token_report = face_token_topology_report(indexed_to_coordinate_tokens(raw_generated_seq))
         if args.boundary_fill in {"fan", "centroid"}:
             generated_seq, fill_report = fill_indexed_boundary_loops(
                 generated_seq,
@@ -1576,14 +1606,19 @@ def main() -> int:
             generated, pinch_split_report = split_pinched_vertices(generated)
         token_report = face_token_topology_report(indexed_to_coordinate_tokens(generated_seq))
         if args.export_dir:
+            raw_path = args.export_dir / f"{idx:04d}_{path.stem}_raw.glb"
             generated_path = args.export_dir / f"{idx:04d}_{path.stem}_generated.glb"
             teacher_path = args.export_dir / f"{idx:04d}_{path.stem}_teacher.glb"
         else:
+            raw_path = args.output.parent / f".tmp_{idx:04d}_{path.stem}_raw.glb"
             generated_path = args.output.parent / f".tmp_{idx:04d}_{path.stem}_generated.glb"
             teacher_path = args.output.parent / f".tmp_{idx:04d}_{path.stem}_teacher.glb"
-        generated_path.parent.mkdir(parents=True, exist_ok=True)
+        raw_path.parent.mkdir(parents=True, exist_ok=True)
+        raw_generated.export(raw_path)
         generated.export(generated_path)
         teacher.export(teacher_path)
+        raw_quality = evaluate_mesh(raw_path)
+        raw_metrics = evaluate_mesh_pair(raw_path, teacher_path, samples=args.pair_samples) if args.raw_pair_metrics else {}
         metrics = evaluate_mesh_pair(generated_path, teacher_path, samples=args.pair_samples)
         quality = evaluate_mesh(generated_path)
         item = {
@@ -1609,8 +1644,20 @@ def main() -> int:
             "topology_decode_stats": decode_stats,
             "generated_faces": int(len(generated.faces)),
             "generated_vertices": int(len(generated.vertices)),
+            "raw_generated_faces": int(len(raw_generated.faces)),
+            "raw_generated_vertices": int(len(raw_generated.vertices)),
             "teacher_faces": int(len(teacher.faces)),
             "teacher_vertices": int(len(teacher.vertices)),
+            "raw_watertight": bool(raw_quality.get("watertight")),
+            "raw_boundary_edges": int(raw_quality.get("boundary_edge_count") or 0),
+            "raw_nonmanifold_edges": int(raw_quality.get("nonmanifold_edge_count") or 0),
+            "raw_nonmanifold_vertices": int(raw_quality.get("nonmanifold_vertex_count") or 0),
+            "raw_token_watertight_edge_graph": bool(raw_token_report.watertight_edge_graph),
+            "raw_token_boundary_edge_count": int(raw_token_report.boundary_edge_count),
+            "raw_token_nonmanifold_edge_count": int(raw_token_report.nonmanifold_edge_count),
+            "raw_token_edge_pairing_ratio": float(raw_token_report.edge_pairing_ratio),
+            "raw_chamfer_l2_normalized": raw_metrics.get("chamfer_l2_normalized"),
+            "raw_normal_consistency": raw_metrics.get("normal_consistency"),
             "watertight": bool(quality.get("watertight")),
             "boundary_edges": int(quality.get("boundary_edge_count") or 0),
             "nonmanifold_edges": int(quality.get("nonmanifold_edge_count") or 0),
@@ -1633,6 +1680,9 @@ def main() -> int:
                     "path": path.name,
                     "decode_strategy": args.decode_strategy,
                     "decode_elapsed_sec": item["decode_elapsed_sec"],
+                    "raw_watertight": item["raw_watertight"],
+                    "raw_boundary_edges": item["raw_boundary_edges"],
+                    "raw_nonmanifold_vertices": item["raw_nonmanifold_vertices"],
                     "watertight": item["watertight"],
                     "chamfer_l2_normalized": item.get("chamfer_l2_normalized"),
                     "normal_consistency": item.get("normal_consistency"),
@@ -1646,6 +1696,7 @@ def main() -> int:
         if args.export_dir:
             pass
         else:
+            raw_path.unlink(missing_ok=True)
             generated_path.unlink(missing_ok=True)
             teacher_path.unlink(missing_ok=True)
         if args.cleanup_export_dir:
@@ -1685,6 +1736,7 @@ def main() -> int:
         "token_repair_mode": args.token_repair_mode,
         "boundary_fill": args.boundary_fill,
         "boundary_fill_max_loop_edges": int(args.boundary_fill_max_loop_edges),
+        "raw_pair_metrics": bool(args.raw_pair_metrics),
         "corner_decode": "causal" if use_corner_causal else "parallel",
         "edge_head_mode": str(getattr(model, "edge_head_mode", "index")),
         "constraint_top_k": int(args.constraint_top_k),
