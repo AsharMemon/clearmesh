@@ -31,6 +31,13 @@ def _select_rows(args: argparse.Namespace) -> list[dict[str, Any]]:
     if args.scan_limit:
         rows = rows[: args.scan_limit]
     rows = [row for row in rows if int(row.get("quality_score", -1)) >= args.min_quality]
+    if args.max_size_mb > 0:
+        max_size_bytes = int(args.max_size_mb * 1024 * 1024)
+        rows = [
+            row
+            for row in rows
+            if int(row.get("hf_size_bytes") or 0) <= 0 or int(row.get("hf_size_bytes") or 0) <= max_size_bytes
+        ]
     rng = random.Random(args.seed)
     if args.shuffle:
         rng.shuffle(rows)
@@ -39,7 +46,31 @@ def _select_rows(args: argparse.Namespace) -> list[dict[str, Any]]:
     return rows
 
 
-def _download_one(row: dict[str, Any], cache_dir: Path, copy_dir: Path, retries: int, retry_sleep_seconds: float) -> dict[str, Any]:
+def _materialize_download(source: Path, target: Path, *, hardlink: bool) -> None:
+    if target.exists() and target.stat().st_size == source.stat().st_size:
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        target.unlink()
+    if hardlink:
+        try:
+            os.link(source, target)
+            return
+        except OSError:
+            pass
+    shutil.copy2(source, target)
+
+
+def _download_one(
+    row: dict[str, Any],
+    cache_dir: Path,
+    copy_dir: Path,
+    retries: int,
+    retry_sleep_seconds: float,
+    *,
+    hardlink_cache: bool,
+    cleanup_cache_each: bool,
+) -> dict[str, Any]:
     from huggingface_hub import hf_hub_download
 
     repo_id = str(row.get("repo_id") or row.get("hf_repo") or "YiboZhang2001/TexVerse")
@@ -58,13 +89,14 @@ def _download_one(row: dict[str, Any], cache_dir: Path, copy_dir: Path, retries:
                 token=token,
                 local_files_only=False,
             )
-            source = Path(resolved)
+            # hf_hub_download often returns a snapshot symlink into the blob
+            # cache. Resolve it before hardlinking so cache cleanup cannot
+            # leave a dangling symlink in downloads.
+            source = Path(resolved).resolve()
             suffix = source.suffix or ".glb"
             uid = str(row.get("uid") or source.stem.split("_")[0])
             target = copy_dir / f"{uid}_{row.get('download_resolution', '')}{suffix}"
-            if not target.exists() or target.stat().st_size != source.stat().st_size:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, target)
+            _materialize_download(source, target, hardlink=hardlink_cache)
             out = dict(row)
             out["uid"] = uid
             out["path"] = str(target)
@@ -72,6 +104,12 @@ def _download_one(row: dict[str, Any], cache_dir: Path, copy_dir: Path, retries:
             out["hf_path"] = hf_path
             out["repo_id"] = repo_id
             out["downloaded_size_bytes"] = target.stat().st_size
+            if cleanup_cache_each:
+                # Avoid doubling TexVerse disk use with a persistent HF cache.
+                # After a hardlink/copy lands in downloads, the cache copy is
+                # no longer needed for this single-worker shard.
+                shutil.rmtree(cache_dir, ignore_errors=True)
+                cache_dir.mkdir(parents=True, exist_ok=True)
             return out
         except Exception as exc:  # noqa: BLE001 - keep shard downloads moving.
             last_exc = exc
@@ -99,7 +137,12 @@ def main() -> int:
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--retries", type=int, default=4)
     parser.add_argument("--retry-sleep-seconds", type=float, default=20.0)
+    parser.add_argument("--max-size-mb", type=float, default=0.0, help="Skip rows with hf_size_bytes above this threshold; 0 disables.")
+    parser.add_argument("--hardlink-cache", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--cleanup-cache-each", action="store_true", help="Clear HF cache after each successful file; requires --workers 1.")
     args = parser.parse_args()
+    if args.cleanup_cache_each and args.workers != 1:
+        raise SystemExit("--cleanup-cache-each is only safe with --workers 1")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     cache_dir = args.output_dir / ".hf_cache"
@@ -114,7 +157,16 @@ def main() -> int:
     errors: list[dict[str, Any]] = []
     with futures.ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
         future_to_row = {
-            executor.submit(_download_one, row, cache_dir, copy_dir, args.retries, args.retry_sleep_seconds): row
+            executor.submit(
+                _download_one,
+                row,
+                cache_dir,
+                copy_dir,
+                args.retries,
+                args.retry_sleep_seconds,
+                hardlink_cache=args.hardlink_cache,
+                cleanup_cache_each=args.cleanup_cache_each,
+            ): row
             for row in selected
         }
         for index, future in enumerate(futures.as_completed(future_to_row), start=1):
@@ -137,6 +189,9 @@ def main() -> int:
         "selected": len(selected),
         "downloaded": len(downloaded),
         "errors": len(errors),
+        "max_size_mb": args.max_size_mb,
+        "hardlink_cache": args.hardlink_cache,
+        "cleanup_cache_each": args.cleanup_cache_each,
         "selected_annotations": str(selected_path),
         "download_manifest": str(args.output_dir / "download_manifest.json"),
         "downloaded_candidates": str(candidates_path),
