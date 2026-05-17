@@ -211,6 +211,10 @@ fi
 source $(printf '%q' "$REMOTE_VENV/bin/activate")
 python -m pip install -U pip setuptools wheel
 python -m pip install -q -r requirements-data.txt pillow scipy
+if ! command -v rclone >/dev/null 2>&1; then
+  sudo apt-get update
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y rclone
+fi
 python - <<'PY'
 import fast_simplification  # noqa: F401
 import networkx  # noqa: F401
@@ -220,6 +224,7 @@ import skimage  # noqa: F401
 import trimesh  # noqa: F401
 print('face_corpus_queue_python_deps_ok')
 PY
+rclone version | head -n 1
 exit
 REMOTE_BOOTSTRAP
 fi
