@@ -14,6 +14,7 @@ GPU="${GPU:-a6000}"
 MODE="${MODE:-prototyping}"
 VCPUS="${VCPUS:-8}"
 PRIMARY_DISK="${PRIMARY_DISK:-200}"
+EPHEMERAL_DISK="${EPHEMERAL_DISK:-0}"
 TEMPLATE="${TEMPLATE:-base}"
 WAIT_INTERVAL_SEC="${WAIT_INTERVAL_SEC:-10}"
 WAIT_TIMEOUT_SEC="${WAIT_TIMEOUT_SEC:-1800}"
@@ -131,6 +132,9 @@ PY
 
 if [[ "$CREATE_INSTANCE" = "1" ]]; then
   create_args=(create --gpu "$GPU" --mode "$MODE" --num-gpus 1 --primary-disk "$PRIMARY_DISK" --template "$TEMPLATE")
+  if [[ "$EPHEMERAL_DISK" != "0" ]]; then
+    create_args+=(--ephemeral-disk "$EPHEMERAL_DISK")
+  fi
   if [[ "$MODE" = "prototyping" ]]; then
     create_args+=(--vcpus "$VCPUS")
   fi
@@ -294,7 +298,17 @@ nohup env \\
   DOWNLOAD_RETRY_SLEEP_SECONDS=$(printf '%q' "${DOWNLOAD_RETRY_SLEEP_SECONDS:-15}") \\
   DOWNLOAD_RATE_LIMIT_SLEEP_SECONDS=$(printf '%q' "${DOWNLOAD_RATE_LIMIT_SLEEP_SECONDS:-600}") \\
   TEXVERSE_DOWNLOAD_WORKERS=$(printf '%q' "${TEXVERSE_DOWNLOAD_WORKERS:-${DOWNLOAD_PROCESSES:-16}}") \\
+  TARGET_FACES=$(printf '%q' "${TARGET_FACES:-512}") \\
+  TOKEN_MAX_FACES=$(printf '%q' "${TOKEN_MAX_FACES:-512}") \\
+  POINT_SAMPLES=$(printf '%q' "${POINT_SAMPLES:-8192}") \\
+  NUM_BINS=$(printf '%q' "${NUM_BINS:-128}") \\
+  PAPER_WITHIN_FACE_ORDER=$(printf '%q' "${PAPER_WITHIN_FACE_ORDER:-rotate_min_zyx}") \\
+  STRICT_ENGINE=$(printf '%q' "${STRICT_ENGINE:-voxel_shell}") \\
+  FALLBACK=$(printf '%q' "${FALLBACK:-convex_hull}") \\
+  VOXEL_RESOLUTION=$(printf '%q' "${VOXEL_RESOLUTION:-64}") \\
+  MESH_VOXEL_MAX_FACES=$(printf '%q' "${MESH_VOXEL_MAX_FACES:-5000}") \\
   STRICT_TARGET_PROGRESS_EVERY=$(printf '%q' "${STRICT_TARGET_PROGRESS_EVERY:-100}") \\
+  TEST_RATIO=$(printf '%q' "${TEST_RATIO:-0.02}") \\
   bash scripts/thunder/face_corpus_shard_queue_worker.sh > $(printf '%q' "$REMOTE_QUEUE_LOG") 2>&1 &
 echo \$! > $(printf '%q' "$REMOTE_QUEUE_PID")
 echo "face_corpus_queue_pid=\$(cat $(printf '%q' "$REMOTE_QUEUE_PID"))"
@@ -320,7 +334,9 @@ cat > "$setup_dir/queue_info.json" <<JSON
   "remote_b2_env": "$REMOTE_B2_ENV",
   "wait_for_pid_file": "$WAIT_FOR_PID_FILE",
   "prequeue_completed_root": "$PREQUEUE_COMPLETED_ROOT",
-  "prequeue_b2_prefix": "$PREQUEUE_B2_PREFIX"
+  "prequeue_b2_prefix": "$PREQUEUE_B2_PREFIX",
+  "target_faces": ${TARGET_FACES:-512},
+  "token_max_faces": ${TOKEN_MAX_FACES:-512}
 }
 JSON
 
