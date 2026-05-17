@@ -127,7 +127,10 @@ cleanup_heavy_payload() {
       cp "$root/corpus/$f" "$root/$f" || true
     fi
   done
-  rm -rf "$root/corpus" "$root/lean_face_corpus.tar.gz"
+  # TexVerse/HF downloads can leave a large local cache even when the shard
+  # fails before corpus packaging. Remove it so queue workers can safely move
+  # on to the next shard instead of slowly filling the 200GB Thunder disk.
+  rm -rf "$root/corpus" "$root/.hf_cache" "$root/hf_cache" "$root/lean_face_corpus.tar.gz"
 }
 
 stop_pid_file() {
