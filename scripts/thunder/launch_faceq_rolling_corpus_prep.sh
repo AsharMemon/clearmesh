@@ -41,6 +41,8 @@ POLL_INTERVAL_SECONDS="${POLL_INTERVAL_SECONDS:-300}"
 RUN_ONCE="${RUN_ONCE:-0}"
 COPY_MODE="${COPY_MODE:-hardlink}"
 MAX_ARCHIVES="${MAX_ARCHIVES:-0}"
+PACKAGE_FULL_ARCHIVE="${PACKAGE_FULL_ARCHIVE:-1}"
+FAST_SHARD_ARCHIVE_LIST="${FAST_SHARD_ARCHIVE_LIST:-1}"
 
 WAIT_INTERVAL_SEC="${WAIT_INTERVAL_SEC:-10}"
 WAIT_TIMEOUT_SEC="${WAIT_TIMEOUT_SEC:-1800}"
@@ -243,8 +245,18 @@ PY
 list_completed_archives() {
   : > "$ARCHIVE_LIST_TMP"
   for prefix in $B2_PREFIXES; do
-    rclone lsf "b2env:$B2_BUCKET/$prefix" --recursive --files-only 2>/dev/null \
-      | awk '/lean_face_corpus\.tar\.gz$/ {print p "/" $0}' p="$prefix" >> "$ARCHIVE_LIST_TMP" || true
+    if [[ "$FAST_SHARD_ARCHIVE_LIST" = "1" ]]; then
+      # Shard outputs use a regular layout:
+      #   <prefix>/shardXXXX/lean_face_corpus.tar.gz
+      # Listing only first-level shard directories is much faster than a
+      # recursive walk over every uploaded report/mesh/metadata file.
+      rclone lsf "b2env:$B2_BUCKET/$prefix" --dirs-only 2>/dev/null \
+        | awk '/^shard[0-9]+\/$/ {print p "/" $0 "lean_face_corpus.tar.gz"}' p="$prefix" \
+        >> "$ARCHIVE_LIST_TMP" || true
+    else
+      rclone lsf "b2env:$B2_BUCKET/$prefix" --recursive --files-only 2>/dev/null \
+        | awk '/lean_face_corpus\.tar\.gz$/ {print p "/" $0}' p="$prefix" >> "$ARCHIVE_LIST_TMP" || true
+    fi
   done
   sort -u "$ARCHIVE_LIST_TMP" > "$ARCHIVE_LIST"
 }
@@ -261,10 +273,23 @@ download_new_archives() {
     extract_path="$EXTRACT_DIR/$safe"
     if [[ ! -f "$marker" ]]; then
       status download_archive "$rel"
-      rclone copyto "b2env:$B2_BUCKET/$rel" "$archive_path" --stats 30s
+      if ! rclone copyto "b2env:$B2_BUCKET/$rel" "$archive_path" --stats 30s; then
+        status archive_copy_failed "$rel"
+        rm -f "$archive_path"
+        continue
+      fi
+      if [[ ! -s "$archive_path" ]]; then
+        status archive_missing_or_empty "$rel"
+        rm -f "$archive_path"
+        continue
+      fi
       rm -rf "$extract_path"
       mkdir -p "$extract_path"
-      tar -xzf "$archive_path" -C "$extract_path"
+      if ! tar -xzf "$archive_path" -C "$extract_path"; then
+        status archive_extract_failed "$rel"
+        rm -rf "$extract_path" "$archive_path"
+        continue
+      fi
       touch "$marker"
       new_count=$((new_count + 1))
     fi
@@ -281,17 +306,18 @@ build_input_list() {
 }
 
 build_snapshot() {
-  local archive_count unique_count snapshot_name snapshot_dir dedupe_dir archive output_prefix
-  archive_count="$(wc -l < "$INPUT_LIST" | tr -d ' ')"
-  if [[ "$archive_count" -eq 0 ]]; then
+  local manifest_count source_archive_count unique_count snapshot_name snapshot_dir dedupe_dir archive output_prefix
+  manifest_count="$(wc -l < "$INPUT_LIST" | tr -d ' ')"
+  source_archive_count="$(find "$EXTRACT_DIR" -name '*.extracted' -type f | wc -l | tr -d ' ')"
+  if [[ "$manifest_count" -eq 0 ]]; then
     status snapshot_skipped "no_extracted_archives"
     return 0
   fi
-  snapshot_name="snapshot_$(date -u +%Y%m%dT%H%M%SZ)_archives${archive_count}"
+  snapshot_name="snapshot_$(date -u +%Y%m%dT%H%M%SZ)_archives${source_archive_count}_manifests${manifest_count}"
   snapshot_dir="$SNAPSHOTS_DIR/$snapshot_name/merged"
   dedupe_dir="$SNAPSHOTS_DIR/$snapshot_name/split_dedup_tokenhash"
   mkdir -p "$SNAPSHOTS_DIR/$snapshot_name"
-  status merge_started "snapshot=$snapshot_name archives=$archive_count"
+  status merge_started "snapshot=$snapshot_name archives=$source_archive_count manifests=$manifest_count"
   python scripts/research/merge_face_corpus_shards.py \
     --input-list "$INPUT_LIST" \
     --output-dir "$snapshot_dir" \
@@ -337,14 +363,6 @@ summary = {
 }
 Path(snapshot_dir, "rolling_prep_summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
 PY
-  archive="$SNAPSHOTS_DIR/${snapshot_name}_faceq_dedup_split.tar.gz"
-  tar -C "$SNAPSHOTS_DIR/$snapshot_name" -czf "$archive" \
-    split_dedup_tokenhash \
-    leakage_check.json \
-    rolling_prep_summary.json \
-    merge.log \
-    dedupe.log \
-    leakage.log
   output_prefix="$B2_OUTPUT_PREFIX/$snapshot_name"
   status upload_started "$output_prefix unique=$unique_count"
   rclone copy "$SNAPSHOTS_DIR/$snapshot_name" "b2env:$B2_BUCKET/$output_prefix" \
@@ -352,14 +370,29 @@ PY
     --include 'leakage_check.json' \
     --include '*.log' \
     --include 'split_dedup_tokenhash/split_summary.json' \
+    --include 'split_dedup_tokenhash/train/manifest.jsonl' \
+    --include 'split_dedup_tokenhash/test/manifest.jsonl' \
     --include 'merged/merge_summary.json' \
     --exclude '*' \
     --stats 30s || true
-  rclone copyto "$archive" "b2env:$B2_BUCKET/$output_prefix/faceq_merged_dedup_split.tar.gz" --stats 30s
+  if [[ "$PACKAGE_FULL_ARCHIVE" = "1" ]]; then
+    archive="$SNAPSHOTS_DIR/${snapshot_name}_faceq_dedup_split.tar.gz"
+    status package_started "$archive"
+    tar -C "$SNAPSHOTS_DIR/$snapshot_name" -czf "$archive" \
+      split_dedup_tokenhash \
+      leakage_check.json \
+      rolling_prep_summary.json \
+      merge.log \
+      dedupe.log \
+      leakage.log
+    rclone copyto "$archive" "b2env:$B2_BUCKET/$output_prefix/faceq_merged_dedup_split.tar.gz" --stats 30s
+  else
+    status package_skipped "PACKAGE_FULL_ARCHIVE=0 snapshot=$snapshot_name"
+  fi
   rclone copyto "$SNAPSHOTS_DIR/$snapshot_name/rolling_prep_summary.json" "b2env:$B2_BUCKET/$B2_OUTPUT_PREFIX/latest_rolling_prep_summary.json" --stats 30s
   rclone copyto "$SNAPSHOTS_DIR/$snapshot_name/leakage_check.json" "b2env:$B2_BUCKET/$B2_OUTPUT_PREFIX/latest_leakage_check.json" --stats 30s
   printf '%s\n' "$output_prefix" > "$ROOT/latest_snapshot_prefix.txt"
-  status snapshot_complete "snapshot=$snapshot_name unique=$unique_count archive=$output_prefix/faceq_merged_dedup_split.tar.gz"
+  status snapshot_complete "snapshot=$snapshot_name unique=$unique_count package_full_archive=$PACKAGE_FULL_ARCHIVE output=$output_prefix"
 }
 
 main_loop() {
@@ -402,7 +435,8 @@ python3 - "$remote_script" \
   "$REMOTE_ROOT" "$REMOTE_REPO" "$REMOTE_VENV" "$REMOTE_B2_ENV" \
   "$B2_BUCKET" "$B2_PREFIXES" "$B2_OUTPUT_PREFIX" "$MIN_UNIQUE_FOR_ARCHIVE" \
   "$MIN_NEW_ARCHIVES" "$TARGET_UNIQUE" "$TEST_RATIO" "$SEED" \
-  "$POLL_INTERVAL_SECONDS" "$RUN_ONCE" "$COPY_MODE" "$MAX_ARCHIVES" <<'PY'
+  "$POLL_INTERVAL_SECONDS" "$RUN_ONCE" "$COPY_MODE" "$MAX_ARCHIVES" \
+  "$PACKAGE_FULL_ARCHIVE" "$FAST_SHARD_ARCHIVE_LIST" <<'PY'
 from pathlib import Path
 import sys
 
@@ -424,6 +458,8 @@ values = {
     "RUN_ONCE": sys.argv[15],
     "COPY_MODE": sys.argv[16],
     "MAX_ARCHIVES": sys.argv[17],
+    "PACKAGE_FULL_ARCHIVE": sys.argv[18],
+    "FAST_SHARD_ARCHIVE_LIST": sys.argv[19],
 }
 text = path.read_text()
 prefix = "\n".join(f"{key}={value!r}" for key, value in values.items())
