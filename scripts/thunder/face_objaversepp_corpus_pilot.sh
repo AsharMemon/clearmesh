@@ -63,6 +63,7 @@ TEST_RATIO="${TEST_RATIO:-0.2}"
 TEST_COUNT="${TEST_COUNT:-0}"
 ARCHIVE_PATH="${ARCHIVE_PATH:-}"
 LEAN_ARCHIVE_PATH="${LEAN_ARCHIVE_PATH:-}"
+CLEANUP_RAW_AFTER_STRICT_TARGETS="${CLEANUP_RAW_AFTER_STRICT_TARGETS:-1}"
 
 cd /home/ubuntu/clearmesh
 
@@ -164,6 +165,11 @@ python scripts/research/prepare_face_strict_targets.py \
   --fallback "$FALLBACK" \
   --progress-every "$STRICT_TARGET_PROGRESS_EVERY" \
   "${TARGET_ARGS[@]}"
+
+if [ "$CLEANUP_RAW_AFTER_STRICT_TARGETS" = "1" ] && [ -f "$RUN_DIR/strict_targets/strict_target_manifest.json" ]; then
+  # Tokenization and packaging use strict_targets; raw downloads are only a disk liability after conversion.
+  rm -rf "$RUN_DIR/raw"
+fi
 
 python scripts/research/build_face_token_dataset.py \
   --manifest "$RUN_DIR/strict_targets/strict_target_manifest.json" \
