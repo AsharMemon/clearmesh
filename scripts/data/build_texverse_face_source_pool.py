@@ -165,10 +165,17 @@ def _parse_variant(repo_id: str, item: dict[str, Any]) -> tuple[str, Variant] | 
     return uid, Variant(repo_id=repo_id, path=path, resolution=resolution, size=int(size) if isinstance(size, int) else None)
 
 
+def _normalize_id(raw: str) -> str:
+    text = raw.strip().lower()
+    if ":" in text:
+        text = text.split(":", 1)[1]
+    return text
+
+
 def _load_id_set(path: Path | None) -> set[str]:
     if path is None or not path.exists():
         return set()
-    return {line.strip().lower() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()}
+    return {_normalize_id(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()}
 
 
 def _discover_variants(args: argparse.Namespace, cache_dir: Path) -> dict[str, dict[int, Variant]]:
@@ -268,6 +275,12 @@ def main() -> int:
     parser.add_argument("--main-roots", nargs="+", default=["glbs/glbs_8k", "glbs/glbs_4k", "glbs/glbs_2k"])
     parser.add_argument("--onek-roots", nargs="+", default=["glbs/glbs_1k"])
     parser.add_argument("--pbr-id-list", type=Path, default=Path(".codex_outputs/texverse_hf_probe_20260516/TexVerse_pbr_id_list.txt"))
+    parser.add_argument(
+        "--exclude-id-list",
+        type=Path,
+        default=None,
+        help="Optional newline-delimited UID list to exclude. Lines may be bare UIDs or dataset:UID identities.",
+    )
     parser.add_argument("--download-resolution-policy", choices=["lowest", "highest"], default="lowest")
     parser.add_argument("--cache-dir", type=Path, default=None)
     parser.add_argument("--retries", type=int, default=5)
@@ -282,12 +295,15 @@ def main() -> int:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     cache_dir = args.cache_dir or args.output_dir / "hf_tree_cache"
     pbr_ids = _load_id_set(args.pbr_id_list)
+    exclude_ids = _load_id_set(args.exclude_id_list)
     variants = _discover_variants(args, cache_dir)
 
     rows: list[dict[str, Any]] = []
     resolution_hist: Counter[str] = Counter()
     max_resolution_hist: Counter[str] = Counter()
     for uid, variant_by_resolution in variants.items():
+        if uid.lower() in exclude_ids:
+            continue
         if not variant_by_resolution:
             continue
         chosen = _choose_download_variant(variant_by_resolution, args.download_resolution_policy)
@@ -347,6 +363,7 @@ def main() -> int:
         "shards": len(shard_counts),
         "shard_counts": shard_counts,
         "pbr_id_count": len(pbr_ids),
+        "exclude_id_count": len(exclude_ids),
         "selected_pbr_count": sum(1 for row in selected if row["is_pbr"]),
         "download_resolution_policy": args.download_resolution_policy,
         "download_resolution_histogram_all": dict(sorted(resolution_hist.items())),
