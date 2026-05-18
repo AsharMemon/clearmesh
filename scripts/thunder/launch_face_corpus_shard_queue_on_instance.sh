@@ -258,6 +258,11 @@ if ! command -v rclone >/dev/null 2>&1; then
   sudo apt-get update
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y rclone
 fi
+if ! command -v git-lfs >/dev/null 2>&1; then
+  sudo apt-get update
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y git-lfs
+fi
+git lfs install --skip-repo >/dev/null 2>&1 || true
 python - <<'PY'
 import fast_simplification  # noqa: F401
 import networkx  # noqa: F401
