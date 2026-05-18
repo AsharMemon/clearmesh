@@ -43,6 +43,7 @@ COPY_MODE="${COPY_MODE:-hardlink}"
 MAX_ARCHIVES="${MAX_ARCHIVES:-0}"
 PACKAGE_FULL_ARCHIVE="${PACKAGE_FULL_ARCHIVE:-1}"
 FAST_SHARD_ARCHIVE_LIST="${FAST_SHARD_ARCHIVE_LIST:-1}"
+SNAPSHOT_KEEP_COUNT="${SNAPSHOT_KEEP_COUNT:-2}"
 
 WAIT_INTERVAL_SEC="${WAIT_INTERVAL_SEC:-10}"
 WAIT_TIMEOUT_SEC="${WAIT_TIMEOUT_SEC:-1800}"
@@ -393,6 +394,24 @@ PY
   rclone copyto "$SNAPSHOTS_DIR/$snapshot_name/leakage_check.json" "b2env:$B2_BUCKET/$B2_OUTPUT_PREFIX/latest_leakage_check.json" --stats 30s
   printf '%s\n' "$output_prefix" > "$ROOT/latest_snapshot_prefix.txt"
   status snapshot_complete "snapshot=$snapshot_name unique=$unique_count package_full_archive=$PACKAGE_FULL_ARCHIVE output=$output_prefix"
+  cleanup_old_snapshots
+}
+
+cleanup_old_snapshots() {
+  local keep_count="${SNAPSHOT_KEEP_COUNT:-0}"
+  [[ "$keep_count" =~ ^[0-9]+$ ]] || keep_count=0
+  if [[ "$keep_count" -le 0 ]]; then
+    return 0
+  fi
+  mapfile -t snapshots < <(ls -1dt "$SNAPSHOTS_DIR"/snapshot_* 2>/dev/null || true)
+  if [[ "${#snapshots[@]}" -le "$keep_count" ]]; then
+    return 0
+  fi
+  local idx
+  for ((idx=keep_count; idx<${#snapshots[@]}; idx++)); do
+    status snapshot_cleanup "removing=${snapshots[$idx]}"
+    rm -rf -- "${snapshots[$idx]}"
+  done
 }
 
 main_loop() {
@@ -436,7 +455,7 @@ python3 - "$remote_script" \
   "$B2_BUCKET" "$B2_PREFIXES" "$B2_OUTPUT_PREFIX" "$MIN_UNIQUE_FOR_ARCHIVE" \
   "$MIN_NEW_ARCHIVES" "$TARGET_UNIQUE" "$TEST_RATIO" "$SEED" \
   "$POLL_INTERVAL_SECONDS" "$RUN_ONCE" "$COPY_MODE" "$MAX_ARCHIVES" \
-  "$PACKAGE_FULL_ARCHIVE" "$FAST_SHARD_ARCHIVE_LIST" <<'PY'
+  "$PACKAGE_FULL_ARCHIVE" "$FAST_SHARD_ARCHIVE_LIST" "$SNAPSHOT_KEEP_COUNT" <<'PY'
 from pathlib import Path
 import sys
 
@@ -460,6 +479,7 @@ values = {
     "MAX_ARCHIVES": sys.argv[17],
     "PACKAGE_FULL_ARCHIVE": sys.argv[18],
     "FAST_SHARD_ARCHIVE_LIST": sys.argv[19],
+    "SNAPSHOT_KEEP_COUNT": sys.argv[20],
 }
 text = path.read_text()
 prefix = "\n".join(f"{key}={value!r}" for key, value in values.items())
@@ -501,6 +521,7 @@ cat > "$DOWNLOAD_ROOT/run_info.json" <<JSON
   "target_unique": $TARGET_UNIQUE,
   "min_new_archives": $MIN_NEW_ARCHIVES,
   "poll_interval_seconds": $POLL_INTERVAL_SECONDS,
+  "snapshot_keep_count": $SNAPSHOT_KEEP_COUNT,
   "copy_mode": "$COPY_MODE",
   "primary_disk": $PRIMARY_DISK
 }

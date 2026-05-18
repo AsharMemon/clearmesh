@@ -136,6 +136,72 @@ run_b2_once() {
     bash scripts/thunder/b2_continuous_upload.sh
 }
 
+b2_shard_archive_exists() {
+  local prefix="$1"
+  [[ "$START_B2_UPLOAD" = "1" ]] || return 1
+  source_b2_env
+
+  local key_id="${B2_KEY_ID:-${B2_KEYID:-}}"
+  local app_key="${B2_APP_KEY:-${B2_APPKEY:-}}"
+  if [[ -z "$key_id" || -z "$app_key" ]] && [[ -n "${B2_TOKEN:-}" ]]; then
+    local parsed_b2
+    parsed_b2="$(
+      python3 - <<'PY'
+import json
+import os
+import sys
+
+token = os.environ.get("B2_TOKEN", "").strip()
+key_id = app_key = ""
+if token:
+    if token.startswith("{"):
+        payload = json.loads(token)
+        key_id = (
+            payload.get("keyId")
+            or payload.get("keyID")
+            or payload.get("applicationKeyId")
+            or payload.get("applicationKeyID")
+            or payload.get("key_id")
+            or payload.get("application_key_id")
+            or payload.get("accountId")
+            or payload.get("accountID")
+            or ""
+        )
+        app_key = (
+            payload.get("applicationKey")
+            or payload.get("application_key")
+            or payload.get("appKey")
+            or payload.get("app_key")
+            or payload.get("key")
+            or ""
+        )
+    elif ":" in token:
+        key_id, app_key = token.split(":", 1)
+if key_id and app_key:
+    sys.stdout.write(key_id + "\n" + app_key)
+PY
+    )"
+    if [[ -n "$parsed_b2" ]]; then
+      key_id="${key_id:-$(printf '%s\n' "$parsed_b2" | sed -n '1p')}"
+      app_key="${app_key:-$(printf '%s\n' "$parsed_b2" | sed -n '2p')}"
+    fi
+  fi
+  if [[ -n "$key_id" && -z "$app_key" && -n "${B2_TOKEN:-}" ]]; then
+    case "$B2_TOKEN" in
+      \{*|*:*) ;;
+      *) app_key="$B2_TOKEN" ;;
+    esac
+  fi
+  if [[ -n "$key_id" && -n "$app_key" ]]; then
+    export RCLONE_CONFIG_B2ENV_TYPE=b2
+    export RCLONE_CONFIG_B2ENV_ACCOUNT="$key_id"
+    export RCLONE_CONFIG_B2ENV_KEY="$app_key"
+  fi
+
+  rclone lsf "b2env:$B2_BUCKET/$prefix" --files-only 2>/dev/null \
+    | grep -Fxq "lean_face_corpus.tar.gz"
+}
+
 cleanup_heavy_payload() {
   local root="$1"
   [[ -d "$root" ]] || return 0
@@ -208,6 +274,12 @@ run_one_shard() {
   fi
   if [[ -f "$lab_root/.queue_complete" ]]; then
     log_event skipped shard "shard=$shard_id already_complete"
+    return 0
+  fi
+  if b2_shard_archive_exists "$b2_prefix"; then
+    log_event skipped shard "shard=$shard_id already_complete_in_b2 prefix=$b2_prefix"
+    mkdir -p "$lab_root"
+    touch "$lab_root/.queue_complete"
     return 0
   fi
 
