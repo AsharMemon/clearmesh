@@ -50,6 +50,11 @@ DOWNLOAD_RATE_LIMIT_SLEEP_SECONDS="${DOWNLOAD_RATE_LIMIT_SLEEP_SECONDS:-600}"
 TEXVERSE_DOWNLOAD_WORKERS="${TEXVERSE_DOWNLOAD_WORKERS:-$DOWNLOAD_PROCESSES}"
 TEXVERSE_MAX_SIZE_MB="${TEXVERSE_MAX_SIZE_MB:-0}"
 TEXVERSE_CLEANUP_CACHE_EACH="${TEXVERSE_CLEANUP_CACHE_EACH:-0}"
+OBJAVERSEXL_INCLUDE_SOURCES="${OBJAVERSEXL_INCLUDE_SOURCES:-}"
+OBJAVERSEXL_EXCLUDE_SOURCES="${OBJAVERSEXL_EXCLUDE_SOURCES:-}"
+OBJAVERSEXL_SAVE_REPO_FORMAT="${OBJAVERSEXL_SAVE_REPO_FORMAT:-zip}"
+OBJAVERSEXL_MAX_DOWNLOAD_DIR_GB="${OBJAVERSEXL_MAX_DOWNLOAD_DIR_GB:-0}"
+B2_QUEUE_CLAIMS="${B2_QUEUE_CLAIMS:-1}"
 SOURCE_MIN_FACES="${SOURCE_MIN_FACES:-64}"
 SOURCE_MAX_FACES="${SOURCE_MAX_FACES:-250000}"
 MAX_FILE_MB="${MAX_FILE_MB:-256}"
@@ -120,27 +125,8 @@ source_b2_env() {
   fi
 }
 
-run_b2_once() {
-  local root="$1" prefix="$2"
-  [[ "$START_B2_UPLOAD" = "1" ]] || return 0
+configure_b2env_rclone() {
   source_b2_env
-  MODE=face_shard \
-    LOCAL_ROOT="$root" \
-    B2_BUCKET="$B2_BUCKET" \
-    B2_PREFIX="$prefix" \
-    RUN_ONCE=1 \
-    STABILITY_SECONDS=0 \
-    B2_KEY_ID="${B2_KEY_ID:-}" \
-    B2_APP_KEY="${B2_APP_KEY:-}" \
-    B2_TOKEN="${B2_TOKEN:-}" \
-    bash scripts/thunder/b2_continuous_upload.sh
-}
-
-b2_shard_archive_exists() {
-  local prefix="$1"
-  [[ "$START_B2_UPLOAD" = "1" ]] || return 1
-  source_b2_env
-
   local key_id="${B2_KEY_ID:-${B2_KEYID:-}}"
   local app_key="${B2_APP_KEY:-${B2_APPKEY:-}}"
   if [[ -z "$key_id" || -z "$app_key" ]] && [[ -n "${B2_TOKEN:-}" ]]; then
@@ -196,10 +182,74 @@ PY
     export RCLONE_CONFIG_B2ENV_TYPE=b2
     export RCLONE_CONFIG_B2ENV_ACCOUNT="$key_id"
     export RCLONE_CONFIG_B2ENV_KEY="$app_key"
+    return 0
   fi
+  return 1
+}
+
+run_b2_once() {
+  local root="$1" prefix="$2"
+  [[ "$START_B2_UPLOAD" = "1" ]] || return 0
+  source_b2_env
+  MODE=face_shard \
+    LOCAL_ROOT="$root" \
+    B2_BUCKET="$B2_BUCKET" \
+    B2_PREFIX="$prefix" \
+    RUN_ONCE=1 \
+    STABILITY_SECONDS=0 \
+    B2_KEY_ID="${B2_KEY_ID:-}" \
+    B2_APP_KEY="${B2_APP_KEY:-}" \
+    B2_TOKEN="${B2_TOKEN:-}" \
+    bash scripts/thunder/b2_continuous_upload.sh
+}
+
+b2_shard_archive_exists() {
+  local prefix="$1"
+  [[ "$START_B2_UPLOAD" = "1" ]] || return 1
+  configure_b2env_rclone || return 1
 
   rclone lsf "b2env:$B2_BUCKET/$prefix" --files-only 2>/dev/null \
     | grep -Fxq "lean_face_corpus.tar.gz"
+}
+
+b2_shard_claim_exists() {
+  local prefix="$1"
+  [[ "$START_B2_UPLOAD" = "1" && "$B2_QUEUE_CLAIMS" = "1" ]] || return 1
+  configure_b2env_rclone || return 1
+  rclone lsf "b2env:$B2_BUCKET/$prefix" --files-only 2>/dev/null \
+    | grep -Eq '(^queue_claim\.json$|^lean_face_corpus\.tar\.gz$)'
+}
+
+write_b2_shard_claim() {
+  local prefix="$1" shard_id="$2" lab_root="$3"
+  [[ "$START_B2_UPLOAD" = "1" && "$B2_QUEUE_CLAIMS" = "1" ]] || return 0
+  configure_b2env_rclone || return 0
+  mkdir -p "$lab_root"
+  local claim="$lab_root/queue_claim.json"
+  python3 - "$claim" "$shard_id" "$prefix" "$lab_root" <<'PY'
+import json
+import os
+import socket
+import sys
+from datetime import datetime, timezone
+
+path, shard_id, prefix, lab_root = sys.argv[1:]
+payload = {
+    "time": datetime.now(timezone.utc).isoformat(),
+    "shard_id": shard_id,
+    "b2_prefix": prefix,
+    "lab_root": lab_root,
+    "hostname": socket.gethostname(),
+    "pid": os.getpid(),
+    "source_kind": os.environ.get("SOURCE_KIND", ""),
+    "data_lane": os.environ.get("DATA_LANE", ""),
+    "source_pool_name": os.environ.get("SOURCE_POOL_NAME", ""),
+}
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
+  rclone copyto "$claim" "b2env:$B2_BUCKET/$prefix/queue_claim.json" >/dev/null 2>&1 || true
 }
 
 cleanup_heavy_payload() {
@@ -282,6 +332,13 @@ run_one_shard() {
     touch "$lab_root/.queue_complete"
     return 0
   fi
+  if b2_shard_claim_exists "$b2_prefix"; then
+    log_event skipped shard "shard=$shard_id already_claimed_or_complete_in_b2 prefix=$b2_prefix"
+    mkdir -p "$lab_root"
+    touch "$lab_root/.queue_skipped_claimed"
+    return 0
+  fi
+  write_b2_shard_claim "$b2_prefix" "$shard_id" "$lab_root"
 
   local line_count select_target curation_target
   line_count="$(grep -cve '^\s*$' "$shard_file" || true)"
@@ -333,6 +390,10 @@ run_one_shard() {
     TEXVERSE_DOWNLOAD_WORKERS="$TEXVERSE_DOWNLOAD_WORKERS" \
     TEXVERSE_MAX_SIZE_MB="$TEXVERSE_MAX_SIZE_MB" \
     TEXVERSE_CLEANUP_CACHE_EACH="$TEXVERSE_CLEANUP_CACHE_EACH" \
+    OBJAVERSEXL_INCLUDE_SOURCES="$OBJAVERSEXL_INCLUDE_SOURCES" \
+    OBJAVERSEXL_EXCLUDE_SOURCES="$OBJAVERSEXL_EXCLUDE_SOURCES" \
+    OBJAVERSEXL_SAVE_REPO_FORMAT="$OBJAVERSEXL_SAVE_REPO_FORMAT" \
+    OBJAVERSEXL_MAX_DOWNLOAD_DIR_GB="$OBJAVERSEXL_MAX_DOWNLOAD_DIR_GB" \
     SOURCE_MIN_FACES="$SOURCE_MIN_FACES" \
     SOURCE_MAX_FACES="$SOURCE_MAX_FACES" \
     MAX_FILE_MB="$MAX_FILE_MB" \
