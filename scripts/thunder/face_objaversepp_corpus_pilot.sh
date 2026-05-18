@@ -114,8 +114,22 @@ case "$SOURCE_KIND" in
       "${TEXVERSE_ARGS[@]}" \
       "${DOWNLOAD_ARGS[@]}"
     ;;
+  objaversexl)
+    python scripts/data/download_objaversexl_face_candidates.py \
+      --source-manifest "$ANNOTATIONS" \
+      --output-dir "$RUN_DIR/raw" \
+      --target "$SELECT_TARGET" \
+      --scan-limit "$SCAN_LIMIT" \
+      --min-quality "$MIN_QUALITY" \
+      --seed "$SEED" \
+      --processes "$DOWNLOAD_PROCESSES" \
+      --batch-size "$DOWNLOAD_BATCH_SIZE" \
+      --retries "$DOWNLOAD_BATCH_RETRIES" \
+      --retry-sleep-seconds "$DOWNLOAD_RETRY_SLEEP_SECONDS" \
+      "${DOWNLOAD_ARGS[@]}"
+    ;;
   *)
-    echo "Unsupported SOURCE_KIND=$SOURCE_KIND; expected objaversepp or texverse." >&2
+    echo "Unsupported SOURCE_KIND=$SOURCE_KIND; expected objaversepp, texverse, or objaversexl." >&2
     exit 2
     ;;
 esac
