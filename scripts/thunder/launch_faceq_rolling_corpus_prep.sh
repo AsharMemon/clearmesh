@@ -44,6 +44,8 @@ MAX_ARCHIVES="${MAX_ARCHIVES:-0}"
 PACKAGE_FULL_ARCHIVE="${PACKAGE_FULL_ARCHIVE:-1}"
 FAST_SHARD_ARCHIVE_LIST="${FAST_SHARD_ARCHIVE_LIST:-1}"
 SNAPSHOT_KEEP_COUNT="${SNAPSHOT_KEEP_COUNT:-2}"
+DELETE_SOURCE_ARCHIVES_AFTER_EXTRACT="${DELETE_SOURCE_ARCHIVES_AFTER_EXTRACT:-1}"
+DELETE_PACKAGED_ARCHIVE_AFTER_UPLOAD="${DELETE_PACKAGED_ARCHIVE_AFTER_UPLOAD:-1}"
 
 WAIT_INTERVAL_SEC="${WAIT_INTERVAL_SEC:-10}"
 WAIT_TIMEOUT_SEC="${WAIT_TIMEOUT_SEC:-1800}"
@@ -292,6 +294,9 @@ download_new_archives() {
         continue
       fi
       touch "$marker"
+      if [[ "$DELETE_SOURCE_ARCHIVES_AFTER_EXTRACT" = "1" ]]; then
+        rm -f "$archive_path"
+      fi
       new_count=$((new_count + 1))
     fi
   done < "$ARCHIVE_LIST"
@@ -387,6 +392,9 @@ PY
       dedupe.log \
       leakage.log
     rclone copyto "$archive" "b2env:$B2_BUCKET/$output_prefix/faceq_merged_dedup_split.tar.gz" --stats 30s
+    if [[ "$DELETE_PACKAGED_ARCHIVE_AFTER_UPLOAD" = "1" ]]; then
+      rm -f "$archive"
+    fi
   else
     status package_skipped "PACKAGE_FULL_ARCHIVE=0 snapshot=$snapshot_name"
   fi
@@ -455,7 +463,8 @@ python3 - "$remote_script" \
   "$B2_BUCKET" "$B2_PREFIXES" "$B2_OUTPUT_PREFIX" "$MIN_UNIQUE_FOR_ARCHIVE" \
   "$MIN_NEW_ARCHIVES" "$TARGET_UNIQUE" "$TEST_RATIO" "$SEED" \
   "$POLL_INTERVAL_SECONDS" "$RUN_ONCE" "$COPY_MODE" "$MAX_ARCHIVES" \
-  "$PACKAGE_FULL_ARCHIVE" "$FAST_SHARD_ARCHIVE_LIST" "$SNAPSHOT_KEEP_COUNT" <<'PY'
+  "$PACKAGE_FULL_ARCHIVE" "$FAST_SHARD_ARCHIVE_LIST" "$SNAPSHOT_KEEP_COUNT" \
+  "$DELETE_SOURCE_ARCHIVES_AFTER_EXTRACT" "$DELETE_PACKAGED_ARCHIVE_AFTER_UPLOAD" <<'PY'
 from pathlib import Path
 import sys
 
@@ -480,6 +489,8 @@ values = {
     "PACKAGE_FULL_ARCHIVE": sys.argv[18],
     "FAST_SHARD_ARCHIVE_LIST": sys.argv[19],
     "SNAPSHOT_KEEP_COUNT": sys.argv[20],
+    "DELETE_SOURCE_ARCHIVES_AFTER_EXTRACT": sys.argv[21],
+    "DELETE_PACKAGED_ARCHIVE_AFTER_UPLOAD": sys.argv[22],
 }
 text = path.read_text()
 prefix = "\n".join(f"{key}={value!r}" for key, value in values.items())
