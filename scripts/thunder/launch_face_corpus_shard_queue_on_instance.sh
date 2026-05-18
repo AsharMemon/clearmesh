@@ -278,6 +278,7 @@ if [[ "$SYNC_QUEUE_FILES" = "1" ]]; then
   "$TNR_BIN" scp "$REPO_ROOT/scripts/thunder/face_objaversepp_corpus_pilot.sh" "$INSTANCE_ID:$REMOTE_REPO/scripts/thunder/face_objaversepp_corpus_pilot.sh"
   "$TNR_BIN" scp "$REPO_ROOT/scripts/thunder/b2_continuous_upload.sh" "$INSTANCE_ID:$REMOTE_REPO/scripts/thunder/b2_continuous_upload.sh"
   "$TNR_BIN" scp "$REPO_ROOT/scripts/data/download_texverse_face_candidates.py" "$INSTANCE_ID:$REMOTE_REPO/scripts/data/download_texverse_face_candidates.py"
+  "$TNR_BIN" scp "$REPO_ROOT/scripts/data/download_objaversexl_face_candidates.py" "$INSTANCE_ID:$REMOTE_REPO/scripts/data/download_objaversexl_face_candidates.py"
   "$TNR_BIN" scp "$REPO_ROOT/scripts/research/prepare_face_strict_targets.py" "$INSTANCE_ID:$REMOTE_REPO/scripts/research/prepare_face_strict_targets.py"
   "$TNR_BIN" scp "$REPO_ROOT/scripts/research/check_face_dataset_targets.py" "$INSTANCE_ID:$REMOTE_REPO/scripts/research/check_face_dataset_targets.py"
 fi
