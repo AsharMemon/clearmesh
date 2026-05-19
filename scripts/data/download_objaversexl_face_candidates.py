@@ -14,6 +14,8 @@ from typing import Any
 
 import pandas as pd
 
+_OBJAVERSE_XL_ANNOTATION_SOURCES = ("github", "thingiverse", "smithsonian", "sketchfab")
+
 
 def _iter_jsonl(path: Path):
     for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
@@ -91,7 +93,103 @@ def _filter_manifest_sources(rows: list[dict[str, Any]], include: set[str], excl
     return filtered
 
 
-def _load_annotations(download_dir: Path) -> pd.DataFrame:
+def _annotation_sources_for_filter(include: set[str], exclude: set[str]) -> list[str]:
+    known = set(_OBJAVERSE_XL_ANNOTATION_SOURCES)
+    if include:
+        sources = include & known
+        unknown = sorted(include - known)
+        if unknown:
+            print(
+                json.dumps(
+                    {
+                        "warning": "ignoring unknown Objaverse-XL annotation source filters",
+                        "unknown_sources": unknown,
+                    },
+                    sort_keys=True,
+                ),
+                file=sys.stderr,
+                flush=True,
+            )
+    else:
+        sources = set(known)
+    sources -= exclude
+    return [source for source in _OBJAVERSE_XL_ANNOTATION_SOURCES if source in sources]
+
+
+def _hf_token() -> str:
+    for key in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_HUB_TOKEN"):
+        value = os.environ.get(key)
+        if value:
+            return value
+    return ""
+
+
+def _download_source_annotation(download_dir: Path, source: str, retries: int = 5) -> Path:
+    import requests
+
+    source_dir = download_dir / source
+    source_dir.mkdir(parents=True, exist_ok=True)
+    out_path = source_dir / f"{source}.parquet"
+    if out_path.exists() and out_path.stat().st_size > 0:
+        return out_path
+
+    tmp_path = out_path.with_suffix(".parquet.tmp")
+    url = f"https://huggingface.co/datasets/allenai/objaverse-xl/resolve/main/{source}/{source}.parquet"
+    headers = {}
+    token = _hf_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    last_exc: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            with requests.get(url, headers=headers, stream=True, timeout=120) as response:
+                response.raise_for_status()
+                with tmp_path.open("wb") as handle:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            handle.write(chunk)
+            tmp_path.replace(out_path)
+            return out_path
+        except Exception as exc:  # noqa: BLE001 - report and retry remote annotation fetches.
+            last_exc = exc
+            try:
+                tmp_path.unlink()
+            except FileNotFoundError:
+                pass
+            if attempt >= retries:
+                break
+            text = str(exc).lower()
+            wait = 10.0 * (2**attempt)
+            if "429" in text or "rate" in text or "too many requests" in text:
+                wait *= 4
+            print(
+                f"ObjaverseXL annotation {source} attempt {attempt + 1} failed: {type(exc).__name__}: {exc}; sleep={wait:.1f}s",
+                file=sys.stderr,
+                flush=True,
+            )
+            time.sleep(wait)
+    raise RuntimeError(f"failed to download Objaverse-XL {source} annotation parquet: {last_exc}") from last_exc
+
+
+def _load_annotations(download_dir: Path, include_sources: set[str], exclude_sources: set[str]) -> pd.DataFrame:
+    requested_sources = _annotation_sources_for_filter(include_sources, exclude_sources)
+    if (include_sources or exclude_sources) and requested_sources:
+        frames: list[pd.DataFrame] = []
+        for source in requested_sources:
+            path = _download_source_annotation(download_dir, source)
+            frame = pd.read_parquet(path)
+            if "source" not in frame.columns:
+                frame = frame.copy()
+                frame["source"] = source
+            frames.append(frame)
+        if frames:
+            return pd.concat(frames, ignore_index=True)
+    if include_sources or exclude_sources:
+        raise ValueError(
+            "Objaverse-XL source filters removed all known annotation sources: "
+            f"include={sorted(include_sources)} exclude={sorted(exclude_sources)}"
+        )
+
     import objaverse.xl as oxl
 
     annotations = oxl.get_annotations(download_dir=str(download_dir))
@@ -204,7 +302,7 @@ def _download(
     selected = _filter_manifest_sources(selected, include_sources, exclude_sources)
     target_sha = {str(row.get("sha256") or row.get("uid") or "").lower() for row in selected}
     target_sha.discard("")
-    annotations = _load_annotations(cache_dir)
+    annotations = _load_annotations(cache_dir, include_sources, exclude_sources)
     if "sha256" not in annotations.columns:
         raise KeyError("Objaverse-XL annotations missing sha256 column")
     matched = annotations[annotations["sha256"].astype(str).str.lower().isin(target_sha)].copy()
