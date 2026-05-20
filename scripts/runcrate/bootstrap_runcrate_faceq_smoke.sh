@@ -147,11 +147,14 @@ for item in items:
         raise SystemExit
 print("-", "22")
 PY
-  read -r REMOTE_HOST REMOTE_PORT < "$parse_target" || true
+  target_line="$(cat "$parse_target" 2>/dev/null || true)"
+  REMOTE_HOST="$(awk '{print $1}' <<< "$target_line")"
+  REMOTE_PORT="$(awk '{print $2}' <<< "$target_line")"
   REMOTE_PORT="${REMOTE_PORT:-22}"
   if [[ -n "$REMOTE_HOST" && "$REMOTE_HOST" != "-" ]]; then
     break
   fi
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] RunCrate instance not SSH-ready yet; retrying..." | tee -a "$LOCAL_LOG"
   sleep 15
 done
 if [[ -z "$REMOTE_HOST" ]]; then
