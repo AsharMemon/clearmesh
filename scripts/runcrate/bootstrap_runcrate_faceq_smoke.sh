@@ -142,6 +142,8 @@ for item in items:
         port = str(item.get("ssh_port") or item.get("port") or 22)
         if status in {"active", "running", "booted", "deployed", "ready"} and ip:
             print(ip, port)
+        else:
+            print("", port)
         raise SystemExit
 print("", "22")
 PY
