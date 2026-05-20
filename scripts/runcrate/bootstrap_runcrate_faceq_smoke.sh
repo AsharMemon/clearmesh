@@ -14,12 +14,13 @@ RUNCRATE_ENV_FILE="${RUNCRATE_ENV_FILE:-.codex_secrets/runcrate.env}"
 B2_ENV_FILE="${B2_ENV_FILE:-.codex_secrets/b2.env}"
 SSH_KEY_FILE="${SSH_KEY_FILE:-$HOME/.ssh/id_ed25519}"
 REMOTE_USER="${REMOTE_USER:-root}"
-REMOTE_REPO="${REMOTE_REPO:-/root/clearmesh}"
-REMOTE_VENV="${REMOTE_VENV:-/root/clearmesh-venv}"
+REMOTE_BASE="${REMOTE_BASE:-/workspace}"
+REMOTE_REPO="${REMOTE_REPO:-$REMOTE_BASE/clearmesh}"
+REMOTE_VENV="${REMOTE_VENV:-$REMOTE_BASE/clearmesh-venv}"
 RUN_STAMP="${RUN_STAMP:-$(date -u +%Y%m%d_faceq_1p4b_fsdp_runcrate_smoke)}"
-REMOTE_LAB_ROOT="${REMOTE_LAB_ROOT:-/root/clearmesh_faceq_runcrate_scale_train_$RUN_STAMP}"
-REMOTE_LOG="${REMOTE_LOG:-/root/clearmesh_faceq_runcrate_scale_train.nohup.log}"
-REMOTE_PID="${REMOTE_PID:-/root/clearmesh_faceq_runcrate_scale_train.pid}"
+REMOTE_LAB_ROOT="${REMOTE_LAB_ROOT:-$REMOTE_BASE/clearmesh_faceq_runcrate_scale_train_$RUN_STAMP}"
+REMOTE_LOG="${REMOTE_LOG:-$REMOTE_LAB_ROOT/clearmesh_faceq_runcrate_scale_train.nohup.log}"
+REMOTE_PID="${REMOTE_PID:-$REMOTE_LAB_ROOT/clearmesh_faceq_runcrate_scale_train.pid}"
 REMOTE_B2_ENV="${REMOTE_B2_ENV:-$REMOTE_LAB_ROOT/.clearmesh_b2.env}"
 SYNC_REPO="${SYNC_REPO:-1}"
 
@@ -28,6 +29,7 @@ B2_CORPUS_PREFIX="${B2_CORPUS_PREFIX:-face-corpora/merged/faceq_rolling_400k_tot
 B2_CORPUS_ARCHIVE="${B2_CORPUS_ARCHIVE:-faceq_merged_dedup_split.tar.gz}"
 B2_RUN_PREFIX="${B2_RUN_PREFIX:-face-runs/faceq-1p4b-fsdp-smoke/runcrate-$RUN_STAMP}"
 ARCHIVE_DATASET_DIR="${ARCHIVE_DATASET_DIR:-split_dedup_tokenhash/train}"
+REMOVE_CORPUS_ARCHIVE_AFTER_EXTRACT="${REMOVE_CORPUS_ARCHIVE_AFTER_EXTRACT:-1}"
 
 STEPS="${STEPS:-20}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
@@ -169,7 +171,7 @@ SCP_OPTS=(
 SSH_TARGET="$REMOTE_USER@$REMOTE_HOST"
 
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Preflighting RunCrate GPU host..." | tee -a "$LOCAL_LOG"
-ssh "${SSH_OPTS[@]}" "$SSH_TARGET" 'hostname; nvidia-smi; mkdir -p /root/clearmesh' | tee -a "$LOCAL_LOG"
+ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "hostname; nvidia-smi; df -h / /tmp /workspace 2>/dev/null || true; mkdir -p '$REMOTE_REPO' '$REMOTE_LAB_ROOT'" | tee -a "$LOCAL_LOG"
 
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Syncing repository to RunCrate..." | tee -a "$LOCAL_LOG"
 if [[ "$SYNC_REPO" = "1" ]]; then
@@ -214,7 +216,9 @@ B2_CORPUS_PREFIX=$(printf '%q' "$B2_CORPUS_PREFIX")
 B2_CORPUS_ARCHIVE=$(printf '%q' "$B2_CORPUS_ARCHIVE")
 B2_RUN_PREFIX=$(printf '%q' "$B2_RUN_PREFIX")
 ARCHIVE_DATASET_DIR=$(printf '%q' "$ARCHIVE_DATASET_DIR")
-mkdir -p "\$LAB_ROOT/logs" "\$LAB_ROOT/runs/faceq_merged_scale"
+REMOVE_CORPUS_ARCHIVE_AFTER_EXTRACT=$(printf '%q' "$REMOVE_CORPUS_ARCHIVE_AFTER_EXTRACT")
+mkdir -p "\$LAB_ROOT/logs" "\$LAB_ROOT/runs/faceq_merged_scale" "\$LAB_ROOT/tmp"
+export TMPDIR="\$LAB_ROOT/tmp"
 status() {
   python3 - "\$LAB_ROOT/status.jsonl" "\$1" "\${2:-}" <<'PY'
 import json, sys, time
@@ -254,6 +258,9 @@ echo \$! > "\$LAB_ROOT/b2_upload.pid"
 status b2_download_started "\$B2_CORPUS_PREFIX/\$B2_CORPUS_ARCHIVE"
 rclone copyto "b2env:\$B2_BUCKET/\$B2_CORPUS_PREFIX/\$B2_CORPUS_ARCHIVE" "\$LAB_ROOT/\$B2_CORPUS_ARCHIVE" --stats 30s
 tar -xzf "\$LAB_ROOT/\$B2_CORPUS_ARCHIVE" -C "\$LAB_ROOT"
+if [[ "\$REMOVE_CORPUS_ARCHIVE_AFTER_EXTRACT" = "1" ]]; then
+  rm -f "\$LAB_ROOT/\$B2_CORPUS_ARCHIVE"
+fi
 DATASET_DIR="\$LAB_ROOT/$(printf '%q' "$ARCHIVE_DATASET_DIR")"
 test -d "\$DATASET_DIR"
 TRAIN_CMD=(python)
