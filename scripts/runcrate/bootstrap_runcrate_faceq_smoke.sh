@@ -14,7 +14,7 @@ RUNCRATE_ENV_FILE="${RUNCRATE_ENV_FILE:-.codex_secrets/runcrate.env}"
 B2_ENV_FILE="${B2_ENV_FILE:-.codex_secrets/b2.env}"
 SSH_KEY_FILE="${SSH_KEY_FILE:-$HOME/.ssh/id_ed25519}"
 REMOTE_USER="${REMOTE_USER:-root}"
-REMOTE_BASE="${REMOTE_BASE:-/workspace}"
+REMOTE_BASE="${REMOTE_BASE:-/ephemeral}"
 REMOTE_REPO="${REMOTE_REPO:-$REMOTE_BASE/clearmesh}"
 REMOTE_VENV="${REMOTE_VENV:-$REMOTE_BASE/clearmesh-venv}"
 RUN_STAMP="${RUN_STAMP:-$(date -u +%Y%m%d_faceq_1p4b_fsdp_runcrate_smoke)}"
@@ -181,7 +181,7 @@ SCP_OPTS=(
 SSH_TARGET="$REMOTE_USER@$REMOTE_HOST"
 
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Preflighting RunCrate GPU host..." | tee -a "$LOCAL_LOG"
-ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "hostname; nvidia-smi; df -h / /tmp /workspace 2>/dev/null || true; mkdir -p '$REMOTE_REPO' '$REMOTE_LAB_ROOT'" | tee -a "$LOCAL_LOG"
+ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "hostname; nvidia-smi; df -h / /tmp /ephemeral /workspace 2>/dev/null || true; mkdir -p '$REMOTE_REPO' '$REMOTE_LAB_ROOT'" | tee -a "$LOCAL_LOG"
 
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Syncing repository to RunCrate..." | tee -a "$LOCAL_LOG"
 if [[ "$SYNC_REPO" = "1" ]]; then
