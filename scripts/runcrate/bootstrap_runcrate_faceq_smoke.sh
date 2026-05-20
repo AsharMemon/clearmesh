@@ -121,7 +121,11 @@ deadline=$(( $(date +%s) + 1800 ))
 REMOTE_HOST=""
 REMOTE_PORT="22"
 while [[ "$(date +%s)" -lt "$deadline" ]]; do
-  runcrate_get_instances > "$INSTANCE_JSON.tmp"
+  if ! runcrate_get_instances > "$INSTANCE_JSON.tmp"; then
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] RunCrate instance list probe failed; retrying..." | tee -a "$LOCAL_LOG"
+    sleep 15
+    continue
+  fi
   mv "$INSTANCE_JSON.tmp" "$INSTANCE_JSON"
   parse_target="$OUT_DIR/runcrate_instance_target.txt"
   python3 - "$INSTANCE_ID" "$INSTANCE_JSON" > "$parse_target" <<'PY'
