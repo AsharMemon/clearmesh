@@ -30,7 +30,14 @@ OBJAVERSEXL_INCLUDE_SOURCES="${OBJAVERSEXL_INCLUDE_SOURCES:-}"
 OBJAVERSEXL_EXCLUDE_SOURCES="${OBJAVERSEXL_EXCLUDE_SOURCES:-}"
 OBJAVERSEXL_SAVE_REPO_FORMAT="${OBJAVERSEXL_SAVE_REPO_FORMAT:-zip}"
 OBJAVERSEXL_MAX_DOWNLOAD_DIR_GB="${OBJAVERSEXL_MAX_DOWNLOAD_DIR_GB:-0}"
-EXCLUDE_SOURCE_IDS="${EXCLUDE_SOURCE_IDS:-}"
+EXCLUDE_SOURCE_IDS="${EXCLUDE_SOURCE_IDS:-${DEFAULT_EXCLUDE_SOURCE_IDS:-}}"
+if [ -z "$EXCLUDE_SOURCE_IDS" ]; then
+  if [ -f "/tmp/clearmesh_face_corpus_queue/source_skip_registry_from_8k128_250250.txt" ]; then
+    EXCLUDE_SOURCE_IDS="/tmp/clearmesh_face_corpus_queue/source_skip_registry_from_8k128_250250.txt"
+  elif [ -f "/tmp/clearmesh_face_corpus_queue/source_skip_registry.txt" ]; then
+    EXCLUDE_SOURCE_IDS="/tmp/clearmesh_face_corpus_queue/source_skip_registry.txt"
+  fi
+fi
 CURATION_TARGET="${CURATION_TARGET:-$SELECT_TARGET}"
 MESH_TIMEOUT_SECONDS="${MESH_TIMEOUT_SECONDS:-30}"
 MESH_MEMORY_LIMIT_GB="${MESH_MEMORY_LIMIT_GB:-12}"
