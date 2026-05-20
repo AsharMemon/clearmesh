@@ -143,12 +143,13 @@ for item in items:
         if status in {"active", "running", "booted", "deployed", "ready"} and ip:
             print(ip, port)
         else:
-            print("", port)
+            print("-", port)
         raise SystemExit
-print("", "22")
+print("-", "22")
 PY
   read -r REMOTE_HOST REMOTE_PORT < "$parse_target" || true
-  if [[ -n "$REMOTE_HOST" ]]; then
+  REMOTE_PORT="${REMOTE_PORT:-22}"
+  if [[ -n "$REMOTE_HOST" && "$REMOTE_HOST" != "-" ]]; then
     break
   fi
   sleep 15
