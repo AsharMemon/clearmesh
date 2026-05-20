@@ -196,10 +196,11 @@ if [[ "$SYNC_REPO" = "1" ]]; then
     --exclude='.venv' \
     --exclude='node_modules' \
     -czf - . \
-    | ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "mkdir -p '$REMOTE_REPO' && tar -xzf - -C '$REMOTE_REPO'"
+    | ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "rm -rf '$REMOTE_REPO' && mkdir -p '$REMOTE_REPO' && tar -xzf - -C '$REMOTE_REPO'"
 else
   ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "test -d '$REMOTE_REPO' && test -f '$REMOTE_REPO/scripts/research/train_face_indexed_conditioned_tiny.py'"
 fi
+ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "test -f '$REMOTE_REPO/clearmesh/mesh_heads/face_arae.py' && test -f '$REMOTE_REPO/clearmesh/__init__.py'"
 
 tmp_b2_env="$(mktemp "$OUT_DIR/b2_remote_env.XXXXXX")"
 {
@@ -238,6 +239,7 @@ with open(path, "a", encoding="utf-8") as handle:
 PY
 }
 cd "\$REPO"
+export PYTHONPATH="\$REPO:\${PYTHONPATH:-}"
 SUDO=()
 if command -v sudo >/dev/null 2>&1; then
   SUDO=(sudo)
@@ -252,6 +254,10 @@ fi
 source "\$VENV/bin/activate"
 python -m pip install -U pip setuptools wheel
 python -m pip install -q numpy tqdm trimesh scipy networkx
+python - <<'PY'
+import clearmesh.mesh_heads.face_arae as face_arae
+print("clearmesh_import_ready", face_arae.__file__)
+PY
 python - <<'PY' || python -m pip install --index-url https://download.pytorch.org/whl/cu128 'torch>=2.4.0'
 import torch
 print("torch_ready", torch.__version__)

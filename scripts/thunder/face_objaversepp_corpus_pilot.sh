@@ -30,6 +30,7 @@ OBJAVERSEXL_INCLUDE_SOURCES="${OBJAVERSEXL_INCLUDE_SOURCES:-}"
 OBJAVERSEXL_EXCLUDE_SOURCES="${OBJAVERSEXL_EXCLUDE_SOURCES:-}"
 OBJAVERSEXL_SAVE_REPO_FORMAT="${OBJAVERSEXL_SAVE_REPO_FORMAT:-zip}"
 OBJAVERSEXL_MAX_DOWNLOAD_DIR_GB="${OBJAVERSEXL_MAX_DOWNLOAD_DIR_GB:-0}"
+EXCLUDE_SOURCE_IDS="${EXCLUDE_SOURCE_IDS:-}"
 CURATION_TARGET="${CURATION_TARGET:-$SELECT_TARGET}"
 MESH_TIMEOUT_SECONDS="${MESH_TIMEOUT_SECONDS:-30}"
 MESH_MEMORY_LIMIT_GB="${MESH_MEMORY_LIMIT_GB:-12}"
@@ -77,6 +78,15 @@ DOWNLOAD_ARGS=()
 if [ "$SHUFFLE" = "1" ]; then
   DOWNLOAD_ARGS+=(--shuffle)
 fi
+DOWNLOAD_EXCLUDE_ARGS=()
+if [ -n "$EXCLUDE_SOURCE_IDS" ]; then
+  DOWNLOAD_EXCLUDE_ARGS+=(--exclude-source-ids)
+  for exclude_path in ${EXCLUDE_SOURCE_IDS//,/ }; do
+    if [ -n "$exclude_path" ]; then
+      DOWNLOAD_EXCLUDE_ARGS+=("$exclude_path")
+    fi
+  done
+fi
 
 case "$SOURCE_KIND" in
   objaversepp)
@@ -97,6 +107,7 @@ case "$SOURCE_KIND" in
       --batch-retries "$DOWNLOAD_BATCH_RETRIES" \
       --retry-sleep-seconds "$DOWNLOAD_RETRY_SLEEP_SECONDS" \
       --rate-limit-sleep-seconds "$DOWNLOAD_RATE_LIMIT_SLEEP_SECONDS" \
+      "${DOWNLOAD_EXCLUDE_ARGS[@]}" \
       "${DOWNLOAD_ARGS[@]}"
     ;;
   texverse)
@@ -115,6 +126,7 @@ case "$SOURCE_KIND" in
       --retries "$DOWNLOAD_BATCH_RETRIES" \
       --retry-sleep-seconds "$DOWNLOAD_RETRY_SLEEP_SECONDS" \
       --max-size-mb "$TEXVERSE_MAX_SIZE_MB" \
+      "${DOWNLOAD_EXCLUDE_ARGS[@]}" \
       "${TEXVERSE_ARGS[@]}" \
       "${DOWNLOAD_ARGS[@]}"
     ;;
@@ -143,6 +155,7 @@ case "$SOURCE_KIND" in
       --batch-size "$DOWNLOAD_BATCH_SIZE" \
       --retries "$DOWNLOAD_BATCH_RETRIES" \
       --retry-sleep-seconds "$DOWNLOAD_RETRY_SLEEP_SECONDS" \
+      "${DOWNLOAD_EXCLUDE_ARGS[@]}" \
       "${OBJAVERSEXL_ARGS[@]}" \
       "${DOWNLOAD_ARGS[@]}"
     ;;

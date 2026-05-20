@@ -14,6 +14,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from source_skip_registry import filter_excluded_rows, load_source_skip_ids
+
 
 def _iter_jsonl(path: Path):
     for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
@@ -38,6 +40,9 @@ def _select_rows(args: argparse.Namespace) -> list[dict[str, Any]]:
             for row in rows
             if int(row.get("hf_size_bytes") or 0) <= 0 or int(row.get("hf_size_bytes") or 0) <= max_size_bytes
         ]
+    skip_ids = load_source_skip_ids(args.exclude_source_ids)
+    rows, excluded = filter_excluded_rows(rows, skip_ids)
+    args.excluded_source_ids_count = excluded
     rng = random.Random(args.seed)
     if args.shuffle:
         rng.shuffle(rows)
@@ -138,6 +143,7 @@ def main() -> int:
     parser.add_argument("--retries", type=int, default=4)
     parser.add_argument("--retry-sleep-seconds", type=float, default=20.0)
     parser.add_argument("--max-size-mb", type=float, default=0.0, help="Skip rows with hf_size_bytes above this threshold; 0 disables.")
+    parser.add_argument("--exclude-source-ids", nargs="*", type=Path, default=[], help="Text/JSON/JSONL source-ID registries to skip before download.")
     parser.add_argument("--hardlink-cache", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--cleanup-cache-each", action="store_true", help="Clear HF cache after each successful file; requires --workers 1.")
     args = parser.parse_args()
@@ -189,6 +195,7 @@ def main() -> int:
         "selected": len(selected),
         "downloaded": len(downloaded),
         "errors": len(errors),
+        "excluded_source_ids": int(getattr(args, "excluded_source_ids_count", 0)),
         "max_size_mb": args.max_size_mb,
         "hardlink_cache": args.hardlink_cache,
         "cleanup_cache_each": args.cleanup_cache_each,

@@ -20,6 +20,8 @@ import time
 from pathlib import Path
 from typing import Any, Iterable
 
+from source_skip_registry import load_source_skip_ids, row_is_excluded
+
 QUALITY_MAP = {
     "low": 0,
     "low quality": 0,
@@ -128,6 +130,8 @@ def _iter_annotation_rows(source: str, split: str) -> Iterable[dict[str, Any]]:
 def _select_rows(args: argparse.Namespace) -> list[dict[str, Any]]:
     selected = []
     scanned = 0
+    excluded = 0
+    skip_ids = load_source_skip_ids(args.exclude_source_ids)
     for row in _iter_annotation_rows(args.annotations, args.split):
         scanned += 1
         uid = _uid(row)
@@ -135,11 +139,16 @@ def _select_rows(args: argparse.Namespace) -> list[dict[str, Any]]:
             continue
         if _reasons(row, args.min_quality):
             continue
-        selected.append({"uid": uid, "quality_score": _quality(row), "annotation": row})
+        candidate = {"uid": uid, "quality_score": _quality(row), "annotation": row}
+        if row_is_excluded(candidate, skip_ids) or row_is_excluded(row, skip_ids):
+            excluded += 1
+            continue
+        selected.append(candidate)
         if args.scan_limit and scanned >= args.scan_limit:
             break
         if args.target and len(selected) >= args.target * max(1, args.oversample_factor):
             break
+    args.excluded_source_ids_count = excluded
     rng = random.Random(args.seed)
     if args.shuffle:
         rng.shuffle(selected)
@@ -331,6 +340,7 @@ def main() -> int:
         default=0,
         help="Kill and skip a download batch if objaverse.load_objects hangs. 0 disables timeout.",
     )
+    parser.add_argument("--exclude-source-ids", nargs="*", type=Path, default=[], help="Text/JSON/JSONL source-ID registries to skip before download.")
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -365,6 +375,7 @@ def main() -> int:
     summary = {
         "selected": len(selected),
         "downloaded": len(manifest),
+        "excluded_source_ids": int(getattr(args, "excluded_source_ids_count", 0)),
         "selected_annotations": str(selected_path),
         "download_manifest": str(args.output_dir / "download_manifest.json") if args.download else None,
     }

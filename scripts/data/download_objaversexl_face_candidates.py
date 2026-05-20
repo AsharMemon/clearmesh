@@ -14,6 +14,8 @@ from typing import Any
 
 import pandas as pd
 
+from source_skip_registry import filter_excluded_rows, load_source_skip_ids
+
 _OBJAVERSE_XL_ANNOTATION_SOURCES = ("github", "thingiverse", "smithsonian", "sketchfab")
 
 
@@ -44,6 +46,9 @@ def _select_rows(args: argparse.Namespace) -> list[dict[str, Any]]:
             except (TypeError, ValueError):
                 pass
         selected.append(row)
+    skip_ids = load_source_skip_ids(args.exclude_source_ids)
+    selected, excluded = filter_excluded_rows(selected, skip_ids)
+    args.excluded_source_ids_count = excluded
     rng = random.Random(args.seed)
     if args.shuffle:
         rng.shuffle(selected)
@@ -414,6 +419,7 @@ def main() -> int:
         default=None,
         help="Skip these Objaverse-XL source types, e.g. github. Comma-separated values are accepted.",
     )
+    parser.add_argument("--exclude-source-ids", nargs="*", type=Path, default=[], help="Text/JSON/JSONL source-ID registries to skip before download.")
     parser.add_argument(
         "--save-repo-format",
         choices=("zip", "files"),
@@ -470,6 +476,7 @@ def main() -> int:
         "source_manifest": str(args.source_manifest),
         "selected": len(selected),
         "downloaded": len(candidates),
+        "excluded_source_ids": int(getattr(args, "excluded_source_ids_count", 0)),
         "selected_annotations": str(selected_path),
         "download_manifest": str(args.output_dir / "download_manifest.json"),
         "downloaded_candidates": str(candidates_path),

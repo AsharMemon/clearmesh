@@ -46,6 +46,9 @@ OBJAVERSEXL_INCLUDE_SOURCES="${OBJAVERSEXL_INCLUDE_SOURCES:-}"
 OBJAVERSEXL_EXCLUDE_SOURCES="${OBJAVERSEXL_EXCLUDE_SOURCES:-}"
 OBJAVERSEXL_SAVE_REPO_FORMAT="${OBJAVERSEXL_SAVE_REPO_FORMAT:-zip}"
 OBJAVERSEXL_MAX_DOWNLOAD_DIR_GB="${OBJAVERSEXL_MAX_DOWNLOAD_DIR_GB:-0}"
+EXCLUDE_SOURCE_IDS="${EXCLUDE_SOURCE_IDS:-}"
+LOCAL_EXCLUDE_SOURCE_IDS_FILE="${LOCAL_EXCLUDE_SOURCE_IDS_FILE:-}"
+REMOTE_EXCLUDE_SOURCE_IDS_FILE="${REMOTE_EXCLUDE_SOURCE_IDS_FILE:-$REMOTE_QUEUE_SOURCE_DIR/source_skip_registry.txt}"
 B2_QUEUE_CLAIMS="${B2_QUEUE_CLAIMS:-1}"
 
 WAIT_FOR_PID_FILE="${WAIT_FOR_PID_FILE:-}"
@@ -294,6 +297,8 @@ if [[ "$SYNC_QUEUE_FILES" = "1" ]]; then
   "$TNR_BIN" scp "$REPO_ROOT/scripts/thunder/b2_continuous_upload.sh" "$INSTANCE_ID:$REMOTE_REPO/scripts/thunder/b2_continuous_upload.sh"
   "$TNR_BIN" scp "$REPO_ROOT/scripts/data/download_texverse_face_candidates.py" "$INSTANCE_ID:$REMOTE_REPO/scripts/data/download_texverse_face_candidates.py"
   "$TNR_BIN" scp "$REPO_ROOT/scripts/data/download_objaversexl_face_candidates.py" "$INSTANCE_ID:$REMOTE_REPO/scripts/data/download_objaversexl_face_candidates.py"
+  "$TNR_BIN" scp "$REPO_ROOT/scripts/data/download_objaversepp_face_candidates.py" "$INSTANCE_ID:$REMOTE_REPO/scripts/data/download_objaversepp_face_candidates.py"
+  "$TNR_BIN" scp "$REPO_ROOT/scripts/data/source_skip_registry.py" "$INSTANCE_ID:$REMOTE_REPO/scripts/data/source_skip_registry.py"
   "$TNR_BIN" scp "$REPO_ROOT/scripts/research/prepare_face_strict_targets.py" "$INSTANCE_ID:$REMOTE_REPO/scripts/research/prepare_face_strict_targets.py"
   "$TNR_BIN" scp "$REPO_ROOT/scripts/research/check_face_dataset_targets.py" "$INSTANCE_ID:$REMOTE_REPO/scripts/research/check_face_dataset_targets.py"
 fi
@@ -308,6 +313,16 @@ for shard_id in $QUEUE_SHARD_IDS; do
   fi
   "$TNR_BIN" scp "$shard_file" "$INSTANCE_ID:$REMOTE_QUEUE_SOURCE_DIR/shard_${shard_id}.jsonl"
 done
+
+REMOTE_EXCLUDE_SOURCE_IDS="$EXCLUDE_SOURCE_IDS"
+if [[ -n "$LOCAL_EXCLUDE_SOURCE_IDS_FILE" ]]; then
+  if [[ ! -f "$LOCAL_EXCLUDE_SOURCE_IDS_FILE" ]]; then
+    echo "LOCAL_EXCLUDE_SOURCE_IDS_FILE does not exist: $LOCAL_EXCLUDE_SOURCE_IDS_FILE" >&2
+    exit 4
+  fi
+  "$TNR_BIN" scp "$LOCAL_EXCLUDE_SOURCE_IDS_FILE" "$INSTANCE_ID:$REMOTE_EXCLUDE_SOURCE_IDS_FILE"
+  REMOTE_EXCLUDE_SOURCE_IDS="$REMOTE_EXCLUDE_SOURCE_IDS_FILE"
+fi
 
 if [[ "$START_B2_UPLOAD" = "1" && -n "$LOCAL_B2_ENV_FILE" ]]; then
   if [[ ! -f "$LOCAL_B2_ENV_FILE" ]]; then
@@ -374,6 +389,7 @@ nohup env \\
   OBJAVERSEXL_EXCLUDE_SOURCES=$(printf '%q' "$OBJAVERSEXL_EXCLUDE_SOURCES") \\
   OBJAVERSEXL_SAVE_REPO_FORMAT=$(printf '%q' "$OBJAVERSEXL_SAVE_REPO_FORMAT") \\
   OBJAVERSEXL_MAX_DOWNLOAD_DIR_GB=$(printf '%q' "$OBJAVERSEXL_MAX_DOWNLOAD_DIR_GB") \\
+  EXCLUDE_SOURCE_IDS=$(printf '%q' "$REMOTE_EXCLUDE_SOURCE_IDS") \\
   B2_QUEUE_CLAIMS=$(printf '%q' "$B2_QUEUE_CLAIMS") \\
   SOURCE_MIN_FACES=$(printf '%q' "${SOURCE_MIN_FACES:-64}") \\
   SOURCE_MAX_FACES=$(printf '%q' "${SOURCE_MAX_FACES:-250000}") \\
@@ -434,6 +450,7 @@ cat > "$setup_dir/queue_info.json" <<JSON
   "objaversexl_exclude_sources": "$OBJAVERSEXL_EXCLUDE_SOURCES",
   "objaversexl_save_repo_format": "$OBJAVERSEXL_SAVE_REPO_FORMAT",
   "objaversexl_max_download_dir_gb": ${OBJAVERSEXL_MAX_DOWNLOAD_DIR_GB:-0},
+  "exclude_source_ids": "$REMOTE_EXCLUDE_SOURCE_IDS",
   "b2_queue_claims": "$B2_QUEUE_CLAIMS",
   "source_min_faces": ${SOURCE_MIN_FACES:-64},
   "source_max_faces": ${SOURCE_MAX_FACES:-250000},
