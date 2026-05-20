@@ -253,18 +253,23 @@ if [[ "$BOOTSTRAP_REMOTE" = "1" ]]; then
   cat > "$bootstrap_script" <<REMOTE_BOOTSTRAP
 set -euo pipefail
 cd $(printf '%q' "$REMOTE_REPO")
+if ls /etc/apt/sources.list.d/*deadsnakes* >/dev/null 2>&1; then
+  sudo mkdir -p /etc/apt/disabled-sources.list.d
+  sudo mv /etc/apt/sources.list.d/*deadsnakes* /etc/apt/disabled-sources.list.d/ || true
+fi
+sudo sed -i.bak '/ppa.launchpadcontent.net\/deadsnakes/d;/deadsnakes\/ppa/d' /etc/apt/sources.list 2>/dev/null || true
 if [ ! -x $(printf '%q' "$REMOTE_VENV/bin/python") ]; then
-  python3 -m venv $(printf '%q' "$REMOTE_VENV") || (sudo apt-get update && sudo apt-get install -y python3-venv && python3 -m venv $(printf '%q' "$REMOTE_VENV"))
+  python3 -m venv $(printf '%q' "$REMOTE_VENV") || (sudo apt-get update -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 && sudo apt-get install -y python3-venv && python3 -m venv $(printf '%q' "$REMOTE_VENV"))
 fi
 source $(printf '%q' "$REMOTE_VENV/bin/activate")
 python -m pip install -U pip setuptools wheel
 python -m pip install -q -r requirements-data.txt pillow scipy
 if ! command -v rclone >/dev/null 2>&1; then
-  sudo apt-get update
+  sudo apt-get update -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y rclone
 fi
 if ! command -v git-lfs >/dev/null 2>&1; then
-  sudo apt-get update
+  sudo apt-get update -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y git-lfs
 fi
 git lfs install --skip-repo >/dev/null 2>&1 || true

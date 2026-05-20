@@ -308,7 +308,7 @@ status train_complete "\$LAB_ROOT/runs/faceq_merged_scale/checkpoint.pt"
 REMOTE
 chmod 600 "$remote_script"
 scp "${SCP_OPTS[@]}" "$remote_script" "$SSH_TARGET:/tmp/clearmesh_runcrate_faceq_smoke.sh" >/dev/null
-ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "chmod +x /tmp/clearmesh_runcrate_faceq_smoke.sh && nohup /tmp/clearmesh_runcrate_faceq_smoke.sh > '$REMOTE_LOG' 2>&1 & echo \$! > '$REMOTE_PID'"
+ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "chmod +x /tmp/clearmesh_runcrate_faceq_smoke.sh; nohup /tmp/clearmesh_runcrate_faceq_smoke.sh > '$REMOTE_LOG' 2>&1 < /dev/null & echo \$! > '$REMOTE_PID'"
 
 cat > "$OUT_DIR/runcrate_run_info.json" <<JSON
 {
