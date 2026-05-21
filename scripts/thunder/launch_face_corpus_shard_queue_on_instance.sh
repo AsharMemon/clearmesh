@@ -300,7 +300,11 @@ if [[ "$SYNC_QUEUE_FILES" = "1" ]]; then
   "$TNR_BIN" scp "$REPO_ROOT/scripts/data/download_objaversepp_face_candidates.py" "$INSTANCE_ID:$REMOTE_REPO/scripts/data/download_objaversepp_face_candidates.py"
   "$TNR_BIN" scp "$REPO_ROOT/scripts/data/source_skip_registry.py" "$INSTANCE_ID:$REMOTE_REPO/scripts/data/source_skip_registry.py"
   "$TNR_BIN" scp "$REPO_ROOT/scripts/research/prepare_face_strict_targets.py" "$INSTANCE_ID:$REMOTE_REPO/scripts/research/prepare_face_strict_targets.py"
+  "$TNR_BIN" scp "$REPO_ROOT/scripts/research/build_face_token_dataset.py" "$INSTANCE_ID:$REMOTE_REPO/scripts/research/build_face_token_dataset.py"
   "$TNR_BIN" scp "$REPO_ROOT/scripts/research/check_face_dataset_targets.py" "$INSTANCE_ID:$REMOTE_REPO/scripts/research/check_face_dataset_targets.py"
+  "$TNR_BIN" scp "$REPO_ROOT/scripts/research/filter_face_dataset_by_gate.py" "$INSTANCE_ID:$REMOTE_REPO/scripts/research/filter_face_dataset_by_gate.py"
+  "$TNR_BIN" scp "$REPO_ROOT/scripts/research/split_face_token_dataset.py" "$INSTANCE_ID:$REMOTE_REPO/scripts/research/split_face_token_dataset.py"
+  "$TNR_BIN" scp "$REPO_ROOT/scripts/research/package_face_corpus.py" "$INSTANCE_ID:$REMOTE_REPO/scripts/research/package_face_corpus.py"
 fi
 
 printf 'mkdir -p %q %q\nexit\n' "$REMOTE_QUEUE_SOURCE_DIR" "$REMOTE_QUEUE_LOG_ROOT" | "$TNR_BIN" connect "$INSTANCE_ID"
