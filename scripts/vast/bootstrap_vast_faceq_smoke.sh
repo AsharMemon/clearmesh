@@ -23,6 +23,8 @@ B2_CORPUS_PREFIX="${B2_CORPUS_PREFIX:-face-corpora/merged/faceq_rolling_400k_tot
 B2_CORPUS_ARCHIVE="${B2_CORPUS_ARCHIVE:-faceq_merged_dedup_split.tar.gz}"
 B2_RUN_PREFIX="${B2_RUN_PREFIX:-face-runs/faceq-1p4b-fsdp-smoke/$RUN_STAMP}"
 ARCHIVE_DATASET_DIR="${ARCHIVE_DATASET_DIR:-split_dedup_tokenhash/train}"
+RCLONE_MULTI_THREAD_STREAMS="${RCLONE_MULTI_THREAD_STREAMS:-8}"
+RCLONE_MULTI_THREAD_CUTOFF="${RCLONE_MULTI_THREAD_CUTOFF:-64M}"
 
 STEPS="${STEPS:-20}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
@@ -44,6 +46,8 @@ PRECISION="${PRECISION:-bf16}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-0}"
 SKIP_FINAL_CHECKPOINT="${SKIP_FINAL_CHECKPOINT:-1}"
 LOG_EVERY="${LOG_EVERY:-1}"
+GRAD_CLIP_NORM="${GRAD_CLIP_NORM:-1.0}"
+ABORT_ON_NONFINITE_LOSS="${ABORT_ON_NONFINITE_LOSS:-1}"
 TORCHRUN_NPROC_PER_NODE="${TORCHRUN_NPROC_PER_NODE:-8}"
 DISTRIBUTED="${DISTRIBUTED:-auto}"
 DISTRIBUTED_BACKEND="${DISTRIBUTED_BACKEND:-nccl}"
@@ -83,16 +87,25 @@ fi
 ssh_url_to_args() {
   python3 - "$1" <<'PY'
 import re, shlex, sys
+from urllib.parse import urlparse
 text = sys.argv[1].strip()
-m = re.search(r'ssh://([^@\\s]+)@([^:/\\s]+):(\\d+)', text)
-if m:
-    user, host, port = m.groups()
+if text.startswith("ssh://"):
+    parsed = urlparse(text)
+    user = parsed.username or "root"
+    host = parsed.hostname or ""
+    port = str(parsed.port or 22)
 else:
-    m = re.search(r'(?:ssh\\s+)?(?:-p\\s+(\\d+)\\s+)?([^@\\s]+)@([^\\s]+)', text)
-    if not m:
-        raise SystemExit(1)
-    port, user, host = m.groups()
-    port = port or "22"
+    m = re.search(r'([^@\s]+)@([^:\s]+):(\d+)$', text)
+    if m:
+        user, host, port = m.groups()
+    else:
+        m = re.search(r'(?:ssh\s+)?(?:-p\s+(\d+)\s+)?([^@\s]+)@([^\s]+)', text)
+        if not m:
+            raise SystemExit(1)
+        port, user, host = m.groups()
+        port = port or "22"
+if not user or not host or not port:
+    raise SystemExit(1)
 print(shlex.quote(user), shlex.quote(host), shlex.quote(port))
 PY
 }
@@ -100,13 +113,17 @@ PY
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Waiting for Vast SSH URL for $INSTANCE_ID..." | tee -a "$LOCAL_LOG"
 deadline=$(( $(date +%s) + 1800 ))
 USER_HOST_PORT=""
-while [[ "$(date +%s)" -lt "$deadline" ]]; do
-  raw="$("$VAST_BIN" --api-key "$VAST_API" ssh-url "$INSTANCE_ID" 2>/dev/null || true)"
-  if [[ -n "$raw" ]] && USER_HOST_PORT="$(ssh_url_to_args "$raw" 2>/dev/null)"; then
-    break
-  fi
-  sleep 15
-done
+if [[ -n "${VAST_REMOTE_HOST:-}" ]]; then
+  USER_HOST_PORT="$(printf '%q %q %q\n' "${VAST_REMOTE_USER:-root}" "$VAST_REMOTE_HOST" "${VAST_REMOTE_PORT:-22}")"
+else
+  while [[ "$(date +%s)" -lt "$deadline" ]]; do
+    raw="$("$VAST_BIN" --api-key "$VAST_API" ssh-url "$INSTANCE_ID" 2>/dev/null || true)"
+    if [[ -n "$raw" ]] && USER_HOST_PORT="$(ssh_url_to_args "$raw" 2>/dev/null)"; then
+      break
+    fi
+    sleep 15
+  done
+fi
 if [[ -z "$USER_HOST_PORT" ]]; then
   echo "Vast instance did not expose SSH URL before timeout." >&2
   exit 3
@@ -123,20 +140,34 @@ SSH_OPTS=(
   -o ServerAliveInterval=30
   -o ServerAliveCountMax=4
 )
+SCP_OPTS=(
+  -i "$SSH_KEY_FILE"
+  -P "$REMOTE_PORT"
+  -o StrictHostKeyChecking=accept-new
+  -o UserKnownHostsFile="$HOME/.ssh/known_hosts"
+  -o ServerAliveInterval=30
+  -o ServerAliveCountMax=4
+)
 SSH_TARGET="$REMOTE_USER@$REMOTE_HOST"
 
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Preflighting Vast host..." | tee -a "$LOCAL_LOG"
 ssh "${SSH_OPTS[@]}" "$SSH_TARGET" 'hostname; nvidia-smi; mkdir -p /workspace' | tee -a "$LOCAL_LOG"
 
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Syncing repository..." | tee -a "$LOCAL_LOG"
-tar \
+COPYFILE_DISABLE=1 tar \
+  --no-xattrs \
   --exclude='.git' \
   --exclude='.codex_outputs' \
   --exclude='.codex_secrets' \
   --exclude='__pycache__' \
   --exclude='.pytest_cache' \
+  --exclude='.mypy_cache' \
+  --exclude='.ruff_cache' \
+  --exclude='.venv' \
+  --exclude='node_modules' \
+  --exclude='.DS_Store' \
   -czf - . \
-  | ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "mkdir -p '$REMOTE_REPO' && tar -xzf - -C '$REMOTE_REPO'"
+  | ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "rm -rf '$REMOTE_REPO' && mkdir -p '$REMOTE_REPO' && tar -xzf - -C '$REMOTE_REPO'"
 
 tmp_b2_env="$(mktemp "$OUT_DIR/b2_remote_env.XXXXXX")"
 {
@@ -147,7 +178,7 @@ tmp_b2_env="$(mktemp "$OUT_DIR/b2_remote_env.XXXXXX")"
 } > "$tmp_b2_env"
 chmod 600 "$tmp_b2_env"
 ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "mkdir -p '$REMOTE_LAB_ROOT'"
-scp "${SSH_OPTS[@]}" "$tmp_b2_env" "$SSH_TARGET:$REMOTE_B2_ENV" >/dev/null
+scp "${SCP_OPTS[@]}" "$tmp_b2_env" "$SSH_TARGET:$REMOTE_B2_ENV" >/dev/null
 rm -f "$tmp_b2_env"
 
 remote_script="$OUT_DIR/remote_vast_faceq_smoke_${INSTANCE_ID}.sh"
@@ -163,6 +194,8 @@ B2_CORPUS_PREFIX=$(printf '%q' "$B2_CORPUS_PREFIX")
 B2_CORPUS_ARCHIVE=$(printf '%q' "$B2_CORPUS_ARCHIVE")
 B2_RUN_PREFIX=$(printf '%q' "$B2_RUN_PREFIX")
 ARCHIVE_DATASET_DIR=$(printf '%q' "$ARCHIVE_DATASET_DIR")
+RCLONE_MULTI_THREAD_STREAMS=$(printf '%q' "$RCLONE_MULTI_THREAD_STREAMS")
+RCLONE_MULTI_THREAD_CUTOFF=$(printf '%q' "$RCLONE_MULTI_THREAD_CUTOFF")
 mkdir -p "\$LAB_ROOT/logs" "\$LAB_ROOT/runs/faceq_merged_scale"
 status() {
   python3 - "\$LAB_ROOT/status.jsonl" "\$1" "\${2:-}" <<'PY'
@@ -182,7 +215,7 @@ if [[ ! -x "\$VENV/bin/python" ]]; then
 fi
 source "\$VENV/bin/activate"
 python -m pip install -U pip setuptools wheel
-python -m pip install -q numpy tqdm
+python -m pip install -q numpy tqdm trimesh scipy networkx
 python - <<'PY' || python -m pip install --index-url https://download.pytorch.org/whl/cu128 'torch>=2.4.0'
 import torch
 print("torch_ready", torch.__version__)
@@ -197,7 +230,10 @@ MODE=face_run LOCAL_ROOT="\$LAB_ROOT" B2_BUCKET="\$B2_BUCKET" B2_PREFIX="\$B2_RU
   nohup bash scripts/thunder/b2_continuous_upload.sh > "\$LAB_ROOT/logs/b2_upload.log" 2>&1 &
 echo \$! > "\$LAB_ROOT/b2_upload.pid"
 status b2_download_started "\$B2_CORPUS_PREFIX/\$B2_CORPUS_ARCHIVE"
-rclone copyto "b2env:\$B2_BUCKET/\$B2_CORPUS_PREFIX/\$B2_CORPUS_ARCHIVE" "\$LAB_ROOT/\$B2_CORPUS_ARCHIVE" --stats 30s
+rclone copyto "b2env:\$B2_BUCKET/\$B2_CORPUS_PREFIX/\$B2_CORPUS_ARCHIVE" "\$LAB_ROOT/\$B2_CORPUS_ARCHIVE" \
+  --stats 30s \
+  --multi-thread-streams "\$RCLONE_MULTI_THREAD_STREAMS" \
+  --multi-thread-cutoff "\$RCLONE_MULTI_THREAD_CUTOFF"
 tar -xzf "\$LAB_ROOT/\$B2_CORPUS_ARCHIVE" -C "\$LAB_ROOT"
 DATASET_DIR="\$LAB_ROOT/\$ARCHIVE_DATASET_DIR"
 test -d "\$DATASET_DIR"
@@ -210,6 +246,8 @@ TRAIN_EXTRA_ARGS=()
 [[ $(printf '%q' "$SAMPLE_CACHE_SIZE") -gt 0 ]] && TRAIN_EXTRA_ARGS+=(--sample-cache-size $(printf '%q' "$SAMPLE_CACHE_SIZE"))
 [[ $(printf '%q' "$TRACK_BEST_IN_MEMORY") = "0" ]] && TRAIN_EXTRA_ARGS+=(--no-track-best-in-memory)
 [[ $(printf '%q' "$SKIP_FINAL_CHECKPOINT") = "1" ]] && TRAIN_EXTRA_ARGS+=(--skip-final-checkpoint)
+[[ $(printf '%q' "$GRAD_CLIP_NORM") != "0" ]] && TRAIN_EXTRA_ARGS+=(--grad-clip-norm $(printf '%q' "$GRAD_CLIP_NORM"))
+[[ $(printf '%q' "$ABORT_ON_NONFINITE_LOSS") = "1" ]] && TRAIN_EXTRA_ARGS+=(--abort-on-nonfinite-loss)
 status train_started "steps=$(printf '%q' "$STEPS") nproc=$(printf '%q' "$TORCHRUN_NPROC_PER_NODE")"
 "\${TRAIN_CMD[@]}" scripts/research/train_face_indexed_conditioned_tiny.py \\
   --dataset-dir "\$DATASET_DIR" \\
@@ -252,8 +290,8 @@ status train_started "steps=$(printf '%q' "$STEPS") nproc=$(printf '%q' "$TORCHR
 status train_complete "\$LAB_ROOT/runs/faceq_merged_scale/checkpoint.pt"
 REMOTE
 chmod 600 "$remote_script"
-scp "${SSH_OPTS[@]}" "$remote_script" "$SSH_TARGET:/tmp/clearmesh_vast_faceq_smoke.sh" >/dev/null
-ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "chmod +x /tmp/clearmesh_vast_faceq_smoke.sh && nohup /tmp/clearmesh_vast_faceq_smoke.sh > '$REMOTE_LOG' 2>&1 & echo \\$! > '$REMOTE_PID'"
+scp "${SCP_OPTS[@]}" "$remote_script" "$SSH_TARGET:/tmp/clearmesh_vast_faceq_smoke.sh" >/dev/null
+ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "chmod +x /tmp/clearmesh_vast_faceq_smoke.sh && nohup /tmp/clearmesh_vast_faceq_smoke.sh > '$REMOTE_LOG' 2>&1 < /dev/null & echo \$! > '$REMOTE_PID'"
 
 cat > "$OUT_DIR/vast_run_info_${INSTANCE_ID}.json" <<JSON
 {

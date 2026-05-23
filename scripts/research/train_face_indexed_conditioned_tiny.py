@@ -648,6 +648,11 @@ def main() -> int:
     )
     parser.add_argument("--log-every", type=int, default=0)
     parser.add_argument("--grad-clip-norm", type=float, default=0.0)
+    parser.add_argument(
+        "--abort-on-nonfinite-loss",
+        action="store_true",
+        help="Synchronously stop all ranks when any rank sees NaN/Inf loss.",
+    )
     parser.add_argument("--corner-head", choices=["causal", "parallel"], default="parallel")
     parser.add_argument("--count-loss-weight", type=float, default=0.05)
     parser.add_argument("--topology-loss-weight", type=float, default=0.0)
@@ -999,6 +1004,29 @@ def main() -> int:
                     ignore_index=-100,
                 )
                 loss = loss + float(args.edge_choice_loss_weight) * edge_choice_loss
+        if args.abort_on_nonfinite_loss:
+            local_finite = torch.isfinite(loss.detach())
+            if dist_info["enabled"]:
+                finite_flag = torch.tensor(
+                    1 if bool(local_finite.item()) else 0,
+                    dtype=torch.int32,
+                    device=device,
+                )
+                dist_info["dist"].all_reduce(finite_flag, op=dist_info["dist"].ReduceOp.MIN)
+                all_finite = bool(finite_flag.item())
+            else:
+                all_finite = bool(local_finite.item())
+            if not all_finite:
+                if rank == 0:
+                    log_item = {
+                        "step": step,
+                        "loss": float(loss.detach().cpu()) if bool(local_finite.item()) else "NaN",
+                        "nonfinite_loss": True,
+                    }
+                    print(json.dumps(log_item), flush=True)
+                _cleanup_distributed(dist_info)
+                raise SystemExit(f"non-finite loss at step {step}")
+
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         if args.grad_clip_norm > 0:
@@ -1008,24 +1036,30 @@ def main() -> int:
         if losses[-1] < best_loss:
             best_loss = losses[-1]
             best_step = step
-            if args.track_best_in_memory and rank == 0:
+            if args.track_best_in_memory and rank == 0 and not bool(getattr(model, "_clearmesh_fsdp", False)):
                 best_state = copy.deepcopy(_cpu_model_state(model))
-        if rank == 0 and args.checkpoint_every and step % int(args.checkpoint_every) == 0:
-            payload = _checkpoint_payload(
-                args=args,
-                model_state=_cpu_model_state(model),
-                optimizer_state=optimizer.state_dict(),
-                losses=losses,
-                num_bins=num_bins,
-                max_vertices=max_vertices,
-                max_faces=max_faces,
-                best_loss=best_loss,
-                best_step=best_step,
-                step=step,
-            )
-            _save_checkpoint(args.output.with_suffix(f".step{step:06d}.pt"), payload, torch)
-            if args.save_current_checkpoint:
-                _save_checkpoint(args.output.parent / "checkpoint.current.pt", payload, torch)
+        if args.checkpoint_every and step % int(args.checkpoint_every) == 0:
+            # FSDP full-state export is collective even with rank0_only=True:
+            # every rank enters the gather, and only rank 0 writes the payload.
+            checkpoint_model_state = None
+            if bool(getattr(model, "_clearmesh_fsdp", False)) or rank == 0:
+                checkpoint_model_state = _cpu_model_state(model)
+            if rank == 0:
+                payload = _checkpoint_payload(
+                    args=args,
+                    model_state=checkpoint_model_state if checkpoint_model_state is not None else {},
+                    optimizer_state=optimizer.state_dict(),
+                    losses=losses,
+                    num_bins=num_bins,
+                    max_vertices=max_vertices,
+                    max_faces=max_faces,
+                    best_loss=best_loss,
+                    best_step=best_step,
+                    step=step,
+                )
+                _save_checkpoint(args.output.with_suffix(f".step{step:06d}.pt"), payload, torch)
+                if args.save_current_checkpoint:
+                    _save_checkpoint(args.output.parent / "checkpoint.current.pt", payload, torch)
 
         if rank == 0 and (step == 1 or step == args.steps or step % log_every == 0):
             log_item = {
@@ -1045,25 +1079,27 @@ def main() -> int:
                 log_item["seed_face_loss_active"] = bool(seed_face_loss_active)
             print(json.dumps(log_item), flush=True)
 
+    checkpoint_path = None
+    final_state = None
+    if not args.skip_final_checkpoint:
+        if best_state is not None:
+            final_state = best_state
+        elif bool(getattr(model, "_clearmesh_fsdp", False)) or rank == 0:
+            # Same FSDP collective-state rule as periodic checkpointing.
+            final_state = _cpu_model_state(model)
     if dist_info["enabled"]:
         dist_info["dist"].barrier()
     if rank != 0:
         _cleanup_distributed(dist_info)
         return 0
 
-    checkpoint_path = None
     if not args.skip_final_checkpoint:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        final_state = (
-            best_state
-            if best_state is not None
-            else _cpu_model_state(model)
-        )
         _save_checkpoint(
             args.output,
             _checkpoint_payload(
                 args=args,
-                model_state=final_state,
+                model_state=final_state if final_state is not None else {},
                 optimizer_state=optimizer.state_dict(),
                 losses=losses,
                 num_bins=num_bins,
