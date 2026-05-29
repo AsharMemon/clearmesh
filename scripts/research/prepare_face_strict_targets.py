@@ -13,6 +13,7 @@ watertight/boundary/nonmanifold thresholds explicitly.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import json
 import sys
 from dataclasses import asdict
@@ -59,6 +60,44 @@ def _iter_manifest_meshes(manifest: Path) -> list[Path]:
         if path is not None:
             paths.append(path)
     return paths
+
+
+def _adapt_candidate_worker(payload: dict) -> dict:
+    """Adapt one candidate mesh in a subprocess.
+
+    Parallel mode intentionally names outputs by candidate index rather than by
+    accepted index, so workers can write independently without racing.
+    """
+
+    index = int(payload["index"])
+    path = Path(payload["path"])
+    target_path = Path(payload["target_path"])
+    report_path = Path(payload["report_path"])
+    options = CoarseAdapterOptions(**payload["options"])
+    try:
+        report = adapt_coarse_mesh_file(path, target_path, options)
+        report_path.write_text(json.dumps(asdict(report), indent=2, sort_keys=True), encoding="utf-8")
+        return {
+            "index": index,
+            "accepted": bool(report.accepted),
+            "error": False,
+            "record": {
+                "source_path": str(path),
+                "target_path": str(target_path),
+                "report_path": str(report_path),
+                "status": "accepted" if report.accepted else "rejected",
+                "engine": report.engine,
+                "accepted": bool(report.accepted),
+                "output_metrics": report.output_metrics,
+            },
+        }
+    except Exception as exc:  # noqa: BLE001 - keep processing candidate meshes.
+        return {
+            "index": index,
+            "accepted": False,
+            "error": True,
+            "record": {"source_path": str(path), "status": "error", "error": f"{type(exc).__name__}: {exc}"},
+        }
 
 
 def main() -> int:
@@ -112,6 +151,15 @@ def main() -> int:
     )
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--progress-every", type=int, default=25, help="Print JSON progress every N candidates. Use 0 to disable.")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help=(
+            "Parallel strict-target conversion workers. Values >1 are used only when --limit is 0; "
+            "--limit falls back to serial mode to preserve accepted-count semantics."
+        ),
+    )
     args = parser.parse_args()
     if args.input_dir is None and args.manifest is None:
         parser.error("one of --input-dir or --manifest is required")
@@ -138,52 +186,104 @@ def main() -> int:
         fallback=args.fallback,
     )
 
+    candidates = _iter_manifest_meshes(args.manifest) if args.manifest else _iter_meshes(args.input_dir)
+    requested_workers = max(1, int(args.workers))
+    workers = requested_workers if args.limit == 0 else 1
+    if requested_workers > 1 and workers == 1:
+        print("Parallel strict-target conversion disabled because --limit requires serial accepted-count semantics.", file=sys.stderr)
+
     records = []
     accepted = 0
     rejected = 0
     errors = 0
-    candidates = _iter_manifest_meshes(args.manifest) if args.manifest else _iter_meshes(args.input_dir)
-    for index, path in enumerate(candidates):
-        if args.limit and accepted >= args.limit:
-            records.append({"source_path": str(path), "status": "not_attempted_limit_reached"})
-            continue
-        target_path = mesh_dir / f"{accepted:04d}_{path.stem}_strict.glb"
-        report_path = report_dir / f"{accepted:04d}_{path.stem}.json"
-        try:
-            report = adapt_coarse_mesh_file(path, target_path, options)
-            report_path.write_text(json.dumps(asdict(report), indent=2, sort_keys=True), encoding="utf-8")
-            records.append(
+
+    if workers > 1 and len(candidates) > 1:
+        payloads = []
+        options_dict = asdict(options)
+        for index, path in enumerate(candidates):
+            safe_stem = path.stem.replace("/", "_")
+            payloads.append(
                 {
-                    "source_path": str(path),
-                    "target_path": str(target_path),
-                    "report_path": str(report_path),
-                    "status": "accepted" if report.accepted else "rejected",
-                    "engine": report.engine,
-                    "accepted": bool(report.accepted),
-                    "output_metrics": report.output_metrics,
+                    "index": index,
+                    "path": str(path),
+                    "target_path": str(mesh_dir / f"{index:07d}_{safe_stem}_strict.glb"),
+                    "report_path": str(report_dir / f"{index:07d}_{safe_stem}.json"),
+                    "options": options_dict,
                 }
             )
-            if report.accepted:
-                accepted += 1
-            else:
-                rejected += 1
-        except Exception as exc:  # noqa: BLE001 - keep processing candidate meshes.
-            errors += 1
-            records.append({"source_path": str(path), "status": "error", "error": f"{type(exc).__name__}: {exc}"})
-        if args.progress_every and ((index + 1) % args.progress_every == 0 or index + 1 == len(candidates)):
-            print(
-                json.dumps(
+        results: list[dict] = []
+        processed = 0
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            future_to_index = {executor.submit(_adapt_candidate_worker, payload): int(payload["index"]) for payload in payloads}
+            for future in as_completed(future_to_index):
+                result = future.result()
+                results.append(result)
+                processed += 1
+                if result["accepted"]:
+                    accepted += 1
+                elif result["error"]:
+                    errors += 1
+                else:
+                    rejected += 1
+                if args.progress_every and (processed % args.progress_every == 0 or processed == len(candidates)):
+                    print(
+                        json.dumps(
+                            {
+                                "accepted": accepted,
+                                "candidate_count": len(candidates),
+                                "errors": errors,
+                                "processed": processed,
+                                "rejected": rejected,
+                                "workers": workers,
+                            },
+                            sort_keys=True,
+                        ),
+                        flush=True,
+                    )
+        records = [result["record"] for result in sorted(results, key=lambda item: int(item["index"]))]
+    else:
+        for index, path in enumerate(candidates):
+            if args.limit and accepted >= args.limit:
+                records.append({"source_path": str(path), "status": "not_attempted_limit_reached"})
+                continue
+            target_path = mesh_dir / f"{accepted:04d}_{path.stem}_strict.glb"
+            report_path = report_dir / f"{accepted:04d}_{path.stem}.json"
+            try:
+                report = adapt_coarse_mesh_file(path, target_path, options)
+                report_path.write_text(json.dumps(asdict(report), indent=2, sort_keys=True), encoding="utf-8")
+                records.append(
                     {
-                        "accepted": accepted,
-                        "candidate_count": len(candidates),
-                        "errors": errors,
-                        "processed": index + 1,
-                        "rejected": rejected,
-                    },
-                    sort_keys=True,
-                ),
-                flush=True,
-            )
+                        "source_path": str(path),
+                        "target_path": str(target_path),
+                        "report_path": str(report_path),
+                        "status": "accepted" if report.accepted else "rejected",
+                        "engine": report.engine,
+                        "accepted": bool(report.accepted),
+                        "output_metrics": report.output_metrics,
+                    }
+                )
+                if report.accepted:
+                    accepted += 1
+                else:
+                    rejected += 1
+            except Exception as exc:  # noqa: BLE001 - keep processing candidate meshes.
+                errors += 1
+                records.append({"source_path": str(path), "status": "error", "error": f"{type(exc).__name__}: {exc}"})
+            if args.progress_every and ((index + 1) % args.progress_every == 0 or index + 1 == len(candidates)):
+                print(
+                    json.dumps(
+                        {
+                            "accepted": accepted,
+                            "candidate_count": len(candidates),
+                            "errors": errors,
+                            "processed": index + 1,
+                            "rejected": rejected,
+                            "workers": workers,
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
 
     summary = {
         "input_dir": str(args.input_dir) if args.input_dir else None,
@@ -191,6 +291,8 @@ def main() -> int:
         "mesh_dir": str(mesh_dir),
         "candidate_count": len(candidates),
         "accepted": accepted,
+        "workers": workers,
+        "requested_workers": requested_workers,
         "options": asdict(options),
         "records": records,
     }

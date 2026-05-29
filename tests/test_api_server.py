@@ -40,6 +40,15 @@ def test_auth_billing_quote_create_cancel_flow(client):
     server, api = client
 
     assert api.get("/healthz").json() == {"ok": True}
+    assert api.get("/").status_code == 200
+    assert api.get("/app").status_code == 200
+    assert api.get("/pricing").status_code == 200
+    assert api.get("/v1/inference/config").json()["available"] is False
+    demo = api.post("/v1/inference/demo", json={"prompt": "clean sci-fi courier drone"})
+    assert demo.status_code == 202
+    assert demo.json()["status"] == "local_preview"
+    assert api.get("/v1/inference/jobs/demo_missing").status_code == 404
+    assert api.get("/v1/inference/jobs/demo_missing/artifacts/final_mesh").status_code == 404
     assert api.get("/v1/jobs").status_code == 401
 
     grant = api.post(
@@ -90,6 +99,82 @@ def test_auth_billing_quote_create_cancel_flow(client):
 
     # Keep static analyzers honest that the fixture returns the module too.
     assert server.STATE_ROOT
+
+
+def test_browser_signup_session_settings_and_api_key_flow(client):
+    _server, api = client
+
+    signup = api.post(
+        "/v1/auth/signup",
+        json={
+            "email": "artist@example.com",
+            "password": "correct horse",
+            "name": "Mesh Artist",
+            "team_name": "Blue Studio",
+        },
+    )
+    assert signup.status_code == 201
+    body = signup.json()
+    assert body["user"]["email"] == "artist@example.com"
+    assert body["team"]["name"] == "Blue Studio"
+    assert body["credits"]["balance"] == 25
+
+    me = api.get("/v1/auth/me")
+    assert me.status_code == 200
+    assert me.json()["user"]["name"] == "Mesh Artist"
+
+    settings = api.patch(
+        "/v1/settings",
+        json={
+            "profile": {"name": "Lead Artist"},
+            "user_settings": {"default_quality_tier": "draft", "auto_rigging": True},
+            "team_settings": {"workspace_name": "ClearMesh Lab", "model_endpoint": "https://models.example.test"},
+        },
+    )
+    assert settings.status_code == 200
+    assert settings.json()["user"]["settings"]["default_quality_tier"] == "draft"
+    assert settings.json()["user"]["settings"]["auto_rigging"] is True
+    assert settings.json()["team"]["name"] == "ClearMesh Lab"
+
+    key = api.post("/v1/settings/api-keys", json={"label": "CI key"})
+    assert key.status_code == 201
+    raw_key = key.json()["api_key"]["token"]
+    listed = api.get("/v1/settings/api-keys").json()["api_keys"]
+    assert listed[0]["label"] == "CI key"
+
+    job = api.post(
+        "/v1/jobs",
+        json={"input_uri": "prompt://clockwork-fox", "mode": "text_to_3d", "quality_tier": "draft"},
+    )
+    assert job.status_code == 202
+    assert job.json()["team_id"] == body["team"]["id"]
+
+    api.post("/v1/auth/logout")
+    assert api.get("/v1/auth/me").status_code == 401
+
+    api_key_jobs = api.get("/v1/jobs", headers={"Authorization": f"Bearer {raw_key}"})
+    assert api_key_jobs.status_code == 200
+    assert len(api_key_jobs.json()["jobs"]) == 1
+
+
+def test_oauth_and_subscription_scaffolds(client):
+    _server, api = client
+
+    providers = api.get("/v1/auth/providers").json()["providers"]
+    assert {provider["id"] for provider in providers} == {"github", "google"}
+    assert all(provider["configured"] is False for provider in providers)
+    assert api.get("/v1/auth/oauth/github/start").status_code == 501
+
+    plans = api.get("/v1/billing/plans").json()["plans"]
+    assert [plan["tier"] for plan in plans] == ["free", "creative", "studio", "enterprise"]
+
+    api.post(
+        "/v1/auth/signup",
+        json={"email": "billing@example.com", "password": "correct horse", "name": "Billing"},
+    )
+    checkout = api.post("/v1/billing/checkout", json={"tier": "creative"})
+    assert checkout.status_code == 200
+    assert checkout.json()["status"] == "not_configured"
 
 
 def test_upload_and_asset_download_are_team_scoped_and_root_safe(client, tmp_path: Path):

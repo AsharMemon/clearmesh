@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "rewrites": [
+    { "source": "/v1/inference/:path*", "destination": "/api/inference?path=:path*" },
+    { "source": "/app", "destination": "/app.html" },
+    { "source": "/studio", "destination": "/app.html" },
+    { "source": "/settings", "destination": "/app.html" },
+    { "source": "/pricing", "destination": "/pricing.html" }
+  ]
+}

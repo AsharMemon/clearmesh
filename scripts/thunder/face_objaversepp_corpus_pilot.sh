@@ -55,6 +55,8 @@ VOXEL_RESOLUTION="${VOXEL_RESOLUTION:-64}"
 MESH_VOXEL_MAX_FACES="${MESH_VOXEL_MAX_FACES:-5000}"
 FALLBACK="${FALLBACK:-convex_hull}"
 STRICT_TARGET_PROGRESS_EVERY="${STRICT_TARGET_PROGRESS_EVERY:-25}"
+STRICT_TARGET_WORKERS="${STRICT_TARGET_WORKERS:-1}"
+STRICT_TARGET_MIN_WORKERS="${STRICT_TARGET_MIN_WORKERS:-1}"
 TARGET_MAX_OUTPUT_COMPONENTS="${TARGET_MAX_OUTPUT_COMPONENTS:-1}"
 TARGET_MAX_BOUNDARY_LOOPS="${TARGET_MAX_BOUNDARY_LOOPS:-0}"
 TARGET_MAX_NONMANIFOLD_EDGES="${TARGET_MAX_NONMANIFOLD_EDGES:-0}"
@@ -62,6 +64,9 @@ TARGET_REQUIRE_WATERTIGHT="${TARGET_REQUIRE_WATERTIGHT:-1}"
 TOKEN_MAX_FACES="${TOKEN_MAX_FACES:-1024}"
 POINT_SAMPLES="${POINT_SAMPLES:-8192}"
 NUM_BINS="${NUM_BINS:-512}"
+TOKEN_BUILD_WORKERS="${TOKEN_BUILD_WORKERS:-1}"
+TOKEN_BUILD_MIN_WORKERS="${TOKEN_BUILD_MIN_WORKERS:-1}"
+FORCE_MIN_POSTPROCESS_WORKERS="${FORCE_MIN_POSTPROCESS_WORKERS:-0}"
 PAPER_WITHIN_FACE_ORDER="${PAPER_WITHIN_FACE_ORDER:-rotate_min_zyx}"
 GATE_PROFILE="${GATE_PROFILE:-strict}"
 GATE_MAX_BOUNDARY_EDGES="${GATE_MAX_BOUNDARY_EDGES:-}"
@@ -76,6 +81,15 @@ TEST_COUNT="${TEST_COUNT:-0}"
 ARCHIVE_PATH="${ARCHIVE_PATH:-}"
 LEAN_ARCHIVE_PATH="${LEAN_ARCHIVE_PATH:-}"
 CLEANUP_RAW_AFTER_STRICT_TARGETS="${CLEANUP_RAW_AFTER_STRICT_TARGETS:-1}"
+
+if [ "$FORCE_MIN_POSTPROCESS_WORKERS" = "1" ]; then
+  if [ "$STRICT_TARGET_WORKERS" -lt "$STRICT_TARGET_MIN_WORKERS" ]; then
+    STRICT_TARGET_WORKERS="$STRICT_TARGET_MIN_WORKERS"
+  fi
+  if [ "$TOKEN_BUILD_WORKERS" -lt "$TOKEN_BUILD_MIN_WORKERS" ]; then
+    TOKEN_BUILD_WORKERS="$TOKEN_BUILD_MIN_WORKERS"
+  fi
+fi
 
 cd /home/ubuntu/clearmesh
 
@@ -216,6 +230,7 @@ python scripts/research/prepare_face_strict_targets.py \
   --mesh-voxel-max-faces "$MESH_VOXEL_MAX_FACES" \
   --fallback "$FALLBACK" \
   --progress-every "$STRICT_TARGET_PROGRESS_EVERY" \
+  --workers "$STRICT_TARGET_WORKERS" \
   "${TARGET_ARGS[@]}"
 
 if [ "$CLEANUP_RAW_AFTER_STRICT_TARGETS" = "1" ] && [ -f "$RUN_DIR/strict_targets/strict_target_manifest.json" ]; then
@@ -229,7 +244,8 @@ python scripts/research/build_face_token_dataset.py \
   --max-faces "$TOKEN_MAX_FACES" \
   --point-samples "$POINT_SAMPLES" \
   --num-bins "$NUM_BINS" \
-  --paper-within-face-order "$PAPER_WITHIN_FACE_ORDER"
+  --paper-within-face-order "$PAPER_WITHIN_FACE_ORDER" \
+  --workers "$TOKEN_BUILD_WORKERS"
 
 GATE_ARGS=()
 if [ "$FAIL_ON_GATE" = "1" ]; then
@@ -344,6 +360,8 @@ summary = {
         "max_components": int("$MAX_COMPONENTS"),
         "num_bins": int("$NUM_BINS"),
         "point_samples": int("$POINT_SAMPLES"),
+        "strict_target_workers": int("$STRICT_TARGET_WORKERS"),
+        "token_build_workers": int("$TOKEN_BUILD_WORKERS"),
         "paper_within_face_order": "$PAPER_WITHIN_FACE_ORDER",
         "promote_passing": "$PROMOTE_PASSING" == "1",
         "split_passing": "$SPLIT_PASSING" == "1",

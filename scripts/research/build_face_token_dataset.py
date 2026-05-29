@@ -9,6 +9,7 @@ normalization transform needed to decode/edit/debug examples later.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import json
 import re
 import sys
@@ -168,6 +169,123 @@ def _iter_meshes(mesh_dir: Path | None, manifest: Path | None, synthetic_count: 
         yield _synthetic_mesh(idx, rng, synthetic_kind)
 
 
+def _encode_mesh_to_npz(
+    *,
+    index: int,
+    name: str,
+    mesh: trimesh.Trimesh,
+    output_dir: Path,
+    stem: str,
+    num_bins: int,
+    max_faces: int,
+    point_samples: int,
+    paper_within_face_order: str,
+    indexed_face_order: str,
+    seed: int,
+) -> dict:
+    sequence = encode_mesh_to_face_tokens(mesh, num_bins=num_bins, max_faces=max_faces)
+    paper_sequence = encode_mesh_to_paper_face_tokens(
+        mesh,
+        num_bins=num_bins,
+        max_faces=max_faces,
+        within_face_order=paper_within_face_order,
+    )
+    indexed_sequence = encode_mesh_to_indexed_face_tokens(
+        mesh,
+        num_bins=num_bins,
+        max_faces=max_faces,
+        face_order=indexed_face_order,
+    )
+    decoded = decode_face_tokens_to_mesh(sequence)
+    paper_decoded = decode_paper_face_tokens_to_mesh(paper_sequence)
+    indexed_decoded = decode_indexed_face_tokens_to_mesh(indexed_sequence)
+    if point_samples > 0:
+        surface_points, face_indices = trimesh.sample.sample_surface(
+            mesh,
+            point_samples,
+            seed=seed + index,
+        )
+        surface_points = sequence.transform.normalize(surface_points).astype(np.float32)
+        surface_normals = np.asarray(mesh.face_normals[face_indices], dtype=np.float32)
+    else:
+        surface_points = np.zeros((0, 3), dtype=np.float32)
+        surface_normals = np.zeros((0, 3), dtype=np.float32)
+
+    out_path = output_dir / f"{stem}.npz"
+    stats = face_token_stats(sequence)
+    topology = face_token_topology_report(sequence.tokens)
+    paper_topology = face_token_topology_report(paper_sequence.tokens)
+    indexed_topology = face_token_topology_report(indexed_to_coordinate_tokens(indexed_sequence))
+    indexed_stats = indexed_face_stats(indexed_sequence)
+    indexed_closures = indexed_face_closure_counts(indexed_sequence.faces)
+    stats["source_name"] = name
+    stats["source_faces"] = int(len(mesh.faces))
+    stats["decoded_watertight"] = bool(decoded.is_watertight)
+    stats["token_watertight_edge_graph"] = bool(topology.watertight_edge_graph)
+    stats["token_boundary_edge_count"] = int(topology.boundary_edge_count)
+    stats["token_nonmanifold_edge_count"] = int(topology.nonmanifold_edge_count)
+    stats["token_edge_pairing_ratio"] = float(topology.edge_pairing_ratio)
+    stats["paper_decoded_watertight"] = bool(paper_decoded.is_watertight)
+    stats["paper_token_watertight_edge_graph"] = bool(paper_topology.watertight_edge_graph)
+    stats["paper_token_boundary_edge_count"] = int(paper_topology.boundary_edge_count)
+    stats["paper_token_nonmanifold_edge_count"] = int(paper_topology.nonmanifold_edge_count)
+    stats["paper_token_edge_pairing_ratio"] = float(paper_topology.edge_pairing_ratio)
+    stats["indexed_vertices"] = int(indexed_stats["vertices"])
+    stats["indexed_faces"] = int(indexed_stats["faces"])
+    stats["indexed_index_tokens"] = int(indexed_stats["index_tokens"])
+    stats["indexed_compression_vs_xyz_face_tokens"] = float(indexed_stats["compression_vs_xyz_face_tokens"])
+    stats["indexed_decoded_watertight"] = bool(indexed_decoded.is_watertight)
+    stats["indexed_token_watertight_edge_graph"] = bool(indexed_topology.watertight_edge_graph)
+    stats["indexed_token_boundary_edge_count"] = int(indexed_topology.boundary_edge_count)
+    stats["indexed_token_nonmanifold_edge_count"] = int(indexed_topology.nonmanifold_edge_count)
+    stats["indexed_token_edge_pairing_ratio"] = float(indexed_topology.edge_pairing_ratio)
+    stats["indexed_face_order"] = indexed_face_order
+    stats["indexed_zero_closure_after_first"] = int(np.sum(indexed_closures[1:] == 0)) if len(indexed_closures) > 1 else 0
+    stats["indexed_zero_closure_after_first_ratio"] = (
+        float(np.mean(indexed_closures[1:] == 0)) if len(indexed_closures) > 1 else 0.0
+    )
+    stats["point_samples"] = int(len(surface_points))
+    np.savez_compressed(
+        out_path,
+        tokens=np.asarray(sequence.tokens, dtype=np.int16),
+        paper_tokens=np.asarray(paper_sequence.tokens, dtype=np.int16),
+        indexed_vertices=np.asarray(indexed_sequence.vertices, dtype=np.int16),
+        indexed_faces=np.asarray(indexed_sequence.faces, dtype=np.int32),
+        center=np.asarray(sequence.transform.center, dtype=np.float32),
+        scale=np.asarray([sequence.transform.scale], dtype=np.float32),
+        num_bins=np.asarray([sequence.num_bins], dtype=np.int32),
+        paper_within_face_order=np.asarray([paper_within_face_order]),
+        surface_points=surface_points,
+        surface_normals=surface_normals,
+    )
+    return {"path": str(out_path), **stats}
+
+
+def _tokenize_manifest_worker(payload: dict) -> dict:
+    index = int(payload["index"])
+    path = Path(payload["path"])
+    mesh = _load_mesh(path)
+    if mesh is None or len(mesh.faces) > int(payload["max_faces"]):
+        return {"index": index, "written": False, "record": None}
+    try:
+        record = _encode_mesh_to_npz(
+            index=index,
+            name=str(payload["name"]),
+            mesh=mesh,
+            output_dir=Path(payload["output_dir"]),
+            stem=f"{index:07d}_{_slug(str(payload['name']))}",
+            num_bins=int(payload["num_bins"]),
+            max_faces=int(payload["max_faces"]),
+            point_samples=int(payload["point_samples"]),
+            paper_within_face_order=str(payload["paper_within_face_order"]),
+            indexed_face_order=str(payload["indexed_face_order"]),
+            seed=int(payload["seed"]),
+        )
+    except Exception:  # noqa: BLE001 - keep processing candidate meshes.
+        return {"index": index, "written": False, "record": None}
+    return {"index": index, "written": True, "record": record}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mesh-dir", type=Path, default=None)
@@ -192,6 +310,16 @@ def main() -> int:
         help="Order indexed topology targets lexicographically or as a boundary-growing shelling sequence.",
     )
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help=(
+            "Parallel manifest tokenization workers. Parallel mode is used for manifest-only inputs with --limit 0; "
+            "other input modes fall back to serial behavior."
+        ),
+    )
+    parser.add_argument("--progress-every", type=int, default=100, help="Print JSON progress every N meshes in parallel mode.")
     args = parser.parse_args()
     if args.mesh_dir is None and args.manifest is None and args.synthetic_count <= 0:
         parser.error("one of --mesh-dir, --manifest, or --synthetic-count is required")
@@ -201,97 +329,94 @@ def main() -> int:
     written = 0
     skipped = 0
 
-    with manifest_path.open("w", encoding="utf-8") as manifest:
-        for name, mesh in _iter_meshes(args.mesh_dir, args.manifest, args.synthetic_count, args.seed, args.synthetic_kind):
-            if args.limit and written >= args.limit:
-                break
-            if len(mesh.faces) > args.max_faces:
+    requested_workers = max(1, int(args.workers))
+    workers = requested_workers
+    parallel_supported = args.manifest is not None and args.mesh_dir is None and args.synthetic_count <= 0 and args.limit == 0
+    if workers > 1 and not parallel_supported:
+        workers = 1
+        print("Parallel tokenization disabled for this input mode; using serial behavior.", file=sys.stderr)
+
+    if workers > 1:
+        payloads = []
+        for index, row in enumerate(_iter_manifest_rows(args.manifest)):
+            path = _manifest_mesh_path(row)
+            if path is None:
                 skipped += 1
                 continue
-            try:
-                sequence = encode_mesh_to_face_tokens(mesh, num_bins=args.num_bins, max_faces=args.max_faces)
-                paper_sequence = encode_mesh_to_paper_face_tokens(
-                    mesh,
-                    num_bins=args.num_bins,
-                    max_faces=args.max_faces,
-                    within_face_order=args.paper_within_face_order,
-                )
-                indexed_sequence = encode_mesh_to_indexed_face_tokens(
-                    mesh,
-                    num_bins=args.num_bins,
-                    max_faces=args.max_faces,
-                    face_order=args.indexed_face_order,
-                )
-                decoded = decode_face_tokens_to_mesh(sequence)
-                paper_decoded = decode_paper_face_tokens_to_mesh(paper_sequence)
-                indexed_decoded = decode_indexed_face_tokens_to_mesh(indexed_sequence)
-                if args.point_samples > 0:
-                    surface_points, face_indices = trimesh.sample.sample_surface(
-                        mesh,
-                        args.point_samples,
-                        seed=args.seed + written,
-                    )
-                    surface_points = sequence.transform.normalize(surface_points).astype(np.float32)
-                    surface_normals = np.asarray(mesh.face_normals[face_indices], dtype=np.float32)
+            payloads.append(
+                {
+                    "index": index,
+                    "name": _manifest_mesh_name(row, path),
+                    "path": str(path),
+                    "output_dir": str(args.output_dir),
+                    "num_bins": args.num_bins,
+                    "max_faces": args.max_faces,
+                    "point_samples": args.point_samples,
+                    "paper_within_face_order": args.paper_within_face_order,
+                    "indexed_face_order": args.indexed_face_order,
+                    "seed": args.seed,
+                }
+            )
+        processed = 0
+        results: list[dict] = []
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            future_to_index = {executor.submit(_tokenize_manifest_worker, payload): int(payload["index"]) for payload in payloads}
+            for future in as_completed(future_to_index):
+                result = future.result()
+                results.append(result)
+                processed += 1
+                if result["written"]:
+                    written += 1
                 else:
-                    surface_points = np.zeros((0, 3), dtype=np.float32)
-                    surface_normals = np.zeros((0, 3), dtype=np.float32)
-            except Exception:
-                skipped += 1
-                continue
+                    skipped += 1
+                if args.progress_every and (processed % args.progress_every == 0 or processed == len(payloads)):
+                    print(
+                        json.dumps(
+                            {
+                                "processed": processed,
+                                "candidate_count": len(payloads),
+                                "written": written,
+                                "skipped": skipped,
+                                "workers": workers,
+                            },
+                            sort_keys=True,
+                        ),
+                        flush=True,
+                    )
+        with manifest_path.open("w", encoding="utf-8") as manifest:
+            for result in sorted(results, key=lambda item: int(item["index"])):
+                if result["record"] is not None:
+                    manifest.write(json.dumps(result["record"], sort_keys=True) + "\n")
+    else:
+        with manifest_path.open("w", encoding="utf-8") as manifest:
+            for name, mesh in _iter_meshes(args.mesh_dir, args.manifest, args.synthetic_count, args.seed, args.synthetic_kind):
+                if args.limit and written >= args.limit:
+                    break
+                if len(mesh.faces) > args.max_faces:
+                    skipped += 1
+                    continue
+                try:
+                    stem = f"{written:07d}_{_slug(name)}"
+                    record = _encode_mesh_to_npz(
+                        index=written,
+                        name=name,
+                        mesh=mesh,
+                        output_dir=args.output_dir,
+                        stem=stem,
+                        num_bins=args.num_bins,
+                        max_faces=args.max_faces,
+                        point_samples=args.point_samples,
+                        paper_within_face_order=args.paper_within_face_order,
+                        indexed_face_order=args.indexed_face_order,
+                        seed=args.seed,
+                    )
+                except Exception:
+                    skipped += 1
+                    continue
+                manifest.write(json.dumps(record, sort_keys=True) + "\n")
+                written += 1
 
-            stem = f"{written:07d}_{_slug(name)}"
-            out_path = args.output_dir / f"{stem}.npz"
-            stats = face_token_stats(sequence)
-            topology = face_token_topology_report(sequence.tokens)
-            paper_topology = face_token_topology_report(paper_sequence.tokens)
-            indexed_topology = face_token_topology_report(indexed_to_coordinate_tokens(indexed_sequence))
-            indexed_stats = indexed_face_stats(indexed_sequence)
-            indexed_closures = indexed_face_closure_counts(indexed_sequence.faces)
-            stats["source_name"] = name
-            stats["source_faces"] = int(len(mesh.faces))
-            stats["decoded_watertight"] = bool(decoded.is_watertight)
-            stats["token_watertight_edge_graph"] = bool(topology.watertight_edge_graph)
-            stats["token_boundary_edge_count"] = int(topology.boundary_edge_count)
-            stats["token_nonmanifold_edge_count"] = int(topology.nonmanifold_edge_count)
-            stats["token_edge_pairing_ratio"] = float(topology.edge_pairing_ratio)
-            stats["paper_decoded_watertight"] = bool(paper_decoded.is_watertight)
-            stats["paper_token_watertight_edge_graph"] = bool(paper_topology.watertight_edge_graph)
-            stats["paper_token_boundary_edge_count"] = int(paper_topology.boundary_edge_count)
-            stats["paper_token_nonmanifold_edge_count"] = int(paper_topology.nonmanifold_edge_count)
-            stats["paper_token_edge_pairing_ratio"] = float(paper_topology.edge_pairing_ratio)
-            stats["indexed_vertices"] = int(indexed_stats["vertices"])
-            stats["indexed_faces"] = int(indexed_stats["faces"])
-            stats["indexed_index_tokens"] = int(indexed_stats["index_tokens"])
-            stats["indexed_compression_vs_xyz_face_tokens"] = float(indexed_stats["compression_vs_xyz_face_tokens"])
-            stats["indexed_decoded_watertight"] = bool(indexed_decoded.is_watertight)
-            stats["indexed_token_watertight_edge_graph"] = bool(indexed_topology.watertight_edge_graph)
-            stats["indexed_token_boundary_edge_count"] = int(indexed_topology.boundary_edge_count)
-            stats["indexed_token_nonmanifold_edge_count"] = int(indexed_topology.nonmanifold_edge_count)
-            stats["indexed_token_edge_pairing_ratio"] = float(indexed_topology.edge_pairing_ratio)
-            stats["indexed_face_order"] = args.indexed_face_order
-            stats["indexed_zero_closure_after_first"] = int(np.sum(indexed_closures[1:] == 0)) if len(indexed_closures) > 1 else 0
-            stats["indexed_zero_closure_after_first_ratio"] = (
-                float(np.mean(indexed_closures[1:] == 0)) if len(indexed_closures) > 1 else 0.0
-            )
-            stats["point_samples"] = int(len(surface_points))
-            np.savez_compressed(
-                out_path,
-                tokens=np.asarray(sequence.tokens, dtype=np.int16),
-                paper_tokens=np.asarray(paper_sequence.tokens, dtype=np.int16),
-                indexed_vertices=np.asarray(indexed_sequence.vertices, dtype=np.int16),
-                indexed_faces=np.asarray(indexed_sequence.faces, dtype=np.int32),
-                center=np.asarray(sequence.transform.center, dtype=np.float32),
-                scale=np.asarray([sequence.transform.scale], dtype=np.float32),
-                num_bins=np.asarray([sequence.num_bins], dtype=np.int32),
-                paper_within_face_order=np.asarray([args.paper_within_face_order]),
-                surface_points=surface_points,
-                surface_normals=surface_normals,
-            )
-            manifest.write(json.dumps({"path": str(out_path), **stats}, sort_keys=True) + "\n")
-            written += 1
-
-    print(json.dumps({"written": written, "skipped": skipped, "manifest": str(manifest_path)}, indent=2))
+    print(json.dumps({"written": written, "skipped": skipped, "manifest": str(manifest_path), "workers": workers}, indent=2))
     return 0
 
 

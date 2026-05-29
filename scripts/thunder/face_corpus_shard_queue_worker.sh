@@ -40,7 +40,7 @@ MIN_QUALITY="${MIN_QUALITY:-2}"
 OVERSAMPLE_FACTOR="${OVERSAMPLE_FACTOR:-1}"
 SHUFFLE="${SHUFFLE:-0}"
 SEED="${SEED:-303}"
-DOWNLOAD_PROCESSES="${DOWNLOAD_PROCESSES:-16}"
+DOWNLOAD_PROCESSES="${DOWNLOAD_PROCESSES:-8}"
 DOWNLOAD_FALLBACK_PROCESSES="${DOWNLOAD_FALLBACK_PROCESSES:-1}"
 DOWNLOAD_BATCH_SIZE="${DOWNLOAD_BATCH_SIZE:-50}"
 DOWNLOAD_BATCH_TIMEOUT_SECONDS="${DOWNLOAD_BATCH_TIMEOUT_SECONDS:-600}"
@@ -56,6 +56,7 @@ OBJAVERSEXL_SAVE_REPO_FORMAT="${OBJAVERSEXL_SAVE_REPO_FORMAT:-zip}"
 OBJAVERSEXL_MAX_DOWNLOAD_DIR_GB="${OBJAVERSEXL_MAX_DOWNLOAD_DIR_GB:-0}"
 EXCLUDE_SOURCE_IDS="${EXCLUDE_SOURCE_IDS:-}"
 B2_QUEUE_CLAIMS="${B2_QUEUE_CLAIMS:-1}"
+B2_QUEUE_CLAIM_TTL_SECONDS="${B2_QUEUE_CLAIM_TTL_SECONDS:-21600}"
 SOURCE_MIN_FACES="${SOURCE_MIN_FACES:-64}"
 SOURCE_MAX_FACES="${SOURCE_MAX_FACES:-250000}"
 MAX_FILE_MB="${MAX_FILE_MB:-256}"
@@ -71,6 +72,9 @@ FALLBACK="${FALLBACK:-convex_hull}"
 VOXEL_RESOLUTION="${VOXEL_RESOLUTION:-64}"
 MESH_VOXEL_MAX_FACES="${MESH_VOXEL_MAX_FACES:-5000}"
 STRICT_TARGET_PROGRESS_EVERY="${STRICT_TARGET_PROGRESS_EVERY:-100}"
+STRICT_TARGET_WORKERS="${STRICT_TARGET_WORKERS:-2}"
+TOKEN_BUILD_WORKERS="${TOKEN_BUILD_WORKERS:-1}"
+FORCE_MIN_POSTPROCESS_WORKERS="${FORCE_MIN_POSTPROCESS_WORKERS:-0}"
 TARGET_MAX_OUTPUT_COMPONENTS="${TARGET_MAX_OUTPUT_COMPONENTS:-1}"
 TARGET_MAX_BOUNDARY_LOOPS="${TARGET_MAX_BOUNDARY_LOOPS:-0}"
 TARGET_MAX_NONMANIFOLD_EDGES="${TARGET_MAX_NONMANIFOLD_EDGES:-0}"
@@ -206,19 +210,61 @@ run_b2_once() {
 
 b2_shard_archive_exists() {
   local prefix="$1"
+  local remote_prefix="${prefix%/}/"
   [[ "$START_B2_UPLOAD" = "1" ]] || return 1
   configure_b2env_rclone || return 1
 
-  rclone lsf "b2env:$B2_BUCKET/$prefix" --files-only 2>/dev/null \
+  rclone lsf "b2env:$B2_BUCKET/$remote_prefix" --files-only 2>/dev/null \
     | grep -Fxq "lean_face_corpus.tar.gz"
 }
 
 b2_shard_claim_exists() {
   local prefix="$1"
+  local remote_prefix="${prefix%/}/"
   [[ "$START_B2_UPLOAD" = "1" && "$B2_QUEUE_CLAIMS" = "1" ]] || return 1
   configure_b2env_rclone || return 1
-  rclone lsf "b2env:$B2_BUCKET/$prefix" --files-only 2>/dev/null \
-    | grep -Eq '(^queue_claim\.json$|^lean_face_corpus\.tar\.gz$)'
+  if rclone lsf "b2env:$B2_BUCKET/$remote_prefix" --files-only 2>/dev/null \
+    | grep -Fxq "lean_face_corpus.tar.gz"; then
+    return 0
+  fi
+  if ! rclone lsf "b2env:$B2_BUCKET/$remote_prefix" --files-only 2>/dev/null \
+    | grep -Fxq "queue_claim.json"; then
+    return 1
+  fi
+  if [[ "$B2_QUEUE_CLAIM_TTL_SECONDS" = "0" ]]; then
+    return 0
+  fi
+  local claim_tmp
+  claim_tmp="$(mktemp)"
+  if ! rclone copyto "b2env:$B2_BUCKET/$remote_prefix/queue_claim.json" "$claim_tmp" >/dev/null 2>&1; then
+    rm -f "$claim_tmp"
+    return 1
+  fi
+  local fresh
+  if python3 - "$claim_tmp" "$B2_QUEUE_CLAIM_TTL_SECONDS" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+
+path, ttl_s = sys.argv[1], int(sys.argv[2])
+try:
+    payload = json.load(open(path, "r", encoding="utf-8"))
+    stamp = str(payload.get("time") or "")
+    claimed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    if claimed.tzinfo is None:
+        claimed = claimed.replace(tzinfo=timezone.utc)
+except Exception:
+    raise SystemExit(1)
+age = (datetime.now(timezone.utc) - claimed).total_seconds()
+raise SystemExit(0 if age <= ttl_s else 1)
+PY
+  then
+    fresh=0
+  else
+    fresh=1
+  fi
+  rm -f "$claim_tmp"
+  return "$fresh"
 }
 
 write_b2_shard_claim() {
@@ -411,6 +457,9 @@ run_one_shard() {
     VOXEL_RESOLUTION="$VOXEL_RESOLUTION" \
     MESH_VOXEL_MAX_FACES="$MESH_VOXEL_MAX_FACES" \
     STRICT_TARGET_PROGRESS_EVERY="$STRICT_TARGET_PROGRESS_EVERY" \
+    STRICT_TARGET_WORKERS="$STRICT_TARGET_WORKERS" \
+    TOKEN_BUILD_WORKERS="$TOKEN_BUILD_WORKERS" \
+    FORCE_MIN_POSTPROCESS_WORKERS="$FORCE_MIN_POSTPROCESS_WORKERS" \
     TARGET_MAX_OUTPUT_COMPONENTS="$TARGET_MAX_OUTPUT_COMPONENTS" \
     TARGET_MAX_BOUNDARY_LOOPS="$TARGET_MAX_BOUNDARY_LOOPS" \
     TARGET_MAX_NONMANIFOLD_EDGES="$TARGET_MAX_NONMANIFOLD_EDGES" \

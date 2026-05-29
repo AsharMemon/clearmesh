@@ -1,0 +1,723 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Clearmesh — Text & image to 3D mesh</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600&family=Geist+Mono:wght@400;500&family=Newsreader:opsz,wght@6..72,300;6..72,400;6..72,500;6..72,600;6..72,700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="/static/clearmesh-ui/styles.css" />
+<style>
+  /* page-local */
+  .home main { flex: 1; }
+  .hero {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 72px 36px 60px;
+    display: grid;
+    grid-template-columns: 1.05fr 1fr;
+    gap: 56px;
+    align-items: center;
+  }
+  .eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-mute);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 6px 11px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--paper-2);
+  }
+  .eyebrow .pulse {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--blue);
+  }
+  .hero h1 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 64px;
+    line-height: 1.02;
+    letter-spacing: -0.022em;
+    margin: 22px 0 18px;
+    color: var(--ink);
+    text-wrap: balance;
+  }
+  .hero h1 em {
+    font-weight: 700;
+    color: inherit;
+  }
+  .hero .lead {
+    font-size: 17px;
+    line-height: 1.55;
+    color: var(--ink-mute);
+    max-width: 480px;
+    text-wrap: pretty;
+  }
+  .hero-cta {
+    display: flex;
+    gap: 10px;
+    margin-top: 26px;
+    align-items: center;
+  }
+  .hero .btn-blue { padding: 11px 18px; font-size: 14px; }
+  .hero .btn-ghost { padding: 11px 14px; font-size: 14px; color: var(--ink-mute); }
+  .hero .btn-ghost:hover { color: var(--ink); }
+  .hero .meta-line {
+    margin-top: 26px;
+    display: flex;
+    gap: 18px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-soft);
+  }
+  .hero .meta-line span { display: inline-flex; align-items: center; gap: 6px; }
+  .hero .meta-line .tick {
+    width: 12px; height: 12px;
+    border: 1px solid var(--blue);
+    border-radius: 50%;
+    position: relative;
+  }
+  .hero .meta-line .tick::after {
+    content: ''; position: absolute; inset: 2px;
+    background: var(--blue); border-radius: 50%;
+  }
+
+  /* hero stage */
+  .stage {
+    position: relative;
+    aspect-ratio: 1 / 1;
+    border-radius: 24px;
+    background:
+      radial-gradient(circle at 50% 35%, #FFFEF8 0%, var(--paper-3) 80%);
+    border: 1px solid var(--line);
+    overflow: hidden;
+    box-shadow: var(--shadow-panel);
+  }
+  .stage canvas { width: 100%; height: 100%; display: block; }
+  .stage .stage-badge {
+    position: absolute;
+    top: 14px;
+    left: 14px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: rgba(248,245,236,0.9);
+    backdrop-filter: blur(6px);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 7px 11px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-mute);
+  }
+  .stage .stage-badge .dot { width: 6px; height: 6px; border-radius: 50%; background: #6E9F6E; }
+  .stage .stage-stats {
+    position: absolute;
+    bottom: 14px;
+    left: 14px;
+    right: 14px;
+    display: flex;
+    gap: 14px;
+    background: rgba(248,245,236,0.85);
+    backdrop-filter: blur(6px);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 9px 12px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-mute);
+    align-items: center;
+  }
+  .stage .stage-stats b { color: var(--ink-2); font-weight: 500; }
+  .stage .stage-stats .spacer { flex: 1; }
+  .stage .stage-stats .fmt-chip {
+    padding: 2px 7px;
+    border-radius: 4px;
+    background: var(--blue-soft);
+    color: var(--blue);
+    font-size: 10px;
+  }
+  .stage .stage-prompt {
+    position: absolute;
+    top: 14px;
+    right: 14px;
+    max-width: 240px;
+    background: rgba(248,245,236,0.92);
+    backdrop-filter: blur(8px);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 9px 12px;
+    font-size: 12.5px;
+    color: var(--ink-2);
+    line-height: 1.45;
+    box-shadow: 0 2px 12px -4px rgba(20,30,46,0.12);
+  }
+  .stage .stage-prompt .lbl {
+    font-family: var(--mono);
+    font-size: 9.5px;
+    color: var(--ink-soft);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+
+  /* showcase */
+  .showcase {
+    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+    background: var(--paper-2);
+    padding: 56px 36px;
+  }
+  .showcase-inner {
+    max-width: 1180px;
+    margin: 0 auto;
+  }
+  .section-eyebrow {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-soft);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: 14px;
+  }
+  .section-title {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 42px;
+    line-height: 1.06;
+    letter-spacing: -0.018em;
+    margin: 0 0 14px;
+    max-width: 700px;
+    text-wrap: balance;
+  }
+  .section-title em { font-weight: 700; color: inherit; }
+  .section-sub {
+    font-size: 15.5px;
+    color: var(--ink-mute);
+    max-width: 600px;
+    line-height: 1.55;
+    margin: 0 0 32px;
+  }
+  .gallery {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+  }
+  .gallery .tile {
+    aspect-ratio: 1 / 1;
+    border-radius: 16px;
+    border: 1px solid var(--line);
+    background: radial-gradient(circle at 50% 32%, #FFFDF7 0%, var(--paper-3) 80%);
+    overflow: hidden;
+    position: relative;
+  }
+  .gallery .tile canvas { width: 100%; height: 100%; display: block; }
+  .gallery .tile .tag {
+    position: absolute;
+    bottom: 10px;
+    left: 10px;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--ink-mute);
+    background: rgba(248,245,236,0.85);
+    backdrop-filter: blur(4px);
+    padding: 3px 7px;
+    border-radius: 5px;
+    border: 1px solid var(--line);
+    letter-spacing: 0.02em;
+  }
+
+  /* how */
+  .how {
+    padding: 80px 36px;
+    max-width: 1180px;
+    margin: 0 auto;
+  }
+  .how-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 28px;
+    margin-top: 8px;
+  }
+  .step {
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: var(--paper-2);
+    padding: 22px 22px 24px;
+    position: relative;
+    overflow: hidden;
+  }
+  .step .num {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--blue);
+    letter-spacing: 0.08em;
+    margin-bottom: 12px;
+  }
+  .step h3 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 24px;
+    letter-spacing: -0.01em;
+    margin: 0 0 8px;
+  }
+  .step h3 em { font-weight: 700; color: inherit; }
+  .step p {
+    margin: 0;
+    color: var(--ink-mute);
+    font-size: 13.5px;
+    line-height: 1.55;
+  }
+  .step .visual {
+    margin-top: 16px;
+    aspect-ratio: 16 / 10;
+    border-radius: 10px;
+    border: 1px solid var(--line);
+    background: radial-gradient(circle at 50% 35%, #FFFDF7 0%, var(--paper-3) 80%);
+    position: relative;
+    overflow: hidden;
+  }
+  .step .visual canvas { width: 100%; height: 100%; display: block; }
+
+  /* prompt-mock used in step 1 */
+  .prompt-mock {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 14px 16px;
+    height: 100%;
+    justify-content: center;
+  }
+  .prompt-mock .pm-prompt {
+    font-size: 12.5px;
+    color: var(--ink-2);
+    line-height: 1.4;
+    padding: 8px 10px;
+    background: var(--paper-2);
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    align-self: flex-end;
+    max-width: 80%;
+  }
+  .prompt-mock .pm-attach {
+    align-self: flex-end;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    background: var(--paper-2);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--ink-mute);
+  }
+  .prompt-mock .pm-attach .sq {
+    width: 14px; height: 14px; border-radius: 3px;
+    background: linear-gradient(135deg, #C4B89E, #8B7E63);
+  }
+  .prompt-mock .pm-byline {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--ink-soft);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .prompt-mock .pm-byline .p { width: 5px; height: 5px; border-radius: 50%; background: var(--blue); }
+
+  /* edit-mock for step 3 */
+  .edit-mock {
+    position: absolute; inset: 0;
+    display: grid;
+    grid-template-columns: 1fr 76px;
+  }
+  .edit-mock .viewer-mini { position: relative; }
+  .edit-mock .viewer-mini canvas { width: 100%; height: 100%; display: block; }
+  .edit-mock .viewer-mini .ribbon {
+    position: absolute;
+    top: 8px; left: 8px;
+    display: flex;
+    gap: 3px;
+    background: rgba(248,245,236,0.85);
+    backdrop-filter: blur(4px);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 2px;
+  }
+  .edit-mock .viewer-mini .ribbon .pill {
+    height: 18px;
+    padding: 0 7px;
+    border-radius: 4px;
+    font-family: var(--mono);
+    font-size: 9px;
+    color: var(--ink-soft);
+    display: flex;
+    align-items: center;
+  }
+  .edit-mock .viewer-mini .ribbon .pill.act {
+    background: var(--blue-soft);
+    color: var(--blue);
+  }
+  .edit-mock .panel-mini {
+    background: var(--paper-2);
+    border-left: 1px solid var(--line);
+    padding: 8px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .edit-mock .panel-mini .row {
+    height: 14px;
+    background: var(--paper);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+  }
+  .edit-mock .panel-mini .row.lg { height: 20px; }
+  .edit-mock .panel-mini .row.blue { background: var(--blue-soft); border-color: transparent; }
+
+  /* features grid */
+  .features {
+    background: var(--paper-2);
+    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+    padding: 80px 36px;
+  }
+  .features-inner {
+    max-width: 1180px;
+    margin: 0 auto;
+  }
+  .feat-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    overflow: hidden;
+    margin-top: 8px;
+  }
+  .feat {
+    background: var(--paper-2);
+    padding: 26px 24px 30px;
+  }
+  .feat .ico {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    background: var(--blue-soft);
+    color: var(--blue);
+    display: grid;
+    place-items: center;
+    margin-bottom: 14px;
+  }
+  .feat .ico svg { width: 17px; height: 17px; }
+  .feat h4 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 21px;
+    letter-spacing: -0.01em;
+    margin: 0 0 6px;
+  }
+  .feat p {
+    margin: 0;
+    color: var(--ink-mute);
+    font-size: 13px;
+    line-height: 1.55;
+  }
+
+  /* cta */
+  .cta {
+    padding: 96px 36px;
+    text-align: center;
+    max-width: 760px;
+    margin: 0 auto;
+  }
+  .cta h2 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 56px;
+    line-height: 1.04;
+    letter-spacing: -0.02em;
+    margin: 0 0 18px;
+    text-wrap: balance;
+  }
+  .cta h2 em { font-weight: 700; color: inherit; }
+  .cta p {
+    color: var(--ink-mute);
+    font-size: 16px;
+    line-height: 1.55;
+    margin: 0 0 28px;
+    max-width: 540px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+  .cta .row {
+    display: flex;
+    justify-content: center;
+    gap: 10px;
+  }
+  .cta .btn-blue { padding: 12px 22px; font-size: 14px; }
+  .cta .btn-outline { padding: 12px 22px; font-size: 14px; }
+</style>
+</head>
+<body class="home">
+
+<header class="site-header">
+  <a class="brand" href="/">Clear<em>mesh</em></a>
+  <nav class="nav">
+    <a href="/" class="active">Home</a>
+    <a href="/app">Studio</a>
+    <a href="/pricing">Pricing</a>
+    <a href="#">Gallery</a>
+  </nav>
+  <div class="spacer"></div>
+  <a href="#" class="btn btn-ghost">Sign in</a>
+  <a href="/app" class="btn btn-blue">Open Studio</a>
+</header>
+
+<main>
+  <!-- HERO -->
+  <section class="hero">
+    <div>
+      <span class="eyebrow"><span class="pulse"></span> img2mesh-v0.6 just shipped</span>
+      <h1>3D meshes, from a <em>prompt</em> or a single image.</h1>
+      <p class="lead">
+        Clearmesh turns plain language and reference images into clean, exportable
+        meshes — quad-dominant topology, real UV layouts, ready for Blender, Unity,
+        or your printer.
+      </p>
+      <div class="hero-cta">
+        <a href="/app" class="btn btn-blue">
+          Open Studio
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 5l7 7-7 7"></path></svg>
+        </a>
+        <a href="#how" class="btn btn-ghost">How it works</a>
+      </div>
+      <div class="meta-line">
+        <span><span class="tick"></span> GLB · OBJ · STL · FBX</span>
+        <span><span class="tick"></span> Quad-dominant</span>
+        <span><span class="tick"></span> 14s average</span>
+      </div>
+    </div>
+
+    <div class="stage">
+      <canvas id="hero-canvas"></canvas>
+      <div class="stage-badge"><span class="dot"></span> live · auto-orbit</div>
+      <div class="stage-prompt">
+        <div class="lbl">Prompt</div>
+        A tall ceramic vase with vertical ribbing, slightly tapered at the top.
+      </div>
+      <div class="stage-stats">
+        <span><b>4,224</b> tris</span>
+        <span><b>2,144</b> verts</span>
+        <span>1 UV set</span>
+        <span class="spacer"></span>
+        <span class="fmt-chip">GLB</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- SHOWCASE -->
+  <section class="showcase">
+    <div class="showcase-inner">
+      <div class="section-eyebrow">Recent generations</div>
+      <h2 class="section-title">A library that <em>grows</em> with you.</h2>
+      <p class="section-sub">Every mesh stays in your studio. Pin favourites, fork variations,
+        or re-prompt the same seed weeks later.</p>
+      <div class="gallery">
+        <div class="tile"><canvas data-show="vase"></canvas><span class="tag">lathe · 4.2k</span></div>
+        <div class="tile"><canvas data-show="fox"></canvas><span class="tag">composite · 1.8k</span></div>
+        <div class="tile"><canvas data-show="chair"></canvas><span class="tag">hard-surface · 0.6k</span></div>
+        <div class="tile"><canvas data-show="knot"></canvas><span class="tag">parametric · 12.4k</span></div>
+        <div class="tile"><canvas data-show="crystal"></canvas><span class="tag">low-poly · 0.4k</span></div>
+        <div class="tile"><canvas data-show="lamp"></canvas><span class="tag">lathe · 3.2k</span></div>
+        <div class="tile"><canvas data-show="blob"></canvas><span class="tag">organic · 5.1k</span></div>
+        <div class="tile"><canvas data-show="terrain"></canvas><span class="tag">displaced · 2.0k</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- HOW -->
+  <section class="how" id="how">
+    <div class="section-eyebrow">Workflow</div>
+    <h2 class="section-title">Prompt, preview, <em>refine</em>.</h2>
+    <p class="section-sub" style="max-width:640px;">
+      A chat-style studio that puts every mesh you've ever made one click away,
+      with a real-time editor a panel to the right.
+    </p>
+    <div class="how-grid">
+      <div class="step">
+        <div class="num">01 — Describe</div>
+        <h3>Type a prompt or drop an <em>image</em>.</h3>
+        <p>Plain language works. Reference images condition the silhouette while keeping your surface style.</p>
+        <div class="visual">
+          <div class="prompt-mock">
+            <div class="pm-attach"><span class="sq"></span> vase-reference.jpg</div>
+            <div class="pm-prompt">Tall ceramic vase, vertical ribbing, matte stoneware.</div>
+            <div class="pm-byline"><span class="p"></span> Generating · img2mesh-v0.6</div>
+          </div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="num">02 — Preview</div>
+        <h3>Inline meshes, <em>not</em> screenshots.</h3>
+        <p>Every response is a live, rotatable mesh in the conversation. Compare variants side by side.</p>
+        <div class="visual"><canvas data-step="2"></canvas></div>
+      </div>
+      <div class="step">
+        <div class="num">03 — Edit & export</div>
+        <h3>Open the side panel for a <em>fuller</em> view.</h3>
+        <p>Orbit, toggle wireframe, inspect UVs, then export GLB, OBJ, STL or FBX.</p>
+        <div class="visual">
+          <div class="edit-mock">
+            <div class="viewer-mini">
+              <canvas data-step="3"></canvas>
+              <div class="ribbon">
+                <span class="pill act">orbit</span>
+                <span class="pill">wire</span>
+                <span class="pill">grid</span>
+              </div>
+            </div>
+            <div class="panel-mini">
+              <div class="row lg"></div>
+              <div class="row"></div>
+              <div class="row"></div>
+              <div class="row blue"></div>
+              <div class="row"></div>
+              <div class="row blue lg"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FEATURES -->
+  <section class="features">
+    <div class="features-inner">
+      <div class="section-eyebrow">Under the hood</div>
+      <h2 class="section-title">Production-grade meshes, <em>not</em> noise.</h2>
+      <div class="feat-grid">
+        <div class="feat">
+          <div class="ico">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 21 7v10l-9 5-9-5V7l9-5z"></path><path d="M3 7l9 5 9-5"></path><path d="M12 12v10"></path></svg>
+          </div>
+          <h4>Quad-dominant topology</h4>
+          <p>Edge flow you can subdivide, retopo, or rig — not the soup-mesh you get from most generators.</p>
+        </div>
+        <div class="feat">
+          <div class="ico">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="M3 9h18M3 15h18M9 3v18M15 3v18"></path></svg>
+          </div>
+          <h4>Clean UV layouts</h4>
+          <p>Every mesh ships with a 1024² atlas, low distortion, manifold-checked. Drop straight into Substance.</p>
+        </div>
+        <div class="feat">
+          <div class="ico">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v14"></path><path d="m6 11 6 6 6-6"></path><path d="M5 21h14"></path></svg>
+          </div>
+          <h4>Real formats</h4>
+          <p>GLB, OBJ, STL, FBX — embedded textures, Y-up or Z-up. Configurable in the export panel.</p>
+        </div>
+        <div class="feat">
+          <div class="ico">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><path d="M12 8v4l3 2"></path></svg>
+          </div>
+          <h4>~14s average</h4>
+          <p>Most prompts return in fifteen seconds. Image conditioning adds a few. Studio plan runs uncapped.</p>
+        </div>
+        <div class="feat">
+          <div class="ico">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v6H4zM4 14h16v6H4z"></path><circle cx="8" cy="7" r="0.8" fill="currentColor"></circle><circle cx="8" cy="17" r="0.8" fill="currentColor"></circle></svg>
+          </div>
+          <h4>Same-seed refinement</h4>
+          <p>Iterate on a generation without losing what worked. "A little squatter, flared base" — preserved seed.</p>
+        </div>
+        <div class="feat">
+          <div class="ico">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"></path></svg>
+          </div>
+          <h4>Wireframe, UV, stats</h4>
+          <p>Inspect topology, UV islands, and material counts at any point. Editor surfaces the numbers that matter.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="cta">
+    <h2>Try a prompt. <em>See</em> a mesh.</h2>
+    <p>Free tier ships with 50 generations a month, full editor, and GLB / OBJ export. No credit card.</p>
+    <div class="row">
+      <a href="/app" class="btn btn-blue">Open Studio</a>
+      <a href="/pricing" class="btn btn-outline">See pricing</a>
+    </div>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <div class="footer-row">
+    <div class="footer-col">
+      <div class="footer-tag">Clear<em>mesh</em></div>
+      <div class="footer-fine">Text & image to 3D, for designers, makers, and engineers.</div>
+    </div>
+    <div class="footer-col">
+      <h5>Product</h5>
+      <a href="/app">Studio</a>
+      <a href="/pricing">Pricing</a>
+      <a href="#">Gallery</a>
+      <a href="#">Changelog</a>
+    </div>
+    <div class="footer-col">
+      <h5>Resources</h5>
+      <a href="#">API</a>
+      <a href="#">Blender bridge</a>
+      <a href="#">Changelog</a>
+      <a href="#">Status</a>
+    </div>
+    <div class="footer-col">
+      <h5>Company</h5>
+      <a href="#">About</a>
+      <a href="#">Careers</a>
+      <a href="#">Contact</a>
+      <a href="#">Privacy</a>
+    </div>
+  </div>
+  <div class="footer-bottom">
+    <span>© 2026 Clearmesh, Inc.</span>
+    <span style="font-family:var(--mono);">v0.6 · img2mesh</span>
+  </div>
+</footer>
+
+<script src="https://unpkg.com/three@0.128.0/build/three.min.js"></script>
+<script src="/static/clearmesh-ui/mesh-previews.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  const { makePreview, makeViewer } = window.ClearmeshPreview;
+
+  // hero — big rotating vase
+  makeViewer(document.getElementById('hero-canvas'), { kind: 'vase' });
+
+  // gallery
+  document.querySelectorAll('canvas[data-show]').forEach((c) => {
+    const kind = c.getAttribute('data-show');
+    makePreview(c, { kind, autoRotate: true, rotateSpeed: 0.32, cameraDist: 3.3 });
+  });
+
+  // step 2 + 3 mini canvases
+  const step2 = document.querySelector('canvas[data-step="2"]');
+  if (step2) makePreview(step2, { kind: 'lamp', autoRotate: true, rotateSpeed: 0.4, cameraDist: 3.2 });
+  const step3 = document.querySelector('canvas[data-step="3"]');
+  if (step3) makePreview(step3, { kind: 'crystal', autoRotate: true, rotateSpeed: 0.35, cameraDist: 3.4 });
+});
+</script>
+
+</body>
+</html>

@@ -598,7 +598,16 @@ def _select_corner_causal_face(
     device = input_faces.device
     closure_target_scores = None
     if use_topology_head and closure_target_bonus != 0.0 and hasattr(model, "topology_output"):
-        closure_target_scores = torch.log_softmax(model.topology_output(hidden)[0, -1], dim=0).detach().cpu().numpy()
+        if hasattr(model, "topology_logits_from_hidden"):
+            closure_logits = model.topology_logits_from_hidden(
+                hidden,
+                point_features=point_features,
+                vertex_table=vertex_table,
+                input_faces=input_faces,
+            )
+        else:
+            closure_logits = model.topology_output(hidden)
+        closure_target_scores = torch.log_softmax(closure_logits[0, -1], dim=0).detach().cpu().numpy()
     prefix0 = torch.full((1, 1, 3), -1, dtype=torch.long, device=device)
     logits0 = model._corner_causal_logits_from_hidden(hidden, prefix0, vertex_table=vertex_table)[
         0, 0, 0, :vertex_count
@@ -612,6 +621,8 @@ def _select_corner_causal_face(
             model,
             hidden,
             vertex_table,
+            point_features,
+            input_faces,
             logits0,
             device,
             state,
@@ -786,7 +797,16 @@ def _select_corner_causal_face_candidates(
     device = input_faces.device
     closure_target_scores = None
     if use_topology_head and closure_target_bonus != 0.0 and hasattr(model, "topology_output"):
-        closure_target_scores = torch.log_softmax(model.topology_output(hidden)[0, -1], dim=0).detach().cpu().numpy()
+        if hasattr(model, "topology_logits_from_hidden"):
+            closure_logits = model.topology_logits_from_hidden(
+                hidden,
+                point_features=point_features,
+                vertex_table=vertex_table,
+                input_faces=input_faces,
+            )
+        else:
+            closure_logits = model.topology_output(hidden)
+        closure_target_scores = torch.log_softmax(closure_logits[0, -1], dim=0).detach().cpu().numpy()
     prefix0 = torch.full((1, 1, 3), -1, dtype=torch.long, device=device)
     logits0 = model._corner_causal_logits_from_hidden(hidden, prefix0, vertex_table=vertex_table)[
         0, 0, 0, :vertex_count
@@ -801,6 +821,8 @@ def _select_corner_causal_face_candidates(
             model,
             hidden,
             vertex_table,
+            point_features,
+            input_faces,
             logits0,
             device,
             state,
@@ -937,6 +959,8 @@ def _select_corner_causal_boundary_face(
     model,
     hidden,
     vertex_table,
+    point_features,
+    input_faces,
     logits0: np.ndarray,
     device,
     state: IndexedDecodeState,
@@ -980,11 +1004,22 @@ def _select_corner_causal_boundary_face(
     use_edge_choice_candidates = edge_choice_candidate_top_k > 0
     if (edge_choice_bonus != 0.0 or use_edge_choice_candidates) and hasattr(model, "_edge_choice_logits_from_hidden"):
         edge_prefix = np.asarray(boundary_edges, dtype=np.int64).reshape(1, 1, len(boundary_edges), 2)
-        edge_choice_by_boundary = model._edge_choice_logits_from_hidden(
-            hidden,
-            torch.as_tensor(edge_prefix, dtype=torch.long, device=device),
-            vertex_table=vertex_table,
-        )[0, 0].detach().cpu().numpy()
+        edge_choice_tensor = torch.as_tensor(edge_prefix, dtype=torch.long, device=device)
+        if hasattr(model, "edge_choice_logits_from_hidden"):
+            edge_choice_logits = model.edge_choice_logits_from_hidden(
+                hidden,
+                edge_choice_tensor,
+                point_features=point_features,
+                vertex_table=vertex_table,
+                input_faces=input_faces,
+            )
+        else:
+            edge_choice_logits = model._edge_choice_logits_from_hidden(
+                hidden,
+                edge_choice_tensor,
+                vertex_table=vertex_table,
+            )
+        edge_choice_by_boundary = edge_choice_logits[0, 0].detach().cpu().numpy()
 
     prefilter_edge_rows = _prefilter_boundary_edge_rows(
         boundary_edges,
@@ -998,11 +1033,26 @@ def _select_corner_causal_boundary_face(
     edge_action_by_row: dict[int, np.ndarray] = {}
     if (edge_action_bonus != 0.0 or use_edge_action_candidates) and hasattr(model, "_edge_action_logits_from_hidden"):
         edge_prefix = np.asarray([boundary_edges[row] for row in prefilter_edge_rows], dtype=np.int64).reshape(len(prefilter_edge_rows), 1, 2)
-        edge_action_subset = model._edge_action_logits_from_hidden(
-            hidden.expand(len(prefilter_edge_rows), -1, -1),
-            torch.as_tensor(edge_prefix, dtype=torch.long, device=device),
-            vertex_table=vertex_table,
-        )[:, 0, :vertex_count].detach().cpu().numpy()
+        edge_action_tensor = torch.as_tensor(edge_prefix, dtype=torch.long, device=device)
+        expanded_hidden = hidden.expand(len(prefilter_edge_rows), -1, -1)
+        if hasattr(model, "edge_action_logits_from_hidden"):
+            expanded_points = point_features.expand(len(prefilter_edge_rows), -1, -1) if point_features.shape[0] == 1 else point_features
+            expanded_faces = input_faces.expand(len(prefilter_edge_rows), -1, -1) if input_faces.shape[0] == 1 else input_faces
+            expanded_vertices = vertex_table.expand(len(prefilter_edge_rows), -1, -1) if vertex_table.shape[0] == 1 else vertex_table
+            edge_action_logits = model.edge_action_logits_from_hidden(
+                expanded_hidden,
+                edge_action_tensor,
+                point_features=expanded_points,
+                vertex_table=expanded_vertices,
+                input_faces=expanded_faces,
+            )
+        else:
+            edge_action_logits = model._edge_action_logits_from_hidden(
+                expanded_hidden,
+                edge_action_tensor,
+                vertex_table=vertex_table,
+            )
+        edge_action_subset = edge_action_logits[:, 0, :vertex_count].detach().cpu().numpy()
         edge_action_by_row = {int(row): edge_action_subset[idx] for idx, row in enumerate(prefilter_edge_rows)}
 
     ranked_edge_rows = sorted(
@@ -1021,6 +1071,7 @@ def _select_corner_causal_boundary_face(
 
     candidates: list[tuple[int, int, int]] = []
     candidate_edge_rows: list[int] = []
+    candidate_thirds: list[int] = []
     seen: set[tuple[int, int, int]] = set()
     for edge_row in ranked_edge_rows:
         edge = boundary_edges[edge_row]
@@ -1048,6 +1099,7 @@ def _select_corner_causal_boundary_face(
                 seen.add(face)
                 candidates.append(face)
                 candidate_edge_rows.append(edge_row)
+                candidate_thirds.append(third)
     if not candidates:
         return None
 
@@ -1084,7 +1136,7 @@ def _select_corner_causal_boundary_face(
         )
         edge_action_logits = edge_action_by_row.get(int(candidate_edge_rows[row]))
         if edge_action_logits is not None:
-            model_score += float(edge_action_bonus) * float(edge_action_logits[face[2]])
+            model_score += float(edge_action_bonus) * float(edge_action_logits[int(candidate_thirds[row])])
         if edge_choice_by_boundary is not None:
             model_score += float(edge_choice_bonus) * float(edge_choice_by_boundary[candidate_edge_rows[row]])
         score = score_indexed_face_candidate(
@@ -1113,6 +1165,8 @@ def _select_corner_causal_boundary_face_candidates(
     model,
     hidden,
     vertex_table,
+    point_features,
+    input_faces,
     logits0: np.ndarray,
     device,
     state: IndexedDecodeState,
@@ -1156,11 +1210,22 @@ def _select_corner_causal_boundary_face_candidates(
     use_edge_choice_candidates = edge_choice_candidate_top_k > 0
     if (edge_choice_bonus != 0.0 or use_edge_choice_candidates) and hasattr(model, "_edge_choice_logits_from_hidden"):
         edge_prefix = np.asarray(boundary_edges, dtype=np.int64).reshape(1, 1, len(boundary_edges), 2)
-        edge_choice_by_boundary = model._edge_choice_logits_from_hidden(
-            hidden,
-            torch.as_tensor(edge_prefix, dtype=torch.long, device=device),
-            vertex_table=vertex_table,
-        )[0, 0].detach().cpu().numpy()
+        edge_choice_tensor = torch.as_tensor(edge_prefix, dtype=torch.long, device=device)
+        if hasattr(model, "edge_choice_logits_from_hidden"):
+            edge_choice_logits = model.edge_choice_logits_from_hidden(
+                hidden,
+                edge_choice_tensor,
+                point_features=point_features,
+                vertex_table=vertex_table,
+                input_faces=input_faces,
+            )
+        else:
+            edge_choice_logits = model._edge_choice_logits_from_hidden(
+                hidden,
+                edge_choice_tensor,
+                vertex_table=vertex_table,
+            )
+        edge_choice_by_boundary = edge_choice_logits[0, 0].detach().cpu().numpy()
 
     prefilter_edge_rows = _prefilter_boundary_edge_rows(
         boundary_edges,
@@ -1174,11 +1239,26 @@ def _select_corner_causal_boundary_face_candidates(
     edge_action_by_row: dict[int, np.ndarray] = {}
     if (edge_action_bonus != 0.0 or use_edge_action_candidates) and hasattr(model, "_edge_action_logits_from_hidden"):
         edge_prefix = np.asarray([boundary_edges[row] for row in prefilter_edge_rows], dtype=np.int64).reshape(len(prefilter_edge_rows), 1, 2)
-        edge_action_subset = model._edge_action_logits_from_hidden(
-            hidden.expand(len(prefilter_edge_rows), -1, -1),
-            torch.as_tensor(edge_prefix, dtype=torch.long, device=device),
-            vertex_table=vertex_table,
-        )[:, 0, :vertex_count].detach().cpu().numpy()
+        edge_action_tensor = torch.as_tensor(edge_prefix, dtype=torch.long, device=device)
+        expanded_hidden = hidden.expand(len(prefilter_edge_rows), -1, -1)
+        if hasattr(model, "edge_action_logits_from_hidden"):
+            expanded_points = point_features.expand(len(prefilter_edge_rows), -1, -1) if point_features.shape[0] == 1 else point_features
+            expanded_faces = input_faces.expand(len(prefilter_edge_rows), -1, -1) if input_faces.shape[0] == 1 else input_faces
+            expanded_vertices = vertex_table.expand(len(prefilter_edge_rows), -1, -1) if vertex_table.shape[0] == 1 else vertex_table
+            edge_action_logits = model.edge_action_logits_from_hidden(
+                expanded_hidden,
+                edge_action_tensor,
+                point_features=expanded_points,
+                vertex_table=expanded_vertices,
+                input_faces=expanded_faces,
+            )
+        else:
+            edge_action_logits = model._edge_action_logits_from_hidden(
+                expanded_hidden,
+                edge_action_tensor,
+                vertex_table=vertex_table,
+            )
+        edge_action_subset = edge_action_logits[:, 0, :vertex_count].detach().cpu().numpy()
         edge_action_by_row = {int(row): edge_action_subset[idx] for idx, row in enumerate(prefilter_edge_rows)}
 
     ranked_edge_rows = sorted(
@@ -1197,6 +1277,7 @@ def _select_corner_causal_boundary_face_candidates(
 
     candidates: list[tuple[int, int, int]] = []
     candidate_edge_rows: list[int] = []
+    candidate_thirds: list[int] = []
     seen: set[tuple[int, int, int]] = set()
     for edge_row in ranked_edge_rows:
         edge = boundary_edges[edge_row]
@@ -1224,6 +1305,7 @@ def _select_corner_causal_boundary_face_candidates(
                 seen.add(face)
                 candidates.append(face)
                 candidate_edge_rows.append(edge_row)
+                candidate_thirds.append(third)
     if not candidates:
         return []
 
@@ -1257,7 +1339,7 @@ def _select_corner_causal_boundary_face_candidates(
         )
         edge_action_logits = edge_action_by_row.get(int(candidate_edge_rows[row]))
         if edge_action_logits is not None:
-            model_score += float(edge_action_bonus) * float(edge_action_logits[face[2]])
+            model_score += float(edge_action_bonus) * float(edge_action_logits[int(candidate_thirds[row])])
         if edge_choice_by_boundary is not None:
             model_score += float(edge_choice_bonus) * float(edge_choice_by_boundary[candidate_edge_rows[row]])
         score = score_indexed_face_candidate(
@@ -1340,6 +1422,12 @@ def main() -> int:
     parser.add_argument("--offset", type=int, default=0, help="Skip this many sorted dataset shards before eval.")
     parser.add_argument("--point-samples", type=int, default=0)
     parser.add_argument("--face-count-mode", choices=["gt", "predicted", "max"], default="predicted")
+    parser.add_argument(
+        "--generation-max-faces",
+        type=int,
+        default=0,
+        help="Optional inference-time cap for generated faces. Default 0 keeps the checkpoint max.",
+    )
     parser.add_argument("--pair-samples", type=int, default=1000)
     parser.add_argument("--cleanup-min-component-faces", type=int, default=1)
     parser.add_argument("--cleanup-split-nonmanifold-vertices", action="store_true")
@@ -1447,6 +1535,9 @@ def main() -> int:
             encoder_layers=int(train_args.get("encoder_layers", 4)),
             latent_dim=int(train_args.get("latent_dim", 64)),
             face_output_mode=str(train_args.get("face_output_mode", "linear")),
+            voxset_resolution=int(train_args.get("voxset_resolution", 16)),
+            spatial_gate_sigma=float(train_args.get("spatial_gate_sigma", 0.35)),
+            spatial_gate_top_k=int(train_args.get("spatial_gate_top_k", 0)),
         ).to(device)
         load_result = model.load_state_dict(checkpoint["model_state"], strict=False)
         if load_result.missing_keys or load_result.unexpected_keys:
@@ -1504,6 +1595,8 @@ def main() -> int:
             with torch.no_grad():
                 predicted_count = int(model.predict_face_count_logits(point_tensor, vertex_tensor).argmax(dim=-1).item())
             face_count = max(1, min(max_faces, predicted_count))
+        if args.generation_max_faces > 0:
+            face_count = max(1, min(face_count, int(args.generation_max_faces)))
         decode_started = time.perf_counter()
         teacher_forced_stats: dict[str, Any] = {
             "token_accuracy": None,

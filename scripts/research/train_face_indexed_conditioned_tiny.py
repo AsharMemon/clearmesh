@@ -372,6 +372,41 @@ def _make_batch(
     )
 
 
+def _corner_closure_presence_loss(torch, logits, target_edge_actions, target_edge_thirds):  # type: ignore[no-untyped-def]
+    """Encourage FACE corner logits to include teacher boundary-closure vertices.
+
+    The edge-action/edge-choice heads learn topology as auxiliary predictions,
+    but production decoding ultimately samples from the corner logits. This
+    loss directly nudges those corner logits to contain the two vertices of the
+    teacher closing boundary edge plus the third vertex, while staying
+    orientation/order invariant.
+    """
+
+    max_vertices = int(logits.shape[-1])
+    valid = (
+        target_edge_actions[..., 0].ge(0)
+        & target_edge_actions[..., 1].ge(0)
+        & target_edge_actions[..., 0].lt(max_vertices)
+        & target_edge_actions[..., 1].lt(max_vertices)
+        & target_edge_thirds.ge(0)
+        & target_edge_thirds.lt(max_vertices)
+    )
+    if not bool(valid.any().item()):
+        return logits.float().sum() * 0.0
+
+    target_vertices = torch.cat([target_edge_actions, target_edge_thirds.unsqueeze(-1)], dim=-1)
+    safe_targets = target_vertices.clamp(0, max_vertices - 1)
+    probs = torch.softmax(logits.float(), dim=-1)
+    gathered = probs.unsqueeze(3).expand(-1, -1, -1, 3, -1).gather(
+        dim=-1,
+        index=safe_targets.unsqueeze(2).unsqueeze(-1).expand(-1, -1, 3, -1, 1),
+    ).squeeze(-1)
+    presence = 1.0 - torch.prod(1.0 - gathered.clamp(0.0, 1.0), dim=2)
+    per_vertex_loss = -torch.log(presence.clamp_min(1e-8))
+    valid_targets = valid.unsqueeze(-1).to(per_vertex_loss.dtype)
+    return (per_vertex_loss * valid_targets).sum() / torch.clamp(valid_targets.sum(), min=1.0)
+
+
 class _OptimizerGroup:
     def __init__(self, optimizers):  # type: ignore[no-untyped-def]
         self.optimizers = list(optimizers)
@@ -615,11 +650,24 @@ def main() -> int:
     parser.add_argument("--heads", type=int, default=6)
     parser.add_argument("--condition-tokens", type=int, default=8)
     parser.add_argument("--edge-head-mode", choices=["index", "geometry"], default="geometry")
-    parser.add_argument("--condition-backend", choices=["pooled", "vecset"], default="pooled")
-    parser.add_argument("--decoder-backend", choices=["prefix", "cross_attn"], default="prefix")
+    parser.add_argument("--condition-backend", choices=["pooled", "vecset", "voxset"], default="pooled")
+    parser.add_argument(
+        "--decoder-backend",
+        choices=[
+            "prefix",
+            "cross_attn",
+            "spatial_cross_attn",
+            "spatial_modulated_cross_attn",
+            "spatial_topology_modulated_cross_attn",
+        ],
+        default="prefix",
+    )
     parser.add_argument("--encoder-layers", type=int, default=4)
     parser.add_argument("--latent-dim", type=int, default=64)
     parser.add_argument("--face-output-mode", choices=["linear", "geometry"], default="linear")
+    parser.add_argument("--voxset-resolution", type=int, default=16)
+    parser.add_argument("--spatial-gate-sigma", type=float, default=0.35)
+    parser.add_argument("--spatial-gate-top-k", type=int, default=0)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--optimizer", choices=["adamw", "muon"], default="adamw")
@@ -658,6 +706,15 @@ def main() -> int:
     parser.add_argument("--topology-loss-weight", type=float, default=0.0)
     parser.add_argument("--edge-action-loss-weight", type=float, default=0.0)
     parser.add_argument("--edge-choice-loss-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--corner-closure-presence-loss-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Auxiliary order-invariant loss on the main FACE corner logits for faces that close "
+            "a teacher boundary edge. This connects topology supervision to the tokens used by AR decode."
+        ),
+    )
     parser.add_argument("--edge-choice-candidates", type=int, default=64)
     parser.add_argument("--seed-face-loss-weight", type=float, default=0.0)
     parser.add_argument("--seed-face-loss-stop-step", type=int, default=0)
@@ -726,6 +783,9 @@ def main() -> int:
         "encoder_layers": args.encoder_layers,
         "latent_dim": args.latent_dim,
         "face_output_mode": args.face_output_mode,
+        "voxset_resolution": args.voxset_resolution,
+        "spatial_gate_sigma": args.spatial_gate_sigma,
+        "spatial_gate_top_k": args.spatial_gate_top_k,
         "lazy_load": bool(args.lazy_load),
         "sample_cache_size": int(args.sample_cache_size),
         "track_best_in_memory": bool(args.track_best_in_memory),
@@ -781,6 +841,9 @@ def main() -> int:
         encoder_layers=args.encoder_layers,
         latent_dim=args.latent_dim,
         face_output_mode=args.face_output_mode,
+        voxset_resolution=args.voxset_resolution,
+        spatial_gate_sigma=args.spatial_gate_sigma,
+        spatial_gate_top_k=args.spatial_gate_top_k,
     ).to(device)
     pre_wrap_model_parameters = int(sum(param.numel() for param in model.parameters()))
     pre_wrap_trainable_parameters = int(sum(param.numel() for param in model.parameters() if param.requires_grad))
@@ -869,6 +932,7 @@ def main() -> int:
         topology_loss = None
         edge_action_loss = None
         edge_choice_loss = None
+        corner_closure_presence_loss = None
         seed_face_loss = None
         edge_action_logits = None
         edge_choice_logits = None
@@ -952,6 +1016,13 @@ def main() -> int:
                 (target_weights * valid.to(target_weights.dtype)).sum(),
                 min=1.0,
             )
+            if args.corner_closure_presence_loss_weight > 0:
+                corner_closure_presence_loss = _corner_closure_presence_loss(
+                    torch,
+                    logits,
+                    target_edge_actions,
+                    target_edge_thirds,
+                )
             if args.count_loss_weight > 0:
                 count_logits = outputs.get("count_logits") if isinstance(outputs, dict) else None
                 if count_logits is None and not dist_info["enabled"]:
@@ -978,6 +1049,8 @@ def main() -> int:
                 loss = loss + float(args.seed_face_loss_weight) * seed_face_loss
             if topology_loss is not None:
                 loss = loss + float(args.topology_loss_weight) * topology_loss
+            if corner_closure_presence_loss is not None:
+                loss = loss + float(args.corner_closure_presence_loss_weight) * corner_closure_presence_loss
             if args.edge_action_loss_weight > 0 and hasattr(_unwrap_model(model), "forward_edge_action"):
                 edge_logits = edge_action_logits
                 if edge_logits is None and not dist_info["enabled"]:
@@ -1074,6 +1147,8 @@ def main() -> int:
                 log_item["edge_action_loss"] = float(edge_action_loss.detach().cpu())
             if edge_choice_loss is not None:
                 log_item["edge_choice_loss"] = float(edge_choice_loss.detach().cpu())
+            if corner_closure_presence_loss is not None:
+                log_item["corner_closure_presence_loss"] = float(corner_closure_presence_loss.detach().cpu())
             if seed_face_loss is not None:
                 log_item["seed_face_loss"] = float(seed_face_loss.detach().cpu())
                 log_item["seed_face_loss_active"] = bool(seed_face_loss_active)

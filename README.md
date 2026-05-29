@@ -45,13 +45,24 @@ uvicorn clearmesh.api.server:app --reload
 
 See [docs/api_scaffold.md](docs/api_scaffold.md).
 
+The product web app is served by the API at `http://localhost:8000/`. It uses a
+soft, chat-first generation surface with a side panel, mesh preview workspace,
+pricing page, settings, browser sessions, OAuth hooks, user API keys, and
+Stripe-ready subscription endpoints. Configure OAuth with
+`CLEARMESH_GITHUB_CLIENT_ID` / `CLEARMESH_GITHUB_CLIENT_SECRET` and
+`CLEARMESH_GOOGLE_CLIENT_ID` / `CLEARMESH_GOOGLE_CLIENT_SECRET`; configure
+subscriptions with `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, and
+`CLEARMESH_STRIPE_PRICE_CREATIVE` / `CLEARMESH_STRIPE_PRICE_STUDIO`.
+
 Run the staged product worker, which can become GPU-active with `--execute-heavy`:
 
 ```bash
 python scripts/product/run_pipeline_worker.py --once
 ```
 
-Open the static product UI prototype at [dashboard/product.html](dashboard/product.html).
+The standalone product shell still lives at [dashboard/product.html](dashboard/product.html)
+for static review, but normal use should go through the FastAPI server so auth,
+uploads, jobs, and billing calls work.
 
 ## Evaluation Harness
 

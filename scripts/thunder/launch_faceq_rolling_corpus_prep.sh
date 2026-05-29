@@ -18,6 +18,7 @@ NUM_GPUS="${NUM_GPUS:-1}"
 MODE="${MODE:-prototyping}"
 VCPUS="${VCPUS:-16}"
 PRIMARY_DISK="${PRIMARY_DISK:-1000}"
+EPHEMERAL_DISK="${EPHEMERAL_DISK:-0}"
 TEMPLATE="${TEMPLATE:-base}"
 RUN_STAMP="${RUN_STAMP:-$(date -u +%Y%m%d_%H%M%S)_faceq_rolling_corpus_prep}"
 DOWNLOAD_ROOT="${DOWNLOAD_ROOT:-$REPO_ROOT/.codex_outputs/faceq_rolling_corpus_prep_$RUN_STAMP}"
@@ -107,6 +108,9 @@ PY
 
 if [[ "$CREATE_INSTANCE" = "1" ]]; then
   create_args=(create --gpu "$GPU" --mode "$MODE" --num-gpus "$NUM_GPUS" --primary-disk "$PRIMARY_DISK" --template "$TEMPLATE" --yes --json)
+  if [[ "$EPHEMERAL_DISK" -gt 0 ]]; then
+    create_args+=(--ephemeral-disk "$EPHEMERAL_DISK")
+  fi
   if [[ "$MODE" = "prototyping" ]]; then
     create_args+=(--vcpus "$VCPUS")
   fi
@@ -175,7 +179,7 @@ python -m pip install -q numpy trimesh
 echo CLEARMESH_ROLLING_PREP_BOOTSTRAP_OK
 REMOTE_BOOTSTRAP
 "$TNR_BIN" scp "$bootstrap_script" "$INSTANCE_ID:/tmp/clearmesh_faceq_rolling_corpus_prep_bootstrap.sh"
-printf 'bash /tmp/clearmesh_faceq_rolling_corpus_prep_bootstrap.sh\nexit\n' \
+printf 'bash /tmp/clearmesh_faceq_rolling_corpus_prep_bootstrap.sh </dev/null\nexit\n' \
   | "$TNR_BIN" connect "$INSTANCE_ID" 2>&1 | tee "$bootstrap_log"
 grep -q CLEARMESH_ROLLING_PREP_BOOTSTRAP_OK "$bootstrap_log"
 
@@ -251,11 +255,22 @@ list_completed_archives() {
     if [[ "$FAST_SHARD_ARCHIVE_LIST" = "1" ]]; then
       # Shard outputs use a regular layout:
       #   <prefix>/shardXXXX/lean_face_corpus.tar.gz
-      # Listing only first-level shard directories is much faster than a
-      # recursive walk over every uploaded report/mesh/metadata file.
-      rclone lsf "b2env:$B2_BUCKET/$prefix" --dirs-only 2>/dev/null \
-        | awk '/^shard[0-9]+\/$/ {print p "/" $0 "lean_face_corpus.tar.gz"}' p="$prefix" \
-        >> "$ARCHIVE_LIST_TMP" || true
+      # Some paper-large roots add one lane level:
+      #   <prefix>/<lane>/shardXXXX/lean_face_corpus.tar.gz
+      # Listing directories only is much faster than a recursive walk over
+      # every uploaded report/mesh/metadata file.
+      while IFS= read -r first_dir; do
+        [[ -n "$first_dir" ]] || continue
+        if [[ "$first_dir" =~ ^shard[0-9]+/$ ]]; then
+          printf '%s/%slean_face_corpus.tar.gz\n' "$prefix" "$first_dir"
+          continue
+        fi
+        lane="${first_dir%/}"
+        rclone lsf "b2env:$B2_BUCKET/$prefix/$lane" --dirs-only 2>/dev/null \
+          | awk '/^shard[0-9]+\/$/ {print p "/" lane "/" $0 "lean_face_corpus.tar.gz"}' p="$prefix" lane="$lane" \
+          || true
+      done < <(rclone lsf "b2env:$B2_BUCKET/$prefix" --dirs-only 2>/dev/null || true) \
+        >> "$ARCHIVE_LIST_TMP"
     else
       rclone lsf "b2env:$B2_BUCKET/$prefix" --recursive --files-only 2>/dev/null \
         | awk '/lean_face_corpus\.tar\.gz$/ {print p "/" $0}' p="$prefix" >> "$ARCHIVE_LIST_TMP" || true
@@ -514,7 +529,7 @@ echo CLEARMESH_FACEQ_ROLLING_CORPUS_PREP_LAUNCHED pid=\$(cat $(printf '%q' "$REM
 REMOTE_LAUNCH
 "$TNR_BIN" scp "$remote_script" "$INSTANCE_ID:/tmp/clearmesh_faceq_rolling_corpus_prep.sh"
 "$TNR_BIN" scp "$launch_script" "$INSTANCE_ID:/tmp/clearmesh_faceq_rolling_corpus_prep_launch.sh"
-printf 'bash /tmp/clearmesh_faceq_rolling_corpus_prep_launch.sh\nexit\n' \
+printf 'bash /tmp/clearmesh_faceq_rolling_corpus_prep_launch.sh </dev/null\nexit\n' \
   | "$TNR_BIN" connect "$INSTANCE_ID" | tee "$DOWNLOAD_ROOT/remote_launch.log"
 
 cat > "$DOWNLOAD_ROOT/run_info.json" <<JSON
@@ -534,7 +549,8 @@ cat > "$DOWNLOAD_ROOT/run_info.json" <<JSON
   "poll_interval_seconds": $POLL_INTERVAL_SECONDS,
   "snapshot_keep_count": $SNAPSHOT_KEEP_COUNT,
   "copy_mode": "$COPY_MODE",
-  "primary_disk": $PRIMARY_DISK
+  "primary_disk": $PRIMARY_DISK,
+  "ephemeral_disk": $EPHEMERAL_DISK
 }
 JSON
 

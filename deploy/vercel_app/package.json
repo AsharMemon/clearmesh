@@ -1,0 +1,9 @@
+{
+  "name": "clearmesh-vercel-demo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  }
+}

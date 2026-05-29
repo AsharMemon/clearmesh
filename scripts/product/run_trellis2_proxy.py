@@ -18,8 +18,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", required=True, help="Input image path or file:// URI")
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--output-name", default="trellis_proxy.glb")
+    parser.add_argument(
+        "--face-proxy-output-name",
+        default=None,
+        help="Optional second GLB export decimated for FACE-Q input.",
+    )
     parser.add_argument("--model", default="microsoft/TRELLIS.2-4B")
     parser.add_argument("--decimation-target", type=int, default=1_000_000)
+    parser.add_argument("--face-proxy-decimation-target", type=int, default=4096)
     parser.add_argument("--texture-size", type=int, default=4096)
     remesh_group = parser.add_mutually_exclusive_group()
     remesh_group.add_argument("--remesh", dest="remesh", action="store_true", default=True)
@@ -47,6 +53,10 @@ def main() -> int:
     input_path = resolve_input(args.input)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     output_path = args.output_dir / args.output_name
+    face_proxy_path = args.output_dir / args.face_proxy_output_name if args.face_proxy_output_name else None
+    trellis2_dir = os.getenv("CLEARMESH_TRELLIS2_DIR")
+    if trellis2_dir and Path(trellis2_dir).exists():
+        sys.path.insert(0, str(Path(trellis2_dir).resolve()))
 
     from PIL import Image
     import torch
@@ -63,25 +73,37 @@ def main() -> int:
 
     image = Image.open(input_path).convert("RGBA")
     mesh = pipeline.run(image)[0]
-    mesh.simplify(16_777_216)
-
-    glb = o_voxel.postprocess.to_glb(
-        vertices=mesh.vertices,
-        faces=mesh.faces,
-        attr_volume=mesh.attrs,
-        coords=mesh.coords,
-        attr_layout=mesh.layout,
-        voxel_size=mesh.voxel_size,
-        aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
-        decimation_target=args.decimation_target,
-        texture_size=args.texture_size,
-        remesh=args.remesh,
-        remesh_band=args.remesh_band,
-        remesh_project=args.remesh_project,
-        verbose=True,
+    simplify_target = max(
+        int(args.decimation_target),
+        int(args.face_proxy_decimation_target if face_proxy_path is not None else 0),
     )
-    glb.export(output_path, extension_webp=True)
+    if simplify_target > 0:
+        mesh.simplify(simplify_target)
+
+    def export_glb(path: Path, decimation_target: int) -> None:
+        glb = o_voxel.postprocess.to_glb(
+            vertices=mesh.vertices,
+            faces=mesh.faces,
+            attr_volume=mesh.attrs,
+            coords=mesh.coords,
+            attr_layout=mesh.layout,
+            voxel_size=mesh.voxel_size,
+            aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
+            decimation_target=int(decimation_target),
+            texture_size=args.texture_size,
+            remesh=args.remesh,
+            remesh_band=args.remesh_band,
+            remesh_project=args.remesh_project,
+            verbose=True,
+        )
+        glb.export(path, extension_webp=True)
+
+    export_glb(output_path, args.decimation_target)
+    if face_proxy_path is not None:
+        export_glb(face_proxy_path, args.face_proxy_decimation_target)
     print(output_path)
+    if face_proxy_path is not None:
+        print(face_proxy_path)
     return 0
 
 

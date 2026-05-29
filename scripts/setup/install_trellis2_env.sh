@@ -18,6 +18,20 @@ CUDA_TOOLKIT_APT_PACKAGE="${CUDA_TOOLKIT_APT_PACKAGE:-cuda-toolkit-12-4}"
 
 export CUDA_HOME
 
+ensure_cuda_host_compiler() {
+  # Some cloud CUDA images have g++ installed but nvcc still invokes gcc in a
+  # way that cannot discover cc1plus. Put the real compiler frontend on PATH so
+  # native TRELLIS extensions build reliably.
+  if command -v g++ >/dev/null 2>&1; then
+    cc1plus_path="$(g++ -print-prog-name=cc1plus 2>/dev/null || true)"
+    if [ -n "$cc1plus_path" ] && [ -x "$cc1plus_path" ] && ! command -v cc1plus >/dev/null 2>&1; then
+      sudo ln -sf "$cc1plus_path" /usr/local/bin/cc1plus
+    fi
+    export CXX="${CXX:-$(command -v g++)}"
+    export CUDAHOSTCXX="${CUDAHOSTCXX:-$CXX}"
+  fi
+}
+
 if [ ! -d "$TRELLIS2_DIR/.git" ]; then
   git clone -b main https://github.com/microsoft/TRELLIS.2.git --recursive "$TRELLIS2_DIR"
 else
@@ -64,6 +78,9 @@ PY
 cd "$TRELLIS2_DIR"
 sudo apt-get update
 sudo apt-get install -y \
+  build-essential \
+  gcc \
+  g++ \
   libjpeg-dev \
   zlib1g-dev \
   libpng-dev \
@@ -76,6 +93,7 @@ sudo apt-get install -y \
   libx11-6 \
   libxext6 \
   libsm6
+ensure_cuda_host_compiler
 
 . ./setup.sh --basic
 # TRELLIS.2's image conditioner currently expects the Transformers 4.57 DINOv3

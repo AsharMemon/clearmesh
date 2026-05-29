@@ -55,6 +55,35 @@ class CreditLedger:
             self._write(data)
             return account
 
+    def grant_once(self, team_id: str, credits: int, reason: str, idempotency_key: str) -> CreditAccount:
+        """Grant credits once for an external event such as a Stripe webhook."""
+
+        with self._lock:
+            data = self._read()
+            if idempotency_key and any(
+                event.get("team_id") == team_id
+                and event.get("kind") == reason
+                and event.get("metadata", {}).get("idempotency_key") == idempotency_key
+                for event in data.get("events", [])
+            ):
+                return self._account(data, team_id)
+            account = self._account(data, team_id)
+            account.balance += credits
+            data["accounts"][team_id] = asdict(account)
+            data["events"].append(
+                asdict(
+                    UsageEvent(
+                        team_id=team_id,
+                        job_id="",
+                        credits=credits,
+                        kind=reason,
+                        metadata={"idempotency_key": idempotency_key},
+                    )
+                )
+            )
+            self._write(data)
+            return account
+
     def reserve(self, team_id: str, job_id: str, credits: int) -> CreditAccount:
         with self._lock:
             data = self._read()

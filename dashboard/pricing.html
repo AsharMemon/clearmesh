@@ -1,0 +1,690 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Clearmesh — Pricing</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600&family=Geist+Mono:wght@400;500&family=Newsreader:opsz,wght@6..72,300;6..72,400;6..72,500;6..72,600;6..72,700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="/static/clearmesh-ui/styles.css" />
+<style>
+  .pricing-hero {
+    padding: 72px 36px 36px;
+    text-align: center;
+    max-width: 760px;
+    margin: 0 auto;
+  }
+  .pricing-hero .eyebrow {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-mute);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: 14px;
+    display: inline-block;
+    padding: 5px 11px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--paper-2);
+  }
+  .pricing-hero h1 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 60px;
+    line-height: 1.04;
+    letter-spacing: -0.022em;
+    margin: 0 0 16px;
+    text-wrap: balance;
+  }
+  .pricing-hero h1 em { font-weight: 700; color: inherit; }
+  .pricing-hero p {
+    color: var(--ink-mute);
+    font-size: 16.5px;
+    line-height: 1.55;
+    margin: 0 0 24px;
+  }
+
+  /* billing toggle */
+  .billing-toggle {
+    display: inline-flex;
+    background: var(--paper-2);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 3px;
+    gap: 0;
+  }
+  .billing-toggle button {
+    border: none;
+    background: transparent;
+    padding: 7px 16px;
+    border-radius: 999px;
+    font-family: inherit;
+    font-size: 12.5px;
+    color: var(--ink-mute);
+    cursor: pointer;
+    letter-spacing: 0.01em;
+    position: relative;
+  }
+  .billing-toggle button.active {
+    background: var(--blue);
+    color: var(--paper-2);
+  }
+  .billing-toggle button .save {
+    font-family: var(--mono);
+    font-size: 10px;
+    margin-left: 6px;
+    color: var(--blue);
+  }
+  .billing-toggle button.active .save { color: rgba(255,255,255,0.7); }
+
+  /* tier grid */
+  .tiers {
+    max-width: 1240px;
+    margin: 0 auto;
+    padding: 36px 28px 80px;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 14px;
+  }
+  .tier {
+    background: var(--paper-2);
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    padding: 26px 22px 22px;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+  }
+  .tier.featured {
+    border-color: var(--blue);
+    background:
+      linear-gradient(180deg, #F1F4FB 0%, var(--paper-2) 40%);
+    box-shadow: 0 0 0 1px var(--blue), var(--shadow-card);
+  }
+  .tier .badge {
+    position: absolute;
+    top: -10px;
+    right: 18px;
+    background: var(--blue);
+    color: var(--paper-2);
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 4px 9px;
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+  .tier h3 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 26px;
+    letter-spacing: -0.012em;
+    margin: 0 0 4px;
+    color: var(--ink);
+  }
+  .tier h3 em { font-weight: 700; color: inherit; }
+  .tier .sub {
+    font-size: 13px;
+    color: var(--ink-mute);
+    margin-bottom: 18px;
+    line-height: 1.45;
+    min-height: 36px;
+  }
+  .tier .price {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    margin-bottom: 4px;
+  }
+  .tier .price .num {
+    font-family: var(--serif);
+    font-size: 48px;
+    letter-spacing: -0.025em;
+    color: var(--ink);
+    line-height: 1;
+  }
+  .tier .price .unit {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-soft);
+  }
+  .tier .billed {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--ink-soft);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    margin-bottom: 18px;
+    min-height: 14px;
+  }
+  .tier .cta {
+    width: 100%;
+    padding: 11px 14px;
+    border-radius: 9px;
+    font-size: 13px;
+    font-weight: 500;
+    font-family: inherit;
+    border: 1px solid var(--line);
+    background: var(--paper);
+    color: var(--ink);
+    cursor: pointer;
+    margin-bottom: 22px;
+    transition: background 120ms, border-color 120ms;
+  }
+  .tier .cta:hover { background: var(--paper-3); border-color: var(--line-strong); }
+  .tier.featured .cta {
+    background: var(--blue);
+    color: var(--paper-2);
+    border-color: var(--blue);
+  }
+  .tier.featured .cta:hover { background: #213e75; }
+
+  .tier .what {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--ink-soft);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 10px;
+  }
+  .tier ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+  }
+  .tier li {
+    font-size: 13px;
+    color: var(--ink-2);
+    line-height: 1.45;
+    display: flex;
+    gap: 9px;
+    align-items: flex-start;
+  }
+  .tier li .check {
+    flex-shrink: 0;
+    margin-top: 4px;
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    background: var(--blue-soft);
+    color: var(--blue);
+    display: grid;
+    place-items: center;
+  }
+  .tier li .check svg { width: 8px; height: 8px; }
+  .tier li b {
+    color: var(--ink);
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+  .tier li.muted { color: var(--ink-soft); }
+  .tier li.muted .check { background: transparent; border: 1px dashed var(--line-strong); color: var(--ink-soft); }
+
+  /* comparison */
+  .compare-wrap {
+    border-top: 1px solid var(--line);
+    background: var(--paper-2);
+    padding: 64px 36px 80px;
+  }
+  .compare-inner {
+    max-width: 1180px;
+    margin: 0 auto;
+  }
+  .compare-inner .label {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-soft);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+  .compare-inner h2 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 36px;
+    letter-spacing: -0.015em;
+    margin: 0 0 28px;
+  }
+  .compare-inner h2 em { font-weight: 700; color: inherit; }
+  .compare-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  .compare-table thead th {
+    text-align: left;
+    padding: 12px 14px;
+    font-family: var(--serif);
+    font-size: 18px;
+    font-weight: 400;
+    color: var(--ink);
+    border-bottom: 1px solid var(--line);
+    letter-spacing: -0.005em;
+    width: 17%;
+  }
+  .compare-table thead th:first-child {
+    width: 32%;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-soft);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 500;
+  }
+  .compare-table th.feat { color: var(--blue); }
+  .compare-table .section-row td {
+    background: var(--paper);
+    padding: 14px 14px 6px;
+    border-bottom: 1px solid var(--line);
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--ink-soft);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .compare-table tbody td {
+    padding: 11px 14px;
+    border-bottom: 1px solid var(--line);
+    color: var(--ink-2);
+    font-variant-numeric: tabular-nums;
+  }
+  .compare-table tbody td:first-child {
+    color: var(--ink);
+  }
+  .compare-table .checkmk {
+    width: 14px; height: 14px;
+    border-radius: 50%;
+    background: var(--blue-soft);
+    color: var(--blue);
+    display: inline-grid;
+    place-items: center;
+  }
+  .compare-table .checkmk svg { width: 9px; height: 9px; }
+  .compare-table .dash {
+    color: var(--ink-soft);
+    font-family: var(--mono);
+  }
+
+  /* faq */
+  .faq {
+    padding: 72px 36px 96px;
+    max-width: 900px;
+    margin: 0 auto;
+  }
+  .faq h2 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 36px;
+    letter-spacing: -0.015em;
+    margin: 0 0 24px;
+    text-align: center;
+  }
+  .faq h2 em { font-weight: 700; color: inherit; }
+  .faq-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 28px 40px;
+    margin-top: 18px;
+  }
+  .faq-item h4 {
+    font-size: 14.5px;
+    color: var(--ink);
+    margin: 0 0 6px;
+    font-weight: 500;
+  }
+  .faq-item p {
+    color: var(--ink-mute);
+    font-size: 13.5px;
+    line-height: 1.55;
+    margin: 0;
+  }
+</style>
+</head>
+<body>
+
+<header class="site-header">
+  <a class="brand" href="/">Clear<em>mesh</em></a>
+  <nav class="nav">
+    <a href="/">Home</a>
+    <a href="/app">Studio</a>
+    <a href="/pricing" class="active">Pricing</a>
+    <a href="#">Gallery</a>
+  </nav>
+  <div class="spacer"></div>
+  <a href="#" class="btn btn-ghost">Sign in</a>
+  <a href="/app" class="btn btn-blue">Open Studio</a>
+</header>
+
+<main>
+  <section class="pricing-hero">
+    <div class="eyebrow">Pricing</div>
+    <h1>Generate <em>more</em>, pay only for what you make.</h1>
+    <p>Every plan ships with the full editor, all export formats, and quad-dominant topology.
+       Higher tiers raise the credit ceiling and unlock parallel generation.</p>
+    <div class="billing-toggle" id="billing-toggle">
+      <button class="active" data-bill="monthly">Monthly</button>
+      <button data-bill="yearly">Yearly <span class="save">−20%</span></button>
+    </div>
+  </section>
+
+  <!-- TIERS -->
+  <section class="tiers">
+
+    <!-- FREE -->
+    <div class="tier">
+      <h3>Free</h3>
+      <div class="sub">For trying things out and the occasional hobby print.</div>
+      <div class="price">
+        <span class="num" data-monthly="$0" data-yearly="$0">$0</span>
+        <span class="unit">/ month</span>
+      </div>
+      <div class="billed">no card required</div>
+      <button class="cta" data-tier="free">Start free</button>
+      <div class="what">Includes</div>
+      <ul>
+        <li><span class="check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"></path></svg></span><b>50</b> generations / month</li>
+        <li><span class="check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"></path></svg></span>Text to mesh</li>
+        <li><span class="check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"></path></svg></span>GLB & OBJ export</li>
+        <li><span class="check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"></path></svg></span>Full editor & wireframe</li>
+        <li class="muted"><span class="check"></span>Personal use only</li>
+      </ul>
+    </div>
+
+    <!-- PRO -->
+    <div class="tier featured">
+      <span class="badge">Most popular</span>
+      <h3>Pro</h3>
+      <div class="sub">For freelancers shipping assets every week.</div>
+      <div class="price">
+        <span class="num" data-monthly="$24" data-yearly="$19">$24</span>
+        <span class="unit">/ month</span>
+      </div>
+      <div class="billed" data-monthly="billed monthly" data-yearly="billed yearly · $228">billed monthly</div>
+      <button class="cta" data-tier="pro">Start Pro</button>
+      <div class="what">Everything in Free, plus</div>
+      <ul>
+        <li><span class="check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"></path></svg></span><b>500</b> generations / month</li>
+        <li><span class="check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"></path></svg></span>Image-to-mesh conditioning</li>
+        <li><span class="check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"></path></svg></span>All export formats (STL, FBX)</li>
+        <li><span class="check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"></path></svg></span>Same-seed refinement</li>
+        <li><span class="check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"></path></svg></span>Commercial license</li>
+        <li><span class="check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"></path></svg></span>Priority GPU queue</li>
+      </ul>
+    </div>
+
+    <!-- STUDIO -->
+    <div class="tier">
+      <h3>Studio</h3>
+      <div class="sub">For teams shipping games, products, or printed objects.</div>
+      <div class="price">
+        <span class="num" data-monthly="$89" data-yearly="$71">$89</span>
+        <span class="unit">/ seat / month</span>
+      </div>
+      <div class="billed" data-monthly="3 seat minimum" data-yearly="3 seat minimum · $852 / seat">3 seat minimum</div>
+      <button class="cta" data-tier="studio">Start Studio</button>
+      <div class="what">Everything in Pro, plus</div>
+      <ul>
+        <li><span class="check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"></path></svg></span><b>2,500</b> generations / seat</li>
+        <li><span class="check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"></path></svg></span>Parallel generation (4×)</li>
+        <li><span class="check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"></path></svg></span>Shared team library</li>
+        <li><span class="check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"></path></svg></span>API access (10k req / mo)</li>
+        <li><span class="check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"></path></svg></span>Blender / Unity bridges</li>
+        <li><span class="check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"></path></svg></span>SSO &amp; role permissions</li>
+      </ul>
+    </div>
+
+    <!-- ENTERPRISE -->
+    <div class="tier">
+      <h3>Enterprise</h3>
+      <div class="sub">For studios with dedicated training and private deployments.</div>
+      <div class="price">
+        <span class="num">Custom</span>
+      </div>
+      <div class="billed">annual contract</div>
+      <button class="cta" data-tier="enterprise">Contact us</button>
+      <div class="what">Everything in Studio, plus</div>
+      <ul>
+        <li><span class="check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"></path></svg></span>Unlimited generations</li>
+        <li><span class="check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"></path></svg></span>Dedicated GPU cluster</li>
+        <li><span class="check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"></path></svg></span>Private deployment (on-prem or VPC)</li>
+        <li><span class="check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"></path></svg></span>Custom-trained models</li>
+        <li><span class="check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"></path></svg></span>Dedicated solutions engineer</li>
+        <li><span class="check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"></path></svg></span>99.95% SLA</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- COMPARE -->
+  <section class="compare-wrap">
+    <div class="compare-inner">
+      <div class="label">Compare plans</div>
+      <h2>Pick the tier that <em>fits</em>.</h2>
+      <table class="compare-table">
+        <thead>
+          <tr>
+            <th>Feature</th>
+            <th>Free</th>
+            <th class="feat">Pro</th>
+            <th>Studio</th>
+            <th>Enterprise</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="section-row"><td colspan="5">Generation</td></tr>
+          <tr>
+            <td>Monthly generations</td>
+            <td>50</td><td>500</td><td>2,500 / seat</td><td>Unlimited</td>
+          </tr>
+          <tr>
+            <td>Text-to-mesh</td>
+            <td><span class="checkmk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5"><path d="m5 12 5 5L20 7"></path></svg></span></td>
+            <td><span class="checkmk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5"><path d="m5 12 5 5L20 7"></path></svg></span></td>
+            <td><span class="checkmk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5"><path d="m5 12 5 5L20 7"></path></svg></span></td>
+            <td><span class="checkmk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5"><path d="m5 12 5 5L20 7"></path></svg></span></td>
+          </tr>
+          <tr>
+            <td>Image-to-mesh</td>
+            <td><span class="dash">—</span></td>
+            <td><span class="checkmk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5"><path d="m5 12 5 5L20 7"></path></svg></span></td>
+            <td><span class="checkmk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5"><path d="m5 12 5 5L20 7"></path></svg></span></td>
+            <td><span class="checkmk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5"><path d="m5 12 5 5L20 7"></path></svg></span></td>
+          </tr>
+          <tr>
+            <td>Parallel generation</td>
+            <td><span class="dash">—</span></td>
+            <td>1×</td><td>4×</td><td>16×</td>
+          </tr>
+          <tr>
+            <td>Queue priority</td>
+            <td>Standard</td><td>Priority</td><td>Dedicated</td><td>Reserved cluster</td>
+          </tr>
+
+          <tr class="section-row"><td colspan="5">Export & licensing</td></tr>
+          <tr>
+            <td>GLB / OBJ</td>
+            <td><span class="checkmk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5"><path d="m5 12 5 5L20 7"></path></svg></span></td>
+            <td><span class="checkmk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5"><path d="m5 12 5 5L20 7"></path></svg></span></td>
+            <td><span class="checkmk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5"><path d="m5 12 5 5L20 7"></path></svg></span></td>
+            <td><span class="checkmk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5"><path d="m5 12 5 5L20 7"></path></svg></span></td>
+          </tr>
+          <tr>
+            <td>STL / FBX</td>
+            <td><span class="dash">—</span></td>
+            <td><span class="checkmk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5"><path d="m5 12 5 5L20 7"></path></svg></span></td>
+            <td><span class="checkmk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5"><path d="m5 12 5 5L20 7"></path></svg></span></td>
+            <td><span class="checkmk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5"><path d="m5 12 5 5L20 7"></path></svg></span></td>
+          </tr>
+          <tr>
+            <td>Commercial license</td>
+            <td><span class="dash">—</span></td>
+            <td><span class="checkmk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5"><path d="m5 12 5 5L20 7"></path></svg></span></td>
+            <td><span class="checkmk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5"><path d="m5 12 5 5L20 7"></path></svg></span></td>
+            <td><span class="checkmk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5"><path d="m5 12 5 5L20 7"></path></svg></span></td>
+          </tr>
+
+          <tr class="section-row"><td colspan="5">Team & integrations</td></tr>
+          <tr>
+            <td>Shared library</td>
+            <td><span class="dash">—</span></td>
+            <td><span class="dash">—</span></td>
+            <td><span class="checkmk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5"><path d="m5 12 5 5L20 7"></path></svg></span></td>
+            <td><span class="checkmk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5"><path d="m5 12 5 5L20 7"></path></svg></span></td>
+          </tr>
+          <tr>
+            <td>API access</td>
+            <td><span class="dash">—</span></td>
+            <td>1k / mo</td><td>10k / mo</td><td>Unlimited</td>
+          </tr>
+          <tr>
+            <td>Blender / Unity bridge</td>
+            <td><span class="dash">—</span></td>
+            <td><span class="dash">—</span></td>
+            <td><span class="checkmk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5"><path d="m5 12 5 5L20 7"></path></svg></span></td>
+            <td><span class="checkmk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5"><path d="m5 12 5 5L20 7"></path></svg></span></td>
+          </tr>
+          <tr>
+            <td>SSO &amp; role permissions</td>
+            <td><span class="dash">—</span></td>
+            <td><span class="dash">—</span></td>
+            <td><span class="checkmk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5"><path d="m5 12 5 5L20 7"></path></svg></span></td>
+            <td><span class="checkmk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5"><path d="m5 12 5 5L20 7"></path></svg></span></td>
+          </tr>
+          <tr>
+            <td>SLA</td>
+            <td><span class="dash">—</span></td>
+            <td><span class="dash">—</span></td>
+            <td>99.9%</td>
+            <td>99.95%</td>
+          </tr>
+          <tr>
+            <td>On-prem / VPC deploy</td>
+            <td><span class="dash">—</span></td>
+            <td><span class="dash">—</span></td>
+            <td><span class="dash">—</span></td>
+            <td><span class="checkmk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5"><path d="m5 12 5 5L20 7"></path></svg></span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- FAQ -->
+  <section class="faq">
+    <h2>Frequently <em>asked</em></h2>
+    <div class="faq-grid">
+      <div class="faq-item">
+        <h4>What counts as a generation?</h4>
+        <p>One prompt or one image-to-mesh run equals one generation, regardless of how many variations come back. Refinements at the same seed are billed at a quarter credit.</p>
+      </div>
+      <div class="faq-item">
+        <h4>Can I use Clearmesh meshes commercially?</h4>
+        <p>Yes, starting on Pro. Free-tier meshes are licensed for personal and non-commercial use; upgrade any time and the license retroactively covers everything in your library.</p>
+      </div>
+      <div class="faq-item">
+        <h4>Do unused credits roll over?</h4>
+        <p>Pro and Studio plans roll over up to one month of unused generations. Heavy weeks balance against quieter ones without forcing a higher tier.</p>
+      </div>
+      <div class="faq-item">
+        <h4>How does the Blender bridge work?</h4>
+        <p>An installable add-on that lets you open the Studio inside Blender, drop meshes straight into your scene, and re-prompt without leaving your viewport.</p>
+      </div>
+      <div class="faq-item">
+        <h4>Can I cancel any time?</h4>
+        <p>Yes. Monthly plans cancel at the next cycle, annual plans are prorated. Your library and exports stay accessible on the free tier afterwards.</p>
+      </div>
+      <div class="faq-item">
+        <h4>Is there an academic discount?</h4>
+        <p>Verified students and accredited educators get Pro at 50% off and Studio at 30% off. Email <span style="font-family:var(--mono);color:var(--blue);">edu@clearmesh.app</span>.</p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <div class="footer-row">
+    <div class="footer-col">
+      <div class="footer-tag">Clear<em>mesh</em></div>
+      <div class="footer-fine">Text & image to 3D, for designers, makers, and engineers.</div>
+    </div>
+    <div class="footer-col">
+      <h5>Product</h5>
+      <a href="/app">Studio</a>
+      <a href="/pricing">Pricing</a>
+      <a href="#">Gallery</a>
+      <a href="#">Changelog</a>
+    </div>
+    <div class="footer-col">
+      <h5>Resources</h5>
+      <a href="#">API</a>
+      <a href="#">Blender bridge</a>
+      <a href="#">Status</a>
+    </div>
+    <div class="footer-col">
+      <h5>Company</h5>
+      <a href="#">About</a>
+      <a href="#">Careers</a>
+      <a href="#">Contact</a>
+      <a href="#">Privacy</a>
+    </div>
+  </div>
+  <div class="footer-bottom">
+    <span>© 2026 Clearmesh, Inc.</span>
+    <span style="font-family:var(--mono);">v0.6 · img2mesh</span>
+  </div>
+</footer>
+
+<script>
+  // Billing toggle — swap prices between monthly/yearly
+  const toggle = document.getElementById('billing-toggle');
+  toggle.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-bill]');
+    if (!btn) return;
+    toggle.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    const bill = btn.getAttribute('data-bill');
+    document.querySelectorAll('[data-monthly]').forEach(el => {
+      el.textContent = el.getAttribute('data-' + bill);
+    });
+  });
+
+  async function billingFetch(url, options = {}) {
+    const res = await fetch(url, { credentials: 'same-origin', ...options, headers: { Accept: 'application/json', ...(options.headers || {}) } });
+    if (res.status !== 401) return res;
+    window.location.href = '/app';
+    return res;
+  }
+
+  document.querySelectorAll('[data-tier]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const tier = button.getAttribute('data-tier');
+      if (tier === 'free') { window.location.href = '/app'; return; }
+      if (tier === 'enterprise') { window.location.href = 'mailto:hello@clearmesh.app?subject=Enterprise%20Clearmesh'; return; }
+      const original = button.textContent;
+      button.disabled = true;
+      button.textContent = 'Opening checkout...';
+      try {
+        const res = await billingFetch('/api/billing?action=checkout', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tier }),
+        });
+        const payload = await res.json().catch(() => ({}));
+        if (payload.checkout_url) window.location.href = payload.checkout_url;
+        else if (payload.status === 'setup_needed') alert(payload.detail || 'Checkout is not configured yet.');
+        else throw new Error(payload.detail || 'Checkout failed');
+      } catch (err) {
+        alert(err.message || 'Checkout failed');
+      } finally {
+        button.disabled = false;
+        button.textContent = original;
+      }
+    });
+  });
+</script>
+
+</body>
+</html>

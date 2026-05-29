@@ -19,6 +19,7 @@ TEMPLATE="${TEMPLATE:-base}"
 WAIT_INTERVAL_SEC="${WAIT_INTERVAL_SEC:-10}"
 WAIT_TIMEOUT_SEC="${WAIT_TIMEOUT_SEC:-1800}"
 WAIT_FOR_RUNNING="${WAIT_FOR_RUNNING:-$CREATE_INSTANCE}"
+POST_RUNNING_SLEEP_SEC="${POST_RUNNING_SLEEP_SEC:-0}"
 BOOTSTRAP_REMOTE="${BOOTSTRAP_REMOTE:-0}"
 SYNC_HF_TOKEN="${SYNC_HF_TOKEN:-1}"
 QUEUE_SHARD_IDS="${QUEUE_SHARD_IDS:?QUEUE_SHARD_IDS is required, e.g. '0033 0038 0043'}"
@@ -238,6 +239,10 @@ PY
     echo "Thunder instance $INSTANCE_ID did not reach RUNNING within ${WAIT_TIMEOUT_SEC}s." >&2
     exit 21
   fi
+  if [[ "$POST_RUNNING_SLEEP_SEC" != "0" ]]; then
+    echo "Thunder instance $INSTANCE_ID is RUNNING; sleeping ${POST_RUNNING_SLEEP_SEC}s for SSH readiness..."
+    sleep "$POST_RUNNING_SLEEP_SEC"
+  fi
 fi
 
 if [[ "$BOOTSTRAP_REMOTE" = "1" ]]; then
@@ -379,14 +384,14 @@ nohup env \\
   CURATION_TARGET=$(printf '%q' "${CURATION_TARGET:-auto}") \\
   SCAN_LIMIT=$(printf '%q' "${SCAN_LIMIT:-0}") \\
   MIN_QUALITY=$(printf '%q' "${MIN_QUALITY:-2}") \\
-  DOWNLOAD_PROCESSES=$(printf '%q' "${DOWNLOAD_PROCESSES:-16}") \\
+  DOWNLOAD_PROCESSES=$(printf '%q' "${DOWNLOAD_PROCESSES:-8}") \\
   DOWNLOAD_FALLBACK_PROCESSES=$(printf '%q' "${DOWNLOAD_FALLBACK_PROCESSES:-1}") \\
   DOWNLOAD_BATCH_SIZE=$(printf '%q' "${DOWNLOAD_BATCH_SIZE:-50}") \\
   DOWNLOAD_BATCH_TIMEOUT_SECONDS=$(printf '%q' "${DOWNLOAD_BATCH_TIMEOUT_SECONDS:-600}") \\
   DOWNLOAD_BATCH_RETRIES=$(printf '%q' "${DOWNLOAD_BATCH_RETRIES:-2}") \\
   DOWNLOAD_RETRY_SLEEP_SECONDS=$(printf '%q' "${DOWNLOAD_RETRY_SLEEP_SECONDS:-15}") \\
   DOWNLOAD_RATE_LIMIT_SLEEP_SECONDS=$(printf '%q' "${DOWNLOAD_RATE_LIMIT_SLEEP_SECONDS:-600}") \\
-  TEXVERSE_DOWNLOAD_WORKERS=$(printf '%q' "${TEXVERSE_DOWNLOAD_WORKERS:-${DOWNLOAD_PROCESSES:-16}}") \\
+  TEXVERSE_DOWNLOAD_WORKERS=$(printf '%q' "${TEXVERSE_DOWNLOAD_WORKERS:-${DOWNLOAD_PROCESSES:-8}}") \\
   TEXVERSE_MAX_SIZE_MB=$(printf '%q' "${TEXVERSE_MAX_SIZE_MB:-0}") \\
   TEXVERSE_CLEANUP_CACHE_EACH=$(printf '%q' "${TEXVERSE_CLEANUP_CACHE_EACH:-0}") \\
   OBJAVERSEXL_INCLUDE_SOURCES=$(printf '%q' "$OBJAVERSEXL_INCLUDE_SOURCES") \\
@@ -410,6 +415,9 @@ nohup env \\
   VOXEL_RESOLUTION=$(printf '%q' "${VOXEL_RESOLUTION:-64}") \\
   MESH_VOXEL_MAX_FACES=$(printf '%q' "${MESH_VOXEL_MAX_FACES:-5000}") \\
   STRICT_TARGET_PROGRESS_EVERY=$(printf '%q' "${STRICT_TARGET_PROGRESS_EVERY:-100}") \\
+  STRICT_TARGET_WORKERS=$(printf '%q' "${STRICT_TARGET_WORKERS:-2}") \\
+  TOKEN_BUILD_WORKERS=$(printf '%q' "${TOKEN_BUILD_WORKERS:-1}") \\
+  FORCE_MIN_POSTPROCESS_WORKERS=$(printf '%q' "${FORCE_MIN_POSTPROCESS_WORKERS:-0}") \\
   TARGET_MAX_OUTPUT_COMPONENTS=$(printf '%q' "${TARGET_MAX_OUTPUT_COMPONENTS:-1}") \\
   TARGET_MAX_BOUNDARY_LOOPS=$(printf '%q' "${TARGET_MAX_BOUNDARY_LOOPS:-0}") \\
   TARGET_MAX_NONMANIFOLD_EDGES=$(printf '%q' "${TARGET_MAX_NONMANIFOLD_EDGES:-0}") \\
@@ -447,7 +455,7 @@ cat > "$setup_dir/queue_info.json" <<JSON
   "wait_for_pid_file": "$WAIT_FOR_PID_FILE",
   "prequeue_completed_root": "$PREQUEUE_COMPLETED_ROOT",
   "prequeue_b2_prefix": "$PREQUEUE_B2_PREFIX",
-  "texverse_download_workers": ${TEXVERSE_DOWNLOAD_WORKERS:-${DOWNLOAD_PROCESSES:-16}},
+  "texverse_download_workers": ${TEXVERSE_DOWNLOAD_WORKERS:-${DOWNLOAD_PROCESSES:-8}},
   "texverse_max_size_mb": ${TEXVERSE_MAX_SIZE_MB:-0},
   "texverse_cleanup_cache_each": "${TEXVERSE_CLEANUP_CACHE_EACH:-0}",
   "objaversexl_include_sources": "$OBJAVERSEXL_INCLUDE_SOURCES",
@@ -466,6 +474,8 @@ cat > "$setup_dir/queue_info.json" <<JSON
   "target_max_boundary_loops": ${TARGET_MAX_BOUNDARY_LOOPS:-0},
   "target_max_nonmanifold_edges": ${TARGET_MAX_NONMANIFOLD_EDGES:-0},
   "target_require_watertight": "${TARGET_REQUIRE_WATERTIGHT:-1}",
+  "strict_target_workers": ${STRICT_TARGET_WORKERS:-2},
+  "token_build_workers": ${TOKEN_BUILD_WORKERS:-1},
   "gate_profile": "${GATE_PROFILE:-strict}",
   "gate_max_boundary_edges": "${GATE_MAX_BOUNDARY_EDGES:-}",
   "gate_max_nonmanifold_edges": "${GATE_MAX_NONMANIFOLD_EDGES:-}",

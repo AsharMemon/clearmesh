@@ -39,6 +39,9 @@ DECODER_BACKEND="${DECODER_BACKEND:-cross_attn}"
 ENCODER_LAYERS="${ENCODER_LAYERS:-8}"
 LATENT_DIM="${LATENT_DIM:-64}"
 FACE_OUTPUT_MODE="${FACE_OUTPUT_MODE:-geometry}"
+VOXSET_RESOLUTION="${VOXSET_RESOLUTION:-16}"
+SPATIAL_GATE_SIGMA="${SPATIAL_GATE_SIGMA:-0.35}"
+SPATIAL_GATE_TOP_K="${SPATIAL_GATE_TOP_K:-0}"
 LR="${LR:-3e-4}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-0.1}"
 OPTIMIZER="${OPTIMIZER:-muon}"
@@ -265,6 +268,9 @@ status train_started "steps=$(printf '%q' "$STEPS") nproc=$(printf '%q' "$TORCHR
   --encoder-layers $(printf '%q' "$ENCODER_LAYERS") \\
   --latent-dim $(printf '%q' "$LATENT_DIM") \\
   --face-output-mode $(printf '%q' "$FACE_OUTPUT_MODE") \\
+  --voxset-resolution $(printf '%q' "$VOXSET_RESOLUTION") \\
+  --spatial-gate-sigma $(printf '%q' "$SPATIAL_GATE_SIGMA") \\
+  --spatial-gate-top-k $(printf '%q' "$SPATIAL_GATE_TOP_K") \\
   --corner-head causal \\
   --count-loss-weight $(printf '%q' "$COUNT_LOSS_WEIGHT") \\
   --topology-loss-weight $(printf '%q' "$TOPOLOGY_LOSS_WEIGHT") \\
@@ -311,6 +317,11 @@ cat > "$OUT_DIR/vast_run_info_${INSTANCE_ID}.json" <<JSON
   "layers": $LAYERS,
   "heads": $HEADS,
   "condition_tokens": $CONDITION_TOKENS,
+  "condition_backend": "$CONDITION_BACKEND",
+  "decoder_backend": "$DECODER_BACKEND",
+  "voxset_resolution": $VOXSET_RESOLUTION,
+  "spatial_gate_sigma": $SPATIAL_GATE_SIGMA,
+  "spatial_gate_top_k": $SPATIAL_GATE_TOP_K,
   "torchrun_nproc_per_node": $TORCHRUN_NPROC_PER_NODE,
   "distributed_strategy": "$DISTRIBUTED_STRATEGY"
 }
